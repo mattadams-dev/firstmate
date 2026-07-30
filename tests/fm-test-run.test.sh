@@ -336,6 +336,82 @@ SH
   pass "fail-on-gate-skip converts herdr-not-found into a hard failure"
 }
 
+# The required Herdr CI lane must fail on EVERY skip that means an unmet Herdr
+# precondition, so a single token is not enough: an over-skipping gate would
+# otherwise turn that lane green without running a single real-Herdr body.
+test_fail_on_gate_skip_is_repeatable() {
+  local tmp skip_f out rc
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-fail-skip-multi.XXXXXX")
+  skip_f="$tmp/skip.test.sh"
+  out="$tmp/out.txt"
+  cat >"$skip_f" <<'SH'
+#!/usr/bin/env bash
+echo "skip: herdr lab unavailable: no running default Herdr session for the lab fleet-state tripwire"
+exit 0
+SH
+  chmod +x "$skip_f"
+  set +e
+  "$RUNNER" --fail-on-gate-skip 'herdr not found' \
+    --fail-on-gate-skip 'herdr lab unavailable' "$skip_f" >"$out" 2>"$tmp/err.txt"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "a second --fail-on-gate-skip token must also be enforced"
+  grep -q 'FM_TEST_SUMMARY total=1 failed=1' "$out" \
+    || fail "summary must report failed=1 for the later token: $(grep FM_TEST_SUMMARY "$out")"
+  grep -Fq 'skip: herdr lab unavailable' "$tmp/err.txt" \
+    || fail "runner must log which required token was seen"
+  # A skip that matches none of the listed tokens stays a legitimate skip.
+  cat >"$skip_f" <<'SH'
+#!/usr/bin/env bash
+echo "skip: python3 not found"
+exit 0
+SH
+  set +e
+  "$RUNNER" --fail-on-gate-skip 'herdr not found' \
+    --fail-on-gate-skip 'herdr lab unavailable' "$skip_f" >"$out" 2>"$tmp/err.txt"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "an unlisted skip token must remain a passing gate skip"
+  grep -q 'FM_TEST_SUMMARY total=1 failed=0 skipped_gate=1' "$out" \
+    || fail "unlisted skip must still count as a gate skip: $(grep FM_TEST_SUMMARY "$out")"
+  # Bind the runner's enforcement to the reason the real gate really prints: run
+  # bin/fm-herdr-lab.sh gate where no lab can exist, feed its exact output to the
+  # runner as a skip line, and require the token to catch it. A renamed cause or
+  # token then fails here instead of silently going green in the Herdr CI lane.
+  # An unsafe probe name is the one refusal that is deterministic everywhere,
+  # including the CI Herdr lane where a default session really is running.
+  # The token is taken from the gate's own gate-token interface, exactly as the
+  # CI lane takes it, so neither side can be renamed without the other.
+  local real_reason real_token
+  real_reason=$("$ROOT/bin/fm-herdr-lab.sh" gate default) \
+    && fail "the lab gate must refuse an unsafe probe session name"
+  [ -n "$real_reason" ] || fail "the lab gate printed no reason to enforce"
+  real_token=$("$ROOT/bin/fm-herdr-lab.sh" gate-token) \
+    || fail "the lab gate must publish its skip token"
+  printf '#!/usr/bin/env bash\necho %s\nexit 0\n' "$(printf '%q' "skip: $real_reason")" >"$skip_f"
+  set +e
+  "$RUNNER" --fail-on-gate-skip "$real_token" "$skip_f" >"$out" 2>"$tmp/err.txt"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "the real gate reason escaped the runner's required-token guard"
+  # An empty token matches nothing, so accepting one would turn the CI lane's
+  # guard off without a word. It must be a loud argument error instead.
+  set +e
+  "$RUNNER" --fail-on-gate-skip '' "$skip_f" >"$out" 2>"$tmp/err.txt"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "an empty --fail-on-gate-skip token must not silently disable the guard"
+  grep -q 'non-empty token' "$tmp/err.txt" \
+    || fail "the runner must say why an empty gate-skip token is refused: $(cat "$tmp/err.txt")"
+  set +e
+  "$RUNNER" --fail-on-gate-skip= "$skip_f" >"$out" 2>"$tmp/err.txt"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "the equals form of an empty gate-skip token must be refused too"
+  rm -rf "$tmp"
+  pass "fail-on-gate-skip is repeatable and catches the real lab-gate reason"
+}
+
 test_exclude_family() {
   local listed
   listed=$("$RUNNER" --list --all --exclude-family real-herdr-gated)
@@ -577,6 +653,7 @@ test_timing_markers_and_json
 test_aggregate_exit_behavior
 test_gate_skip_accounting
 test_fail_on_gate_skip_token
+test_fail_on_gate_skip_is_repeatable
 test_exclude_family
 test_portable_shard_union_and_coverage_guard
 test_jobs_requires_proven_isolated

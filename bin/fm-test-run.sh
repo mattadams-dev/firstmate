@@ -33,9 +33,15 @@
 #                   dedicated required Herdr lane owns that coverage)
 #   --fail-on-gate-skip <token>
 #                   after each script, fail the run if any output line contains
-#                   "skip: <token>" (e.g. --fail-on-gate-skip 'herdr not found').
-#                   The required Herdr CI lane uses this so a missing pin cannot
-#                   silently pass as a gate skip.
+#                   "skip: <token>" (e.g. --fail-on-gate-skip 'herdr lab
+#                   unavailable'). Repeatable; any listed token fails the run.
+#                   The token must be non-empty: an empty one matches nothing and
+#                   would silently disable the guard the caller asked for.
+#                   The required Herdr CI lane lists every token that means a
+#                   real-Herdr precondition went unmet, so neither a missing pin
+#                   nor a lab it could not provision can silently pass as a gate
+#                   skip. It derives the lab token from the gate's own owner
+#                   (bin/fm-herdr-lab.sh gate-token) so the two cannot drift.
 #   --jobs N        run the selected scripts with up to N concurrent workers.
 #                   Default is 1 (serial). N>1 is allowed only when every
 #                   selected script is in the proven-isolated set
@@ -79,7 +85,7 @@ BASE_REF=origin/main
 JSON_PATH=
 SCRIPTS=()
 EXCLUDE_FAMILIES=()
-FAIL_ON_GATE_SKIP=
+FAIL_ON_GATE_SKIP_TOKENS=()
 JOBS=1
 JOBS_MAX=8
 
@@ -792,6 +798,13 @@ detect_gate_skip_token() {
   grep -F -q "skip: $token" "$file" 2>/dev/null
 }
 
+# An empty token matches nothing, so accepting one would silently disable the
+# guard the caller asked for. Callers derive tokens from other commands (the CI
+# Herdr lane uses bin/fm-herdr-lab.sh gate-token), so refuse it here instead.
+require_gate_skip_token() {
+  [ -n "$1" ] || die "--fail-on-gate-skip requires a non-empty token; an empty token would silently disable the guard"
+}
+
 apply_exclude_families() {
   local s fam keep ex
   local -a kept=()
@@ -986,12 +999,14 @@ while [ "$#" -gt 0 ]; do
       shift
       ;;
     --fail-on-gate-skip)
-      [ "$#" -gt 1 ] || die "--fail-on-gate-skip requires a token (e.g. 'herdr not found')"
-      FAIL_ON_GATE_SKIP=$2
+      [ "$#" -gt 1 ] || die "--fail-on-gate-skip requires a token (e.g. 'herdr lab unavailable')"
+      require_gate_skip_token "$2"
+      FAIL_ON_GATE_SKIP_TOKENS+=("$2")
       shift 2
       ;;
     --fail-on-gate-skip=*)
-      FAIL_ON_GATE_SKIP=${1#--fail-on-gate-skip=}
+      require_gate_skip_token "${1#--fail-on-gate-skip=}"
+      FAIL_ON_GATE_SKIP_TOKENS+=("${1#--fail-on-gate-skip=}")
       shift
       ;;
     -h|--help)
@@ -1092,8 +1107,8 @@ apply_exclude_families
 if [ "${#EXCLUDE_FAMILIES[@]}" -gt 0 ]; then
   SELECTION_DESC="${SELECTION_DESC};exclude-family=$(IFS=,; printf '%s' "${EXCLUDE_FAMILIES[*]}")"
 fi
-if [ -n "$FAIL_ON_GATE_SKIP" ]; then
-  SELECTION_DESC="${SELECTION_DESC};fail-on-gate-skip=$FAIL_ON_GATE_SKIP"
+if [ "${#FAIL_ON_GATE_SKIP_TOKENS[@]}" -gt 0 ]; then
+  SELECTION_DESC="${SELECTION_DESC};fail-on-gate-skip=$(IFS=,; printf '%s' "${FAIL_ON_GATE_SKIP_TOKENS[*]}")"
 fi
 if [ "$JOBS" -gt 1 ]; then
   SELECTION_DESC="${SELECTION_DESC};jobs=$JOBS"
@@ -1189,10 +1204,13 @@ record_script_result() {
   family=$(family_for_basename "$base")
   expected=$(expected_gate_skip_for_family "$family")
 
-  if [ -n "$FAIL_ON_GATE_SKIP" ] && detect_gate_skip_token "$out" "$FAIL_ON_GATE_SKIP"; then
-    log "required gate skip token seen in $script: skip: $FAIL_ON_GATE_SKIP"
-    rc=1
-  fi
+  local required
+  for required in "${FAIL_ON_GATE_SKIP_TOKENS[@]+"${FAIL_ON_GATE_SKIP_TOKENS[@]}"}"; do
+    if detect_gate_skip_token "$out" "$required"; then
+      log "required gate skip token seen in $script: skip: $required"
+      rc=1
+    fi
+  done
 
   gate_skip=false
   if [ "$rc" -eq 0 ] && detect_gate_skip "$out"; then
