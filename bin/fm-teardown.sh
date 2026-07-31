@@ -1364,15 +1364,25 @@ if [ "$FORCE" != "--force" ] \
 fi
 
 # Firstmate is the custodian for a work item's evidence, and it acts here,
-# before anything is destroyed. bin/fm-evidence.sh is a silent no-op unless this
-# home opted in with config/evidence-repo. It fails only when the local commit
-# fails, so this gate is on preserved evidence and never on a reachable network:
-# an unreachable remote must not block reclaiming a worktree, and cleanup must
-# not proceed over evidence that was never committed. Secondmate homes are not
-# work items and carry no task artifact directory.
+# before anything is destroyed. It fails only when the local commit fails, so
+# this gate is on preserved evidence and never on a reachable network: an
+# unreachable remote must not block reclaiming a worktree, and cleanup must not
+# proceed over evidence that was never committed. Secondmate homes are not work
+# items and carry no task artifact directory.
 # --force is the approved discard path, so it warns instead of refusing, exactly
 # as it does for every other teardown refusal.
-if [ "$KIND" != secondmate ]; then
+#
+# The write-through is opt-in and off by default, so the gate is ARMED ONLY
+# where config/evidence-repo names a destination. A home that never opted in has
+# no evidence to preserve and therefore nothing to refuse over, and it must not
+# acquire a dependency on the helper at all: this whole block has to be inert
+# there, not merely quiet, or an unrunnable helper would refuse every cleanup in
+# a home the feature was never turned on for. The test is [ -f ] rather than a
+# content check so it stays strictly weaker than bin/fm-evidence.sh's own
+# enablement predicate, which additionally requires a non-empty value: any file
+# it might accept still reaches it, and the helper alone decides whether a
+# configured destination is usable.
+if [ "$KIND" != secondmate ] && [ -f "$CONFIG/evidence-repo" ]; then
   if ! FM_HOME="$FM_HOME" FM_DATA_OVERRIDE="$DATA" FM_CONFIG_OVERRIDE="$CONFIG" \
       "$SCRIPT_DIR/fm-evidence.sh" preserve "$ID"; then
     if [ "$FORCE" != "--force" ]; then
