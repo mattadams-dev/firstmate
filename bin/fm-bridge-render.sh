@@ -592,11 +592,14 @@ def lifecycle(doc, item_id):
     state - which is what `absence_explained` means here, and why it is false
     for every verdict except `consumed`.
 
-    Conservation feeds straight into this: if the fold could not read every
-    line, the verdict is `unknown` no matter what was found, because an
-    unreadable line may be the very record being asked about. A confident answer
-    over a partially-read stream is exactly the false-negative this whole design
-    exists to prevent.
+    Readability feeds straight into this: if ANY line could not be read, the
+    verdict is `unknown` no matter what was found, because an unreadable line
+    may be the very record being asked about. Note that this is a stricter
+    condition than conservation - a malformed line is still ACCOUNTED for, so
+    the stream stays conserved while remaining partially unreadable. Accounting
+    for a line you could not parse is exactly not the same as having read it,
+    and a confident answer over the difference is the false negative this whole
+    design exists to prevent.
     """
     answer = {
         "schema": "fm-bridge.lifecycle.v1",
@@ -604,6 +607,7 @@ def lifecycle(doc, item_id):
         "folded_at": doc["folded_at"],
         "source": {"ledger": doc["ledger"]["path"], "lines": []},
         "conserved": doc["conserved"],
+        "fully_readable": doc["counts"]["malformed"] == 0 and doc["conserved"],
         "stages": {},
         "verdict": "unknown",
         "absence_explained": False,
@@ -617,7 +621,7 @@ def lifecycle(doc, item_id):
         answer["kind"] = item["kind"]
         answer["state"] = item["state"]
 
-    if not doc["conserved"]:
+    if not answer["fully_readable"]:
         answer["reason"] = (
             "%d of %d ledger lines could not be read, so any record for this id "
             "may be among them" % (doc["counts"]["malformed"],
