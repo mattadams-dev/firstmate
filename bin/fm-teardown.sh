@@ -1564,4 +1564,19 @@ if [ "$KIND" != scout ] && [ "$KIND" != secondmate ] && [ "$MODE" != local-only 
   "$FM_ROOT/bin/fm-fleet-sync.sh" "$PROJ" || true
 fi
 echo "teardown $ID complete (window $T, worktree $WT)"
+
+# Bridge: cleanup is what closes the strip row, and it only ever runs after the
+# landed-work test passed - so this is the one point where "resolved" is a claim
+# the record can actually support. A scout's outcome lives in its report; every
+# other task's lives at whatever pointer earlier records already set, which this
+# partial update deliberately leaves alone. Best-effort append.
+if [ "$KIND" = scout ]; then
+  FM_HOME="$FM_HOME" "$FM_ROOT/bin/fm-bridge.sh" task --quiet \
+    --id "$ID" --phase cleaned --state resolved \
+    --pointer "data/$ID/report.md" >/dev/null 2>&1 || true
+else
+  FM_HOME="$FM_HOME" "$FM_ROOT/bin/fm-bridge.sh" task --quiet \
+    --id "$ID" --phase cleaned --state resolved >/dev/null 2>&1 || true
+fi
+
 backlog_refresh_reminder

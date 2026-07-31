@@ -120,3 +120,22 @@ fm_pr_poll_publish_prepared || {
   exit 1
 }
 printf 'armed: state/%s.check.sh\n' "$ID"
+
+# Bridge: a PR that is ready changes the task's DISPOSITION, and that is the
+# fact worth recording - not merely that a PR exists. Under the captain's
+# standing routine authority firstmate merges green work itself, so the row
+# stays fm-handling; without it, the merge is genuinely an ask. Getting this
+# backwards in either direction is the failure the state field exists to
+# prevent, so it is read from the task's own recorded authority rather than
+# assumed. Best-effort: never able to fail arming the merge watch.
+BRIDGE_YOLO=$(grep '^yolo=' "$META" 2>/dev/null | tail -1 | cut -d= -f2- || true)
+BRIDGE_PROJECT=$(grep '^project=' "$META" 2>/dev/null | tail -1 | cut -d= -f2- || true)
+if [ "$BRIDGE_YOLO" = on ]; then
+  BRIDGE_STATE=fm-handling
+else
+  BRIDGE_STATE=needs-captain
+fi
+FM_HOME="$FM_HOME" "$FM_ROOT/bin/fm-bridge.sh" task --quiet \
+  --id "$ID" --project "$(basename "${BRIDGE_PROJECT:-fleet}")" \
+  --phase pr-open --state "$BRIDGE_STATE" --pointer "$URL" \
+  --title "$ID" >/dev/null 2>&1 || true

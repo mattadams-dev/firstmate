@@ -131,6 +131,12 @@ SCALARS = ("kind", "project", "state", "severity", "owner", "title", "body",
 MAX_MALFORMED_SHOWN = 25
 MAX_RAW_ECHO = 240
 
+# An ask older than this is called out as aging. The captain's evidence for why:
+# eight captain-kind items sitting queued, two of them already ruled and never
+# closed. Nothing about "open" distinguishes those two from the other six - only
+# age does.
+AGING_SECONDS = int(os.environ.get("FM_BRIDGE_AGING_SECONDS", str(24 * 3600)))
+
 # Presentation caps. Named here so the state document can publish them and the
 # board can show the overflow pointer rather than truncating silently.
 CAP_EVENTS = int(os.environ.get("FM_BRIDGE_CAP_EVENTS", "12"))
@@ -159,6 +165,41 @@ def _answers(value):
         return [_text(v) for v in value if _text(v) != ""]
     text = _text(value)
     return [text] if text else []
+
+
+def _epoch(stamp):
+    """RFC3339 UTC to epoch seconds, or None when unparseable. Never raises: a
+    malformed timestamp must cost an age label, not the whole fold."""
+    import calendar
+    import time
+    text = _text(stamp).strip()
+    if not text:
+        return None
+    for fmt in ("%Y-%m-%dT%H:%M:%SZ", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d"):
+        try:
+            return calendar.timegm(time.strptime(text, fmt))
+        except ValueError:
+            continue
+    return None
+
+
+def _age_seconds(stamp, now_epoch):
+    then = _epoch(stamp)
+    if then is None or now_epoch is None:
+        return None
+    return max(0, now_epoch - then)
+
+
+def _age_label(seconds):
+    """Deliberately coarse. The reader needs "this has been sitting for days",
+    not a duration to the second."""
+    if seconds is None:
+        return "age unknown"
+    if seconds < 90 * 60:
+        return "%dm" % max(1, seconds // 60)
+    if seconds < 36 * 3600:
+        return "%dh" % (seconds // 3600)
+    return "%dd" % (seconds // 86400)
 
 
 def _fold_key(obj):
@@ -227,6 +268,7 @@ def fold(ledger_path, folded_at):
                         "truncated": False,
                         "first_ts": ts,
                         "ts": ts,
+                        "state_since": ts,
                         "updates": 0,
                         "first_line": lineno,
                         "last_line": lineno,
@@ -244,6 +286,18 @@ def fold(ledger_path, folded_at):
                     }
                     items[key] = item
                     order.append(key)
+
+                # When the disposition last CHANGED, not when the item was last
+                # touched. An ask that has been waiting three days must be able
+                # to say so: age measured from the last unrelated update would
+                # make a long-forgotten ask look fresh, which is the exact way
+                # these get scrolled past and lost.
+                if "state" in obj:
+                    new_state = _text(obj["state"])
+                    if new_state != item["state"]:
+                        item["state_since"] = ts or item.get("state_since", "")
+                elif not item.get("state_since"):
+                    item["state_since"] = ts
 
                 item["updates"] += 1
                 item["last_line"] = lineno
@@ -413,6 +467,29 @@ def fold(ledger_path, folded_at):
                          "means": items[k]["body"] or items[k]["note"]} for k in keys],
         })
 
+    # How long each item has held its current disposition, and - for asks - the
+    # thing the captain actually needs to see. The Bridge exists because a
+    # scrolling stream loses captain-relevant items: an ask that has been open
+    # for days looks exactly like one raised a minute ago unless the surface
+    # says otherwise, and a stream cannot say otherwise.
+    now_epoch = _epoch(folded_at)
+    for item in items.values():
+        item["age_seconds"] = _age_seconds(item.get("state_since") or item["first_ts"],
+                                           now_epoch)
+        item["age_label"] = _age_label(item["age_seconds"])
+        item["aging"] = (item["state"] == "needs-captain"
+                         and item["age_seconds"] is not None
+                         and item["age_seconds"] >= AGING_SECONDS)
+
+    # Every open ask, across every project and kind, oldest first. Oldest first
+    # is deliberate: the forgotten ones rise to the top instead of sinking under
+    # whatever arrived most recently.
+    asks = [k for k in order
+            if items[k]["kind"] in BOARD_KINDS and items[k]["state"] == "needs-captain"]
+    asks.sort(key=lambda k: (SEVERITY_RANK.get(items[k]["severity"], 4),
+                             -(items[k]["age_seconds"] or 0),
+                             index[k]))
+
     lines_considered = lines_total - lines_blank
     # The summary is what the captain triages against, so it counts only the
     # kinds they read. Substrate is reported separately rather than folded in,
@@ -459,6 +536,8 @@ def fold(ledger_path, folded_at):
         "malformed": malformed[:MAX_MALFORMED_SHOWN],
         "malformed_omitted": max(0, len(malformed) - MAX_MALFORMED_SHOWN),
         "projects": projects,
+        "asks": asks,
+        "aging_seconds": AGING_SECONDS,
         "order": order,
         "items": {k: items[k] for k in order},
         "zones": {
@@ -710,8 +789,36 @@ ul.events li .what { min-width:0; overflow-wrap:anywhere; }
 .glossary .collide { color:var(--tn-orange); font-size:.72rem; text-transform:uppercase; letter-spacing:.07em; margin-left:.4rem; }
 .local-terms { margin:0 0 .8rem; font-size:.79rem; color:var(--tn-dim); border-left:2px solid var(--tn-purple); padding-left:.6rem; }
 
+/* The ask counter travels with the viewport, so an open ask cannot be
+   scrolled past no matter where the reader is on the page. */
+.pin-asks, .pin-clear {
+  position:sticky; top:0; z-index:6; padding:.45rem 0; font-size:.85rem;
+  border-bottom:1px solid var(--tn-line);
+}
+.pin-asks { background:#3d2430; color:var(--tn-red); }
+.pin-asks a { color:var(--tn-red); text-decoration:none; }
+.pin-asks a:hover { text-decoration:underline; }
+.pin-asks b { font-size:1.05rem; margin-right:.3rem; }
+.pin-clear { background:var(--tn-panel); color:var(--tn-dim); }
+
+ol.asks { list-style:none; margin:0; padding:0; counter-reset:ask; }
+ol.asks li { border-bottom:1px solid rgba(59,66,97,.4); }
+ol.asks li a {
+  display:flex; gap:.7rem; align-items:baseline; padding:.45rem .2rem;
+  text-decoration:none; color:var(--tn-fg);
+}
+ol.asks li a:hover { background:rgba(122,162,247,.07); }
+ol.asks .ref { flex:none; min-width:2.4rem; }
+ol.asks .proj { flex:none; color:var(--tn-purple); font-size:.78rem; min-width:5.5rem; }
+ol.asks .what { flex:1 1 auto; min-width:0; overflow-wrap:anywhere; }
+ol.asks .age { flex:none; color:var(--tn-muted); font-size:.78rem; font-family:ui-monospace,monospace; }
+ol.asks li.aging .age { color:var(--tn-orange); }
+.card.aging { box-shadow:inset 3px 0 0 var(--tn-orange); }
+.chip.aging { color:var(--tn-orange); }
+.allclear { color:var(--tn-green); font-size:.9rem; }
+
 #queue {
-  position:sticky; top:0; z-index:5; background:var(--tn-bg);
+  position:sticky; top:2.1rem; z-index:5; background:var(--tn-bg);
   border-bottom:1px solid var(--tn-line); padding:.6rem 0; display:none;
 }
 #queue.on { display:block; }
@@ -875,11 +982,15 @@ def card(item, pinned=False):
     classes = ["card", state_class(item)]
     if pinned:
         classes.append("pinned")
+    if item.get("aging"):
+        classes.append("aging")
     ref = '<span class="ref">%s</span>' % esc(item["ref"]) if item["ref"] else ""
+    aged = ('<span class="chip aging">waiting %s</span>' % esc(item["age_label"])
+            if item.get("aging") else "")
     parts = [
-        '<div class="%s">' % " ".join(classes),
-        '<div class="head">%s<span class="title">%s</span>%s%s</div>'
-        % (ref, esc(item["title"] or item["id"]), chip(item), sev_chip(item)),
+        '<div class="%s" id="item-%s">' % (" ".join(classes), esc(item["id"])),
+        '<div class="head">%s<span class="title">%s</span>%s%s%s</div>'
+        % (ref, esc(item["title"] or item["id"]), chip(item), sev_chip(item), aged),
         meta_line(item),
     ]
     if item["body"]:
@@ -917,8 +1028,27 @@ def render_html(doc, checked_at):
     add("<!doctype html>")
     add('<html lang="en"><head><meta charset="utf-8">')
     add('<meta name="viewport" content="width=device-width,initial-scale=1">')
-    add("<title>Bridge</title>")
+    asks = doc.get("asks", [])
+    # The tab title is the one part of this board that stays visible when the
+    # captain has scrolled away, switched apps, or left it open for a day.
+    add("<title>%s</title>"
+        % ("Bridge - %d need you" % len(asks) if asks else "Bridge - clear"))
     add("<style>%s</style></head><body>" % CSS)
+
+    # Sticky, and always present. An ask cannot be scrolled past, because the
+    # count travels with the viewport no matter where the reader is on the page.
+    if asks:
+        # The genuinely longest-waiting ask, not the first row of a
+        # severity-sorted list. Calling the top row "oldest" would be a claim
+        # the ordering does not support.
+        longest = max(asks, key=lambda k: items[k]["age_seconds"] or 0)
+        add('<div id="pin" class="pin-asks"><div class="wrap">'
+            '<a href="#waiting"><b>%d</b> waiting on you &middot; '
+            "longest %s</a></div></div>"
+            % (len(asks), esc(items[longest]["age_label"])))
+    else:
+        add('<div id="pin" class="pin-clear"><div class="wrap">'
+            "nothing is waiting on you</div></div>")
 
     add('<div id="queue"><div class="wrap"><div class="inner">')
     add('<textarea id="queue-text" spellcheck="false" '
@@ -968,6 +1098,40 @@ def render_html(doc, checked_at):
         add('<div class="banner">No ledger at <code>%s</code> yet. '
             "The board is empty because nothing has been written, not because "
             "nothing happened.</div>" % esc(doc["ledger"]["path"]))
+
+    # THE ASKS INDEX. Everything the captain owes, in one block, before anything
+    # else on the page. It is an index and not a second set of cards on purpose:
+    # each line jumps to the full card in its project section, so nothing has to
+    # be triaged twice, and a reader arriving cold still sees the complete list
+    # of what is waiting without scrolling or reconstructing it.
+    add('<section id="waiting"><h2>Waiting on you</h2>')
+    if asks:
+        add('<p class="zone-note">Every open ask, oldest first. Nothing else on '
+            "this page is an ask.</p>")
+        add('<ol class="asks">')
+        for key in asks:
+            item = items[key]
+            add('<li%s><a href="#item-%s"><span class="ref">%s</span>'
+                '<span class="proj">%s</span>'
+                '<span class="what">%s</span>'
+                '<span class="age">%s</span></a></li>'
+                % (' class="aging"' if item.get("aging") else "",
+                   esc(item["id"]),
+                   esc(item["ref"] or "-"),
+                   esc(item["project"]),
+                   esc(item["title"] or item["id"]),
+                   esc(item["age_label"])))
+        add("</ol>")
+        aging = [k for k in asks if items[k].get("aging")]
+        if aging:
+            add('<div class="overflow">%d of these have been open longer than %s. '
+                "An ask that old is usually one that was already answered and "
+                "never closed - worth checking before ruling again.</div>"
+                % (len(aging), _age_label(doc.get("aging_seconds"))))
+    else:
+        add('<p class="allclear">Nothing is waiting on you. Everything below is '
+            "either being handled or already resolved.</p>")
+    add("</section>")
 
     collisions = [g for g in doc["glossary"] if g["collision"]]
     if collisions:
@@ -1037,9 +1201,20 @@ def render_html(doc, checked_at):
         add('<ul class="events">')
         for key in shown_events:
             item = items[key]
-            add('<li><span class="when">%s</span><span class="what">%s %s</span></li>'
+            # An event whose outcome lives somewhere must SAY where. A notable
+            # event the captain cannot follow through to is a dead end on the
+            # one surface they read.
+            target = item["pointer"]
+            if target.startswith("http://") or target.startswith("https://"):
+                trail = ' <a href="%s">%s</a>' % (esc(target), esc(target))
+            elif target:
+                trail = ' <code>%s</code>' % esc(target)
+            else:
+                trail = ""
+            add('<li><span class="when">%s</span><span class="what">%s%s %s</span></li>'
                 % (esc((item["ts"] or "")[:16].replace("T", " ")),
                    esc(item["title"] or item["id"]),
+                   trail,
                    chip(item) if item["state"] != "resolved" else ""))
         add("</ul>")
     else:
@@ -1268,22 +1443,22 @@ do_tick() {
   return $rc
 }
 
-MODE=html
+MODE='html'
 VERBOSE=0
 OUT=
 ITEM_ID=
 while [ $# -gt 0 ]; do
   case "$1" in
-    --state) MODE=state; shift ;;
-    --html) MODE=html; shift ;;
-    --tick) MODE=tick; shift ;;
-    --write) MODE=write; shift ;;
-    --path) MODE=path; shift ;;
-    --ledger-path) MODE=ledger-path; shift ;;
+    --state) MODE='state'; shift ;;
+    --html) MODE='html'; shift ;;
+    --tick) MODE='tick'; shift ;;
+    --write) MODE='write'; shift ;;
+    --path) MODE='path'; shift ;;
+    --ledger-path) MODE='ledger-path'; shift ;;
     --id) [ $# -gt 1 ] || die "--id needs an item id"; ITEM_ID=$2; shift 2 ;;
     --lifecycle)
       [ $# -gt 1 ] || die "--lifecycle needs an item id"
-      MODE=lifecycle; ITEM_ID=$2; shift 2 ;;
+      MODE='lifecycle'; ITEM_ID=$2; shift 2 ;;
     --out) [ $# -gt 1 ] || die "--out needs a path"; OUT=$2; shift 2 ;;
     --verbose|-v) VERBOSE=1; shift ;;
     -h|--help) usage; exit 0 ;;

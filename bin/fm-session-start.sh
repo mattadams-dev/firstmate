@@ -413,6 +413,28 @@ if fm_pf_relay_active "$FM_HOME" \
   fi
 fi
 
+# --- 5b. the captain's board -------------------------------------------
+# Rendered here so the board is current the moment a session opens, rather than
+# waiting up to a full supervision tick. Rendering writes, so a lock-refused
+# session only reports the path. Never fatal: a board that cannot render must
+# not stop a session from starting.
+section "BRIDGE"
+BRIDGE_BOARD=$("$SCRIPT_DIR/fm-bridge-render.sh" --path 2>/dev/null || true)
+if [ -z "$BRIDGE_BOARD" ]; then
+  printf 'The captain board could not be located; check bin/fm-bridge-render.sh.\n'
+elif [ "$READ_ONLY" -eq 1 ]; then
+  printf 'Board (not refreshed - this session is read-only): %s\n' "$BRIDGE_BOARD"
+elif "$SCRIPT_DIR/fm-bridge-render.sh" --tick >/dev/null 2>&1; then
+  printf 'Board refreshed: %s\n' "$BRIDGE_BOARD"
+  printf 'It is generated from %s and is never hand-edited.\n' \
+    "$("$SCRIPT_DIR/fm-bridge-render.sh" --ledger-path 2>/dev/null || echo 'the ledger')"
+  printf 'Write captain-relevant facts there as they happen with bin/fm-bridge.sh;\n'
+  printf 'anything that reaches the captain only through this terminal is a delivery failure.\n'
+else
+  printf 'Board could not be refreshed: %s\n' "$BRIDGE_BOARD"
+  printf 'Treat it as stale until bin/fm-bridge-render.sh --tick -v explains why.\n'
+fi
+
 # --- 6. closing reminder -----------------------------------------------
 section "NEXT STEP"
 if [ "$READ_ONLY" -eq 1 ]; then

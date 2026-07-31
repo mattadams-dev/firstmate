@@ -196,7 +196,7 @@ fm_bridge_default_severity() {  # <kind>
 # carries only the fields it actually changes - the fold merges present fields
 # over the item's prior state.
 fm_bridge_append() {  # <name=value> ...
-  local arg name value ledger line json='' answers='' n_answers=0
+  local arg name value ledger json='' answers='' n_answers=0
   local id='' kind='' project='' state='' severity='' owner='' title='' body=''
   local pointer='' check='' note='' phase='' ts=''
 
@@ -313,6 +313,7 @@ fm_bridge_append() {  # <name=value> ...
   mkdir -p "$(dirname "$ledger")" || return 1
   # One O_APPEND write of one bounded line. No read, no rewrite, no lock.
   printf '%s\n' "$json" >> "$ledger" || return 1
+  # shellcheck disable=SC2034 # Read by bin/fm-bridge.sh's emit, not this lib.
   FM_BRIDGE_LAST_ID=$id
   return 0
 }
