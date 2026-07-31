@@ -142,7 +142,11 @@ case "$COMMAND" in
   handling)
     parse_common "$@"
     has_field id || die "handling needs --id"
+    # Taking an item is a routing move like any other, so it moves the owner
+    # too. Leaving the previous reader named while firstmate holds it is the
+    # same ambiguity --to exists to remove.
     add_field state fm-handling
+    has_field owner || add_field owner firstmate
     emit
     ;;
   resolve)
