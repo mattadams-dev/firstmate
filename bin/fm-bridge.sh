@@ -9,8 +9,9 @@
 #
 # Writing (one line each, at the moment of the event):
 #   fm-bridge.sh note     --project P --title T [--body B] [--pointer URL]
-#   fm-bridge.sh ask      --project P --title T --answer A --answer B [--body B]
-#   fm-bridge.sh critical --project P --title T [--answer A ...]
+#   fm-bridge.sh ask      --project P --title T --answer A --answer B [--to WHO]
+#   fm-bridge.sh critical --project P --title T [--answer A ...] [--to WHO]
+#   fm-bridge.sh route    --id ID --to captain|cocaptain|firstmate
 #   fm-bridge.sh handling --id ID [--title T] [--note N]
 #   fm-bridge.sh resolve  --id ID --pointer URL [--note N]
 #   fm-bridge.sh task     --id ID --project P --phase PH [--state S] [--pointer URL]
@@ -22,6 +23,11 @@
 #   fm-bridge.sh lifecycle ID           -> bin/fm-bridge-render.sh --lifecycle
 #   fm-bridge.sh lint [--strict]        record hygiene, over folded state
 #   fm-bridge.sh path [ledger|board]
+#
+# --to is the ROUTING decision: which reader's queue the item lands on.
+# `--to cocaptain` addresses machine and repo-infrastructure work to the
+# dotfiles session through the ledger, so it never spends captain attention.
+# Default is the captain for an ask or a critical.
 #
 # Common options: --id, --severity (critical|high|normal|low), --owner, --check,
 # --state, --quiet. Omit --id and one is derived from kind+project+title, so
@@ -38,7 +44,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 RENDER="$SCRIPT_DIR/fm-bridge-render.sh"
 
-usage() { sed -n '2,32p' "$0" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,38p' "$0" | sed 's/^# \{0,1\}//'; }
 die() { printf 'fm-bridge: %s\n' "$1" >&2; exit 2; }
 
 [ $# -gt 0 ] || { usage; exit 2; }
@@ -46,6 +52,7 @@ COMMAND=$1
 shift
 
 QUIET=0
+ROUTE_TO=
 declare -a FIELDS=()
 TERM_WORD=
 TERM_MEANS=
@@ -67,6 +74,17 @@ parse_common() {
       --phase)    [ $# -gt 1 ] || die "--phase needs a value"; add_field phase "$2"; shift 2 ;;
       --check)    [ $# -gt 1 ] || die "--check needs a value"; add_field check "$2"; shift 2 ;;
       --answer)   [ $# -gt 1 ] || die "--answer needs a value"; add_field answer "$2"; shift 2 ;;
+      --to)
+        # Routing sets BOTH the queue and the owner. Moving an item to another
+        # reader while leaving the old owner behind would put it on one reader's
+        # queue while still naming another as responsible - the ambiguity this
+        # field exists to remove.
+        [ $# -gt 1 ] || die "--to needs a reader ($FM_BRIDGE_READERS)"
+        ROUTE_TO=$(fm_bridge_state_for_reader "$2") \
+          || die "--to must name one of: $FM_BRIDGE_READERS"
+        add_field state "$ROUTE_TO"
+        add_field owner "$2"
+        shift 2 ;;
       --ts)       [ $# -gt 1 ] || die "--ts needs a value"; add_field ts "$2"; shift 2 ;;
       --term)     [ $# -gt 1 ] || die "--term needs a value"; TERM_WORD=$2; shift 2 ;;
       --means)    [ $# -gt 1 ] || die "--means needs a value"; TERM_MEANS=$2; shift 2 ;;
@@ -141,6 +159,14 @@ case "$COMMAND" in
     has_field id || die "task needs --id"
     add_field kind task
     has_field title || add_field title "$(field_value id)"
+    emit
+    ;;
+  route)
+    # Re-address an existing item to a different reader. A partial update, so it
+    # changes only the queue the item sits on and touches nothing else.
+    parse_common "$@"
+    has_field id || die "route needs --id"
+    has_field state || die "route needs --to (captain|cocaptain|firstmate)"
     emit
     ;;
   term)

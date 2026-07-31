@@ -107,10 +107,19 @@ BOARD_KINDS = ("critical", "decision", "event", "task")
 # The steering lifecycle, in order. Monotonic: a stage once recorded is never
 # unrecorded, so out-of-order arrival cannot walk a message backwards.
 LIFECYCLE_STAGES = ("sent", "delivered", "consumed")
-KNOWN_STATES = ("needs-captain", "fm-handling", "resolved")
+# `needs-cocaptain` is a ROUTING target, not a second flavour of "open". An
+# item addressed to the co-captain (the dotfiles session, which reads this
+# ledger directly) never joins the captain's ask list, because the cost being
+# avoided is the captain's attention: a machine-config item once sat on their
+# queue all day when its whole resolution was one reader away.
+KNOWN_STATES = ("needs-captain", "needs-cocaptain", "fm-handling", "resolved")
 KNOWN_SEVERITIES = ("critical", "high", "normal", "low")
 SEVERITY_RANK = {"critical": 0, "high": 1, "normal": 2, "low": 3}
-STATE_RANK = {"needs-captain": 0, "fm-handling": 1, "resolved": 2}
+STATE_RANK = {"needs-captain": 0, "needs-cocaptain": 1, "fm-handling": 2, "resolved": 3}
+
+# Which disposition puts an item on which reader's queue.
+READER_STATE = {"captain": "needs-captain", "cocaptain": "needs-cocaptain",
+                "firstmate": "fm-handling"}
 
 # Fields this fold understands. Anything else survives under "extra" - an
 # unrecognized field is never a reason to drop or ignore a record.
@@ -363,7 +372,8 @@ def fold(ledger_path, folded_at):
             item["recognized"]["severity"] = True
             item["defaulted_severity"] = True
         if not item["owner"]:
-            item["owner"] = "captain" if item["state"] == "needs-captain" else "firstmate"
+            item["owner"] = {"needs-captain": "captain",
+                             "needs-cocaptain": "cocaptain"}.get(item["state"], "firstmate")
         if not item["project"]:
             item["project"] = "fleet"
 
@@ -477,25 +487,34 @@ def fold(ledger_path, folded_at):
         item["age_seconds"] = _age_seconds(item.get("state_since") or item["first_ts"],
                                            now_epoch)
         item["age_label"] = _age_label(item["age_seconds"])
-        item["aging"] = (item["state"] == "needs-captain"
+        item["aging"] = (item["state"] in ("needs-captain", "needs-cocaptain")
                          and item["age_seconds"] is not None
                          and item["age_seconds"] >= AGING_SECONDS)
 
     # Every open ask, across every project and kind, oldest first. Oldest first
     # is deliberate: the forgotten ones rise to the top instead of sinking under
     # whatever arrived most recently.
-    asks = [k for k in order
-            if items[k]["kind"] in BOARD_KINDS and items[k]["state"] == "needs-captain"]
-    asks.sort(key=lambda k: (SEVERITY_RANK.get(items[k]["severity"], 4),
-                             -(items[k]["age_seconds"] or 0),
-                             index[k]))
+    def _queue(state):
+        queue = [k for k in order
+                 if items[k]["kind"] in BOARD_KINDS and items[k]["state"] == state]
+        queue.sort(key=lambda k: (SEVERITY_RANK.get(items[k]["severity"], 4),
+                                  -(items[k]["age_seconds"] or 0),
+                                  index[k]))
+        return queue
+
+    # Two queues, addressed to two readers. Keeping them separate IS the
+    # routing: an item on the co-captain's queue must never be counted, pinned,
+    # or listed as something the captain owes.
+    asks = _queue("needs-captain")
+    cocaptain_asks = _queue("needs-cocaptain")
 
     lines_considered = lines_total - lines_blank
     # The summary is what the captain triages against, so it counts only the
     # kinds they read. Substrate is reported separately rather than folded in,
     # because a machinery record inflating "resolved" would quietly change what
     # the tallies mean.
-    summary = {"needs-captain": 0, "fm-handling": 0, "resolved": 0, "unrecognized": 0}
+    summary = {"needs-captain": 0, "needs-cocaptain": 0, "fm-handling": 0,
+               "resolved": 0, "unrecognized": 0}
     for item in items.values():
         if item["kind"] not in BOARD_KINDS:
             continue
@@ -537,6 +556,8 @@ def fold(ledger_path, folded_at):
         "malformed_omitted": max(0, len(malformed) - MAX_MALFORMED_SHOWN),
         "projects": projects,
         "asks": asks,
+        "cocaptain_asks": cocaptain_asks,
+        "queues": {"captain": asks, "cocaptain": cocaptain_asks},
         "aging_seconds": AGING_SECONDS,
         "order": order,
         "items": {k: items[k] for k in order},
@@ -566,6 +587,8 @@ def fold(ledger_path, folded_at):
                          "|\"\\(.value.ref) \\(.value.title)\"'",
             "record hygiene": "bin/fm-bridge.sh lint",
             "one item": "bin/fm-bridge-render.sh --lifecycle <id>",
+            "co-captain queue": "bin/fm-bridge-render.sh --state | "
+                                "jq -r '.cocaptain_asks[]'",
             "raw stream": "tail -n 40 %s" % ledger_path,
         },
     }
@@ -713,6 +736,8 @@ h1 .sub { color:var(--tn-dim); font-weight:400; font-size:.85rem; margin-left:.6
 .tally.fm  { border-color:var(--tn-blue); } .tally.fm b { color:var(--tn-blue); }
 .tally.ok  { border-color:var(--tn-green); } .tally.ok b { color:var(--tn-green); }
 .tally.warn{ border-color:var(--tn-orange); } .tally.warn b { color:var(--tn-orange); }
+.tally.co  { border-color:var(--tn-purple); } .tally.co b { color:var(--tn-purple); }
+ol.asks.co li a:hover { background:rgba(187,154,247,.07); }
 
 section { margin:2rem 0 0; }
 h2 {
@@ -726,7 +751,8 @@ h2 {
   border-left:3px solid var(--tn-line); border-radius:.5rem;
   padding:.8rem .95rem; margin:0 0 .6rem;
 }
-.card.needs-captain { border-left-color:var(--tn-red); }
+.card.needs-captain   { border-left-color:var(--tn-red); }
+.card.needs-cocaptain { border-left-color:var(--tn-purple); }
 .card.fm-handling   { border-left-color:var(--tn-blue); }
 .card.resolved      { border-left-color:var(--tn-green); opacity:.72; }
 .card.odd           { border-left-color:var(--tn-orange); }
@@ -734,7 +760,7 @@ h2 {
 
 .head { display:flex; gap:.55rem; align-items:baseline; flex-wrap:wrap; }
 .ref {
-  color:var(--tn-purple); font-weight:700; font-family:ui-monospace,monospace;
+  color:var(--tn-dim); font-weight:700; font-family:ui-monospace,monospace;
   font-size:.85rem; flex:none;
 }
 .title { font-weight:600; min-width:0; overflow-wrap:anywhere; }
@@ -743,7 +769,8 @@ h2 {
   border-radius:.25rem; padding:.1rem .4rem; border:1px solid currentColor;
   white-space:nowrap; flex:none;
 }
-.chip.needs-captain { color:var(--tn-red); }
+.chip.needs-captain   { color:var(--tn-red); }
+.chip.needs-cocaptain { color:var(--tn-purple); }
 .chip.fm-handling   { color:var(--tn-blue); }
 .chip.resolved      { color:var(--tn-green); }
 .chip.odd           { color:var(--tn-orange); }
@@ -787,11 +814,11 @@ ul.events li .what { min-width:0; overflow-wrap:anywhere; }
 
 .glossary { border:1px dashed var(--tn-line); border-radius:.5rem; padding:.7rem .9rem; background:var(--tn-bg); }
 .glossary dl { margin:0; }
-.glossary dt { font-weight:600; color:var(--tn-purple); font-size:.85rem; margin-top:.5rem; }
+.glossary dt { font-weight:600; color:var(--tn-fg); font-size:.85rem; margin-top:.5rem; }
 .glossary dt:first-child { margin-top:0; }
 .glossary dd { margin:.15rem 0 0 0; font-size:.83rem; color:var(--tn-dim); }
 .glossary .collide { color:var(--tn-orange); font-size:.72rem; text-transform:uppercase; letter-spacing:.07em; margin-left:.4rem; }
-.local-terms { margin:0 0 .8rem; font-size:.79rem; color:var(--tn-dim); border-left:2px solid var(--tn-purple); padding-left:.6rem; }
+.local-terms { margin:0 0 .8rem; font-size:.79rem; color:var(--tn-dim); border-left:2px solid var(--tn-line); padding-left:.6rem; }
 
 /* The ask counter travels with the viewport, so an open ask cannot be
    scrolled past no matter where the reader is on the page. */
@@ -813,7 +840,7 @@ ol.asks li a {
 }
 ol.asks li a:hover { background:rgba(122,162,247,.07); }
 ol.asks .ref { flex:none; min-width:2.4rem; }
-ol.asks .proj { flex:none; color:var(--tn-purple); font-size:.78rem; min-width:5.5rem; }
+ol.asks .proj { flex:none; color:var(--tn-dim); font-size:.78rem; min-width:5.5rem; }
 ol.asks .what { flex:1 1 auto; min-width:0; overflow-wrap:anywhere; }
 ol.asks .age { flex:none; color:var(--tn-muted); font-size:.78rem; font-family:ui-monospace,monospace; }
 ol.asks li.aging .age { color:var(--tn-orange); }
@@ -1066,6 +1093,9 @@ def render_html(doc, checked_at):
     add(freshness_html(checked_at, doc["folded_at"]))
     add('<div class="tallies">')
     add('<div class="tally ask"><b>%d</b>need you</div>' % summary.get("needs-captain", 0))
+    if summary.get("needs-cocaptain", 0):
+        add('<div class="tally co"><b>%d</b>with the co-captain</div>'
+            % summary["needs-cocaptain"])
     add('<div class="tally fm"><b>%d</b>firstmate has</div>' % summary.get("fm-handling", 0))
     add('<div class="tally ok"><b>%d</b>resolved</div>' % summary.get("resolved", 0))
     if summary.get("unrecognized", 0):
@@ -1075,10 +1105,10 @@ def render_html(doc, checked_at):
     add("</div>")
     add('<div class="legend">'
         '<span class="l-red">needs you</span>'
+        '<span class="l-purple">needs the co-captain</span>'
         '<span class="l-blue">firstmate has it</span>'
         '<span class="l-green">resolved</span>'
         '<span class="l-orange">something is off</span>'
-        '<span class="l-purple">project / ref</span>'
         '<span class="l-cyan">pointer or command</span>'
         "</div>")
     add("</div></header>")
@@ -1137,6 +1167,33 @@ def render_html(doc, checked_at):
             "either being handled or already resolved.</p>")
     add("</section>")
 
+    # Routed elsewhere, and shown so the captain can see it is routed rather
+    # than wonder. Deliberately BELOW their own asks, out of the tab title, and
+    # out of the sticky counter: the point of the routing class is that these
+    # never spend captain attention. The co-captain does not read this board at
+    # all - they read the same items out of the ledger through --state - so this
+    # section exists to reassure, not to deliver.
+    cocaptain = doc.get("cocaptain_asks", [])
+    if cocaptain:
+        add('<section id="cocaptain"><h2>With the co-captain</h2>')
+        add('<p class="zone-note">Machine and repo-infrastructure items, routed '
+            "to the dotfiles session through the ledger. Not yours to answer - "
+            "listed so you can see where they went.</p>")
+        add('<ol class="asks co">')
+        for key in cocaptain:
+            item = items[key]
+            add('<li%s><a href="#item-%s"><span class="ref">%s</span>'
+                '<span class="proj">%s</span><span class="what">%s</span>'
+                '<span class="age">%s</span></a></li>'
+                % (' class="aging"' if item.get("aging") else "",
+                   esc(item["id"]), esc(item["ref"] or "-"), esc(item["project"]),
+                   esc(item["title"] or item["id"]), esc(item["age_label"])))
+        add("</ol>")
+        add('<div class="checkline">the co-captain reads these with '
+            '<code>bin/fm-bridge-render.sh --state | jq -r \'.cocaptain_asks[]\'</code>'
+            "</div>")
+        add("</section>")
+
     collisions = [g for g in doc["glossary"] if g["collision"]]
     if collisions:
         add("<section><h2>Terms that mean different things by project</h2>")
@@ -1170,7 +1227,7 @@ def render_html(doc, checked_at):
     if not zones["decisions"]:
         add('<p class="empty">No decisions on the board.</p>')
     for group in zones["decisions"]:
-        add("<h3 style=\"margin:1.2rem 0 .1rem;font-size:.95rem;color:var(--tn-purple)\">"
+        add("<h3 style=\"margin:1.2rem 0 .1rem;font-size:.95rem;color:var(--tn-fg)\">"
             "%s <span style=\"color:var(--tn-muted);font-weight:400;font-size:.8rem\">"
             "refs %s1, %s2, &hellip;</span></h3>"
             % (esc(group["project"]), esc(group["prefix"]), esc(group["prefix"])))

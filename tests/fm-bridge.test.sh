@@ -538,4 +538,79 @@ case "$gloss" in
 esac
 pass "a colliding term is defined up front and repeated in its project section"
 
+# --- 15. routing: an item addressed elsewhere never costs captain attention --
+#
+# The evidence behind this class: a machine-config item sat on the captain's
+# queue all day when its whole resolution was one reader away. So `owner` is a
+# ROUTING decision - the queue an item lands on is what decides who spends
+# attention on it - and the guard is that a co-captain item is absent from
+# EVERY captain-facing count, not merely styled differently.
+
+HOME15=$(new_home)
+FM_HOME=$HOME15 "$BRIDGE" ask -q --id for-cap --project orca \
+  --title "a real captain decision" --answer "A" >/dev/null
+FM_HOME=$HOME15 "$BRIDGE" ask -q --id for-co --project machine \
+  --title "bump the shellcheck pin on this box" --answer "A: bump" \
+  --to cocaptain >/dev/null
+FM_HOME=$HOME15 "$BRIDGE" critical -q --id crit-co --project dotfiles \
+  --title "stale symlink in ~/.config" --answer "A: relink" --to cocaptain >/dev/null
+
+cap_queue=$(state_query "$HOME15" 'd["queues"]["captain"]')
+[ "$cap_queue" = "['for-cap']" ] \
+  || fail "routing: the captain's queue is $cap_queue - a routed item leaked onto it"
+co_queue=$(state_query "$HOME15" 'sorted(d["queues"]["cocaptain"])')
+[ "$co_queue" = "['crit-co', 'for-co']" ] \
+  || fail "routing: the co-captain's queue is $co_queue"
+pass "an item addressed to the co-captain lands on their queue, not the captain's"
+
+owner=$(state_query "$HOME15" 'd["items"]["for-co"]["owner"]')
+[ "$owner" = cocaptain ] || fail "routing: owner is '$owner', not the reader it was addressed to"
+pass "routing sets the owner to the reader the item was addressed to"
+
+# The captain-facing surface must not count it ANYWHERE.
+routed=$(FM_HOME=$HOME15 "$RENDER" --html)
+case "$routed" in
+  *"<title>Bridge - 1 need you</title>"*) : ;;
+  *) fail "routing: the tab title counts co-captain items as captain asks" ;;
+esac
+case "$routed" in
+  *'<a href="#waiting"><b>1</b> waiting on you'*) : ;;
+  *) fail "routing: the sticky counter counts co-captain items as captain asks" ;;
+esac
+tally=$(state_query "$HOME15" 'd["summary"]["needs-captain"]')
+[ "$tally" = 1 ] || fail "routing: the captain tally counts $tally instead of 1"
+pass "co-captain items are absent from the tab title, the sticky counter, and the captain tally"
+
+# But they are neither hidden from the captain nor lost: visible as routed, and
+# a first-class list for the reader who actually owns them.
+case "$routed" in
+  *"With the co-captain"*) : ;;
+  *) fail "routing: routed items are invisible to the captain, so they cannot see where work went" ;;
+esac
+cotally=$(state_query "$HOME15" 'd["summary"]["needs-cocaptain"]')
+[ "$cotally" = 2 ] || fail "routing: routed items are not counted at all ($cotally)"
+pass "routed items stay visible as routed, and are counted on their own queue"
+
+# Re-addressing an existing item moves BOTH the queue and the owner.
+FM_HOME=$HOME15 "$BRIDGE" route -q --id for-cap --to cocaptain >/dev/null
+moved=$(state_query "$HOME15" 'len(d["queues"]["captain"])')
+[ "$moved" = 0 ] || fail "routing: re-addressing left the item on the captain's queue"
+movedowner=$(state_query "$HOME15" 'd["items"]["for-cap"]["owner"]')
+[ "$movedowner" = cocaptain ] \
+  || fail "routing: re-addressing left a stale owner '$movedowner' behind"
+pass "re-addressing an item moves its queue and its owner together"
+
+FM_HOME=$HOME15 "$BRIDGE" route --id for-cap --to nobody >/dev/null 2>&1 \
+  && fail "routing: accepted an unknown reader"
+pass "routing refuses an unknown reader"
+
+# With every ask routed away, the board says so plainly rather than looking
+# like a board that failed to load.
+allclear=$(FM_HOME=$HOME15 "$RENDER" --html)
+case "$allclear" in
+  *"nothing is waiting on you"*) : ;;
+  *) fail "routing: with all asks routed away the board does not report a clear queue" ;;
+esac
+pass "with every ask routed away the captain's queue reads as clear, not as empty"
+
 echo "all bridge ledger and fold tests passed"

@@ -58,12 +58,34 @@ FM_BRIDGE_MAX_RECORD_BYTES=${FM_BRIDGE_MAX_RECORD_BYTES:-3800}
 #              preserve: a new event kind must stay an ordinary addition here.
 FM_BRIDGE_KINDS='critical decision event task term steering'
 
-# The disposition triple. This field is load-bearing: it exists so the captain
-# never mistakes an fm-handled item for an open ask.
-#   needs-captain - waiting on them; ONLY these are asks
-#   fm-handling   - firstmate has it; visible so it is not forgotten, not an ask
-#   resolved      - done, and carries a pointer to where the outcome lives
-FM_BRIDGE_STATES='needs-captain fm-handling resolved'
+# The disposition set. This field is load-bearing: it exists so the captain
+# never mistakes an fm-handled item for an open ask, and so an item that is not
+# theirs to answer never lands on their queue at all.
+#   needs-captain   - waiting on the captain; ONLY these are captain asks
+#   needs-cocaptain - ADDRESSED TO A DIFFERENT READER. Machine and repo
+#                     infrastructure routes to the co-captain (the dotfiles
+#                     session) through the ledger. This is a ROUTING decision,
+#                     not a label: a machine-config item once sat on the
+#                     captain's queue for a day when its whole resolution was
+#                     one reader away, and the queue it sits on is what
+#                     determines whether that happens again.
+#   fm-handling     - firstmate has it; visible so it is not forgotten, not an ask
+#   resolved        - done, and carries a pointer to where the outcome lives
+FM_BRIDGE_STATES='needs-captain needs-cocaptain fm-handling resolved'
+
+# Who an item is addressed to, as a routing target. fm_bridge_state_for_reader
+# turns it into the disposition that puts the item on that reader's queue.
+# shellcheck disable=SC2034 # Read by bin/fm-bridge.sh's --to diagnostics.
+FM_BRIDGE_READERS='captain cocaptain firstmate'
+
+fm_bridge_state_for_reader() {  # <reader>
+  case "$1" in
+    captain)   printf 'needs-captain' ;;
+    cocaptain) printf 'needs-cocaptain' ;;
+    firstmate) printf 'fm-handling' ;;
+    *)         return 1 ;;
+  esac
+}
 
 FM_BRIDGE_SEVERITIES='critical high normal low'
 
@@ -171,8 +193,9 @@ fm_bridge_default_state() {  # <kind>
 
 fm_bridge_default_owner() {  # <state>
   case "$1" in
-    needs-captain) printf 'captain' ;;
-    *)             printf 'firstmate' ;;
+    needs-captain)   printf 'captain' ;;
+    needs-cocaptain) printf 'cocaptain' ;;
+    *)               printf 'firstmate' ;;
   esac
 }
 
