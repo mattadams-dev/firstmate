@@ -10,10 +10,15 @@ HERDR_LAB_HELPER=${HERDR_LAB_HELPER:-$ROOT/bin/fm-herdr-lab.sh}
 fail() { printf 'not ok - %s\n' "$1" >&2; exit 1; }
 pass() { printf 'ok - %s\n' "$1"; }
 
-command -v herdr >/dev/null 2>&1 || { echo 'skip: herdr not found'; exit 0; }
-command -v jq >/dev/null 2>&1 || { echo 'skip: jq not found'; exit 0; }
 command -v python3 >/dev/null 2>&1 || { echo 'skip: python3 not found'; exit 0; }
 [ -x "$HERDR_LAB_HELPER" ] || { echo "skip: Herdr lab helper not executable at $HERDR_LAB_HELPER"; exit 0; }
+# Gate on the precondition this test actually needs - an isolated lab session it
+# can provision - instead of on "herdr" being on PATH, which proves nothing about
+# session state (bin/fm-herdr-lab.sh owns the verdict and the reason text).
+if ! HERDR_LAB_GATE_REASON=$("$HERDR_LAB_HELPER" gate); then
+  echo "skip: $HERDR_LAB_GATE_REASON"
+  exit 0
+fi
 
 REAL_HERDR=$(command -v herdr)
 HERDR_ORIGINAL_PATH=$PATH
@@ -64,7 +69,7 @@ lab() { env PATH="$HERDR_ORIGINAL_PATH" "$HERDR_LAB_HELPER" run "$HERDR_LAB_SESS
 production_process_proof() {
   FM_HOME="$HOME_DIR" FM_BACKEND=herdr HERDR_SESSION="$HERDR_LAB_SESSION" \
     FM_HERDR_SESSION_CLEANUP_SOURCE_ONLY=1 PATH="$FAKEBIN:$HERDR_ORIGINAL_PATH" \
-    bash -c '. "$1"; fm_herdr_cleanup_process_is_idle_shell "$2" "$3"' \
+    bash -c '. "$1"; fm_backend_herdr_pane_idle_shell_pid "$2" "$3" >/dev/null' \
       _ "$ROOT/bin/fm-herdr-session-cleanup.sh" "$HERDR_LAB_SESSION" "$PANE"
 }
 focus_snapshot() {

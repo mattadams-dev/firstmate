@@ -4,6 +4,8 @@
 #
 # Usage:
 #   fm-herdr-lab.sh name <label>
+#   fm-herdr-lab.sh gate [<session>]
+#   fm-herdr-lab.sh gate-token
 #   fm-herdr-lab.sh prepare <session>
 #   fm-herdr-lab.sh provision <session>
 #   fm-herdr-lab.sh run <session> <herdr arguments...>
@@ -11,6 +13,15 @@
 #   fm-herdr-lab.sh teardown <session>
 #
 # Session names must begin with "fm-lab-" and can never be "default".
+# The gate command answers whether this environment can host an isolated lab
+# session at all: it prints nothing and exits 0 when a lab can be provisioned,
+# or prints exactly one "herdr lab unavailable: <cause>" line to stdout and
+# exits 1 when it cannot.
+# It exists so callers gate on the precondition they actually need instead of
+# on "herdr" being on PATH, which proves nothing about session state.
+# The gate-token command prints the stable leading token of every gate reason so
+# callers such as the required CI Herdr lane derive it from this one owner rather
+# than hardcoding a copy that can silently drift.
 # The name command sanitizes the label, caps it at 16 characters, and appends
 # process/random suffixes to keep generated socket paths short.
 # Every Herdr call made here carries a trailing --session <session>.
@@ -58,11 +69,14 @@ fm_herdr_lab_session_list() { # <session>
   fm_herdr_lab_raw "$1" session list --json
 }
 
+# Exits 2 when the fleet cannot be read and 3 when it can be read but holds no
+# single running default session, so one Herdr call answers both questions and a
+# caller never has to re-probe to tell the two causes apart.
 fm_herdr_lab_fleet_state() { # <session>
   local name=$1 sessions snapshot
   sessions=$(fm_herdr_lab_session_list "$name" 2>/dev/null) || {
     fm_herdr_lab_error "cannot read Herdr sessions for the fleet-state tripwire"
-    return 1
+    return 2
   }
   snapshot=$(printf '%s' "$sessions" | jq -c '
     [.sessions[]? | select(.default == true)]
@@ -73,9 +87,50 @@ fm_herdr_lab_fleet_state() { # <session>
   ' 2>/dev/null)
   [ -n "$snapshot" ] || {
     fm_herdr_lab_error "fleet-state tripwire requires exactly one running default session"
-    return 1
+    return 3
   }
   printf '%s\n' "$snapshot"
+}
+
+# Single owner of the "can a lab session be provisioned here?" question.
+# Every reason line begins with FM_HERDR_LAB_GATE_TOKEN so one gate-skip token
+# covers every cause (bin/fm-test-run.sh --fail-on-gate-skip, the required CI
+# Herdr lane). The verdict is derived from the same fleet-state check provision
+# performs, so the gate and provision can never disagree.
+FM_HERDR_LAB_GATE_TOKEN='herdr lab unavailable'
+
+fm_herdr_lab_gate_reason() { # <cause>
+  printf '%s: %s\n' "$FM_HERDR_LAB_GATE_TOKEN" "$1"
+}
+
+fm_herdr_lab_gate_token() {
+  printf '%s\n' "$FM_HERDR_LAB_GATE_TOKEN"
+}
+
+fm_herdr_lab_gate() { # [<session>]
+  local name=${1:-fm-lab-gate-probe} state=0
+  fm_herdr_lab_validate_name "$name" 2>/dev/null || {
+    fm_herdr_lab_gate_reason "invalid lab session name '$name'"
+    return 1
+  }
+  command -v herdr >/dev/null 2>&1 || {
+    fm_herdr_lab_gate_reason "herdr not found"
+    return 1
+  }
+  command -v jq >/dev/null 2>&1 || {
+    fm_herdr_lab_gate_reason "jq not found (required by the Herdr lab helper)"
+    return 1
+  }
+  fm_herdr_lab_fleet_state "$name" >/dev/null 2>&1 || state=$?
+  case "$state" in
+    0) return 0 ;;
+    2) fm_herdr_lab_gate_reason "cannot list Herdr sessions" ;;
+    *)
+      fm_herdr_lab_gate_reason \
+        "no running default Herdr session for the lab fleet-state tripwire"
+      ;;
+  esac
+  return 1
 }
 
 fm_herdr_lab_prepare() { # <session>
@@ -299,7 +354,7 @@ fm_herdr_lab_name() { # <label>
 }
 
 fm_herdr_lab_usage() {
-  sed -n '2,13p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+  sed -n '2,24p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
 }
 
 fm_herdr_lab_main() {
@@ -308,6 +363,14 @@ fm_herdr_lab_main() {
     name)
       [ "$#" -eq 2 ] || { fm_herdr_lab_usage >&2; return 2; }
       fm_herdr_lab_name "$2"
+      ;;
+    gate)
+      [ "$#" -le 2 ] || { fm_herdr_lab_usage >&2; return 2; }
+      fm_herdr_lab_gate "${2:-}"
+      ;;
+    gate-token)
+      [ "$#" -eq 1 ] || { fm_herdr_lab_usage >&2; return 2; }
+      fm_herdr_lab_gate_token
       ;;
     prepare)
       [ "$#" -eq 2 ] || { fm_herdr_lab_usage >&2; return 2; }

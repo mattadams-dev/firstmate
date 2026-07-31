@@ -313,6 +313,9 @@ SH
 
 make_fake_herdr_secondmate_recovery() {
   local fakebin=$1
+  # The recovery kill now requires the shared named-session lock and an exact
+  # focus snapshot. Keep a focused sibling tab so this test's husk close is
+  # provably non-workspace-emptying and never needs to signal a fake shell pid.
   cat > "$fakebin/herdr" <<'SH'
 #!/usr/bin/env bash
 set -u
@@ -326,16 +329,19 @@ case "${1:-} ${2:-}" in
   "status --json")
     printf '%s\n' '{"client":{"protocol":14,"version":"test"},"server":{"running":true}}'
     ;;
+  "session list")
+    printf '{"sessions":[{"name":"default","running":true,"socket_path":"%s.sock"}]}\n' "$state"
+    ;;
   "workspace list")
-    printf '{"result":{"workspaces":[{"workspace_id":"ws1","label":"2ndmate-%s"}]}}\n' "$mate_id"
+    printf '{"result":{"workspaces":[{"workspace_id":"ws1","label":"2ndmate-%s","focused":true,"active_tab_id":"t-focus"}]}}\n' "$mate_id"
     ;;
   "tab list")
     if [ -e "$spawned" ]; then
-      printf '{"result":{"tabs":[{"tab_id":"t-new","workspace_id":"ws1","label":"fm-%s"}]}}\n' "$mate_id"
+      printf '{"result":{"tabs":[{"tab_id":"t-focus","workspace_id":"ws1","label":"captain","focused":true},{"tab_id":"t-new","workspace_id":"ws1","label":"fm-%s","focused":false}]}}\n' "$mate_id"
     elif [ -e "$killed" ]; then
-      printf '%s\n' '{"result":{"tabs":[]}}'
+      printf '%s\n' '{"result":{"tabs":[{"tab_id":"t-focus","workspace_id":"ws1","label":"captain","focused":true}]}}'
     else
-      printf '{"result":{"tabs":[{"tab_id":"t-old","workspace_id":"ws1","label":"fm-%s"}]}}\n' "$mate_id"
+      printf '{"result":{"tabs":[{"tab_id":"t-focus","workspace_id":"ws1","label":"captain","focused":true},{"tab_id":"t-old","workspace_id":"ws1","label":"fm-%s","focused":false}]}}\n' "$mate_id"
     fi
     ;;
   "tab create")
@@ -354,9 +360,9 @@ case "${1:-} ${2:-}" in
   "pane get")
     pane=${3:-}
     if [ "$pane" = p-new ] && [ -e "$spawned" ]; then
-      printf '%s\n' '{"result":{"pane":{"pane_id":"p-new"}}}'
+      printf '%s\n' '{"result":{"pane":{"pane_id":"p-new","tab_id":"t-new","workspace_id":"ws1"}}}'
     elif [ "$pane" = p-old ] && [ ! -e "$killed" ]; then
-      printf '%s\n' '{"result":{"pane":{"pane_id":"p-old"}}}'
+      printf '%s\n' '{"result":{"pane":{"pane_id":"p-old","tab_id":"t-old","workspace_id":"ws1"}}}'
     else
       printf '%s\n' '{"error":{"code":"pane_not_found"}}' >&2
       exit 1
@@ -410,14 +416,22 @@ SH
 # codex and opencode have no env markers (ancestry only). Without this, a local
 # claude/pi/grok session fails cases that pin a different fake harness while CI
 # (no ambient markers) still passes.
+# HERDR_SESSION is dropped for the same reason one layer down: it is the runtime
+# backend's ambient session selection (bin/backends/herdr.sh
+# fm_backend_herdr_session, deliberately mirroring tmux's $TMUX), so a firstmate
+# running inside a NAMED herdr session would otherwise make every fake-herdr
+# fixture resolve that operator session instead of the "default" its recorded
+# metadata and assertions pin.
 run_session_start() {
   local home=$1 root=$2 path=$3 pi_harness=${4:-}
   if [ -n "$pi_harness" ]; then
-    env -u CLAUDECODE -u GROK_AGENT PI_CODING_AGENT=true FM_PI_HARNESS="$pi_harness" \
+    env -u CLAUDECODE -u GROK_AGENT -u HERDR_SESSION \
+      PI_CODING_AGENT=true FM_PI_HARNESS="$pi_harness" \
       FM_HOME="$home" FM_ROOT_OVERRIDE="$root" PATH="$path" \
       "$SESSION_START"
   else
     env -u CLAUDECODE -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT \
+      -u HERDR_SESSION \
       FM_HOME="$home" FM_ROOT_OVERRIDE="$root" PATH="$path" \
       "$SESSION_START"
   fi
