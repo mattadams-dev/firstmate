@@ -30,10 +30,11 @@
 # product. Teardown proceeds only once the report exists and the shared
 # unresolved-decision completion gate verifies its captain-held inventory.
 # Before destructive cleanup, teardown acts as custodian for the task's evidence
-# through bin/fm-evidence.sh, which is a silent no-op unless this home opted in
-# with config/evidence-repo. That gate is on the local commit and never on the
-# push, so an unreachable remote never blocks reclaiming a worktree; --force
-# warns instead of refusing.
+# through bin/fm-evidence.sh, but only where this home opted in with
+# config/evidence-repo: with that file absent the step is inert and the helper is
+# never run at all. That gate is on the local commit and never on the push, so an
+# unreachable remote never blocks reclaiming a worktree; --force warns instead of
+# refusing.
 # Before destructive cleanup, teardown validates task check artifacts and any
 # matching quarantine entries as ordinary single-link files on the state
 # device. It refuses and preserves task state when that proof fails; otherwise
