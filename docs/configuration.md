@@ -151,6 +151,23 @@ An inherited `data/captain-shared.md` counts in a secondmate's total but remains
 The internal `/stow` skill curates only the editable local files in that case and reports the primary-owned shared file as a concrete exception if it alone exceeds the budget.
 The helper's header owns exact parsing, publication, and report output mechanics.
 
+## Task evidence write-through (config/evidence-repo)
+
+A task's artifact directory `data/<task-id>/` already survives cleanup on the local machine, which protects it from a crash but not from a lost machine or a lost handoff.
+Set the local, gitignored `config/evidence-repo` to the absolute path of a local clone of a separate evidence repository, and firstmate copies each task's artifact directory into that clone at teardown, giving the material real git provenance and an off-machine copy.
+The file is absent by default, and while it is absent teardown behaves exactly as it does without the feature.
+Firstmate performs this as custodian; no crewmate or scout path ever pushes to a remote.
+The destination is named only by this local file, so no repository is ever named in shared tracked material or in a generated brief.
+
+The local commit is the custody guarantee and the push is best-effort, so teardown gates on the commit alone: an unreachable remote leaves the evidence committed and cleanup proceeds, while evidence that could not be committed refuses cleanup instead of letting it destroy the worktree.
+Artifacts are copied without redaction, which is safe only while the destination is private, so the push confirms the repository's visibility first and refuses to publish into one that is not private; when visibility cannot be determined at all the push is skipped and the evidence stays committed locally.
+That confirmation reads every URL the push itself would reach, since a remote configured with several push URLs publishes to all of them at once, and it only accepts a `github.com` host, including the `github.com-<alias>` form a multi-account setup requires.
+A single destination that is on another host or is not private disqualifies the whole push, so unredacted evidence is never carried along to a repository whose privacy was not established.
+Layout is `<evidence-repo>/<home-tag>/<task-id>/`, keyed on the firstmate home so concurrent tasks sharing a task id across homes cannot collide, and derivable from the task alone through `bin/fm-evidence.sh path <task-id>` with no registry to consult.
+An artifact at or below the direct-commit limit is committed whole and anything larger is recorded in that task's `EVIDENCE-MANIFEST.txt` by size and SHA-256 only, so corpus-scale material is described rather than committed; the limit defaults to 64 MiB and the local, gitignored `config/evidence-max-direct-bytes` overrides it as a whole number of bytes.
+A symlink is recorded in that same manifest by its target and never followed, since following one would copy the corpus it exists to reference without duplicating.
+`bin/fm-evidence.sh --help` owns the exact verbs, exit codes, and mechanics.
+
 ## Secondmate routes (data/secondmates.md)
 
 Persistent secondmate routes live locally in `data/secondmates.md`.
