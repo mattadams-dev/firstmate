@@ -64,9 +64,34 @@ EOF
 run_teardown() {  # <case-dir> <task-id> [extra args...]
   local dir=$1 id=$2
   shift 2
+  run_teardown_from "$TEARDOWN" "$dir" "$id" "$@"
+}
+
+# The same run, through an explicitly named fm-teardown.sh, so a case can point
+# it at a bin/ that is missing a sibling.
+run_teardown_from() {  # <teardown-path> <case-dir> <task-id> [extra args...]
+  local script=$1 dir=$2 id=$3
+  shift 3
   PATH="$dir/home/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$dir/home" \
     FM_STATE_OVERRIDE="$dir/home/state" FM_DATA_OVERRIDE="$dir/home/data" \
-    FM_CONFIG_OVERRIDE="$dir/home/config" "$TEARDOWN" "$id" "$@" 2>&1
+    FM_CONFIG_OVERRIDE="$dir/home/config" "$script" "$id" "$@" 2>&1
+}
+
+# A bin/ that is complete except for bin/fm-evidence.sh, so a case can observe
+# what cleanup does when the helper cannot be run at all. Symlinks keep every
+# other sibling the REAL script, and mirroring the directory rather than listing
+# names means a future sibling never silently turns this into a weaker fixture.
+# Teardown resolves its siblings from the path it was invoked through, so the
+# shim substitutes for the whole bin/ without copying it.
+make_bin_without_evidence() {  # <name> -> echoes the shim bin dir
+  local shim="$TMP_ROOT/$1-bin" entry
+  mkdir -p "$shim"
+  for entry in "$ROOT"/bin/*; do
+    ln -s "$entry" "$shim/$(basename "$entry")"
+  done
+  rm -f "$shim/fm-evidence.sh"
+  [ ! -e "$shim/fm-evidence.sh" ] || fail "fixture still exposes bin/fm-evidence.sh"
+  printf '%s\n' "$shim"
 }
 
 # A destination that is configured but cannot be committed to must stop cleanup,
@@ -143,7 +168,50 @@ test_force_warns_but_proceeds() {
   pass "fm-teardown: --force warns about unpreservable evidence and proceeds"
 }
 
+# The gate is armed by the configured destination, and these two cases pin that
+# arming from both sides using the one condition that separates them: a helper
+# that cannot be run at all. An opted-out home must be INERT here, not merely
+# quiet - it has no evidence to preserve, so nothing about this feature may
+# decide whether its worktree can ever be reclaimed.
+test_optout_home_cleans_up_without_the_helper() {
+  local dir id=optout-nohelper shim out rc
+  dir=$(make_case optout-nohelper "$id")
+  shim=$(make_bin_without_evidence optout-nohelper)
+
+  set +e
+  out=$(run_teardown_from "$shim/fm-teardown.sh" "$dir" "$id")
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "an opted-out home was blocked by the evidence gate"$'\n'"$out"
+  assert_not_contains "$out" "preserve" "an opted-out home mentioned evidence preservation"
+  assert_absent "$dir/home/state/$id.meta" "cleanup did not complete in an opted-out home"
+  pass "fm-teardown: an opted-out home cleans up even when the evidence helper is absent"
+}
+
+# The mirror image: once a destination IS configured, an unrunnable helper is
+# unknown custody, so cleanup must refuse rather than assume nothing was owed.
+test_optin_home_refuses_when_the_helper_cannot_run() {
+  local dir id=optin-nohelper shim out rc
+  dir=$(make_case optin-nohelper "$id")
+  shim=$(make_bin_without_evidence optin-nohelper)
+  printf '%s\n' "$dir/evidence" > "$dir/home/config/evidence-repo"
+
+  set +e
+  out=$(run_teardown_from "$shim/fm-teardown.sh" "$dir" "$id")
+  rc=$?
+  set -e
+
+  [ "$rc" -ne 0 ] || fail "cleanup proceeded with a configured destination it could not write to"
+  assert_contains "$out" "could not preserve" "the refusal did not name the evidence gate"
+  assert_present "$dir/worktree/sentinel" "cleanup destroyed the worktree before refusing"
+  assert_present "$dir/home/state/$id.meta" "cleanup cleared task state before refusing"
+  pass "fm-teardown: an opted-in home refuses cleanup when the evidence helper cannot run"
+}
+
 test_unpreservable_evidence_refuses_cleanup
 test_unreachable_remote_does_not_block_cleanup
 test_optout_home_cleans_up_unchanged
+test_optout_home_cleans_up_without_the_helper
+test_optin_home_refuses_when_the_helper_cannot_run
 test_force_warns_but_proceeds
