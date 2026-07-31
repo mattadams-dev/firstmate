@@ -5,7 +5,9 @@ It replaces the terminal stream as the place they read, because a scrolling stre
 
 The whole design follows from one shape.
 
-**One canonical ledger. One fold. The board is generated and never hand-edited.**
+**One canonical ledger.**
+**One fold.**
+**The board is generated and never hand-edited.**
 
 ```
 bin/fm-bridge.sh          writer  ->  data/bridge/ledger.jsonl   append-only JSONL
@@ -53,7 +55,8 @@ With one, the check compares **raw stream against folded state** - the only comp
 
 ## The record schema (`v1`)
 
-One JSON object per line. Only `ts` and `id` are required on every record.
+One JSON object per line.
+Only `ts` and `id` are required on every record.
 
 | Field | Type | Meaning |
 | --- | --- | --- |
@@ -240,10 +243,12 @@ Accents keep one meaning each: red needs the captain, purple needs the co-captai
 
 ## Cadence and cost
 
-- The renderer is a deterministic script with **zero model involvement**. A model is never woken to update the Bridge and never hand-writes the HTML.
+- The renderer is a deterministic script with **zero model involvement**.
+  A model is never woken to update the Bridge and never hand-writes the HTML.
 - The supervision cycle owns the tick, every `FM_BRIDGE_INTERVAL` seconds (default 180, inside the captain's 2-5 minute window).
 - When the ledger is unchanged the body is **not** regenerated; only the marked freshness line is restamped.
-- The freshness line keys to the **render clock** and shows two times: `checked` advances every tick, `content as of` advances only when the ledger changed. A frozen board and a dead supervision cycle must not look the same.
+- The freshness line keys to the **render clock** and shows two times: `checked` advances every tick, `content as of` advances only when the ledger changed.
+  A frozen board and a dead supervision cycle must not look the same.
 
 ## Checking it
 
