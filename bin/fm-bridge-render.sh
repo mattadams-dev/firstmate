@@ -1526,7 +1526,7 @@ write_board() {  # <folded-at> <checked-at>
 # reads supervision freshness and a frozen clock would be indistinguishable from
 # a dead cycle.
 do_tick() {
-  local verbose=$1 now sig prev board rc
+  local verbose=$1 now sig prev board
   require_python
   now=$(fm_bridge_now)
   board=$(fm_bridge_board_path)
@@ -1544,12 +1544,14 @@ do_tick() {
     # full render rather than leaving a board nobody can date.
   fi
 
+  # The stamp is written only after the board actually landed, so a failed
+  # render leaves the signature stale and the NEXT tick retries instead of
+  # concluding nothing changed and skipping forever.
   write_board "$now" "$now" || return 1
-  rc=$?
   mkdir -p "$STATE_DIR" 2>/dev/null || true
   printf '%s' "$sig" > "$STAMP" 2>/dev/null || true
   [ "$verbose" -eq 1 ] && printf 'bridge: rendered %s\n' "$board"
-  return $rc
+  return 0
 }
 
 MODE='html'
