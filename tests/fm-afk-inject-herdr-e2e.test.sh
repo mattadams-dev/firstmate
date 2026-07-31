@@ -42,6 +42,10 @@ DAEMON="$ROOT/bin/fm-supervise-daemon.sh"
 # can provision - instead of on "herdr" being on PATH, which proves nothing about
 # session state (bin/fm-herdr-lab.sh owns the verdict and the reason text).
 herdr_lab_gate_or_skip 'herdr away-mode injection e2e' || exit 0
+# This suite runs against its own isolated lab session, so a Herdr pane
+# inherited from the terminal it was launched in must not follow spawn into it
+# as a cross-session parent identity (tests/herdr-test-safety.sh).
+herdr_forget_inherited_pane
 
 fail() { printf 'not ok - %s\n' "$1" >&2; cleanup_all; exit 1; }
 pass() { printf 'ok - %s\n' "$1"; }
