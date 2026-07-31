@@ -598,7 +598,7 @@ case "$routed" in
   *) fail "routing: the tab title counts co-captain items as captain asks" ;;
 esac
 case "$routed" in
-  *'<a href="#waiting"><b>1</b> waiting on you'*) : ;;
+  *'<b>1</b> waiting on you'*) : ;;
   *) fail "routing: the sticky counter counts co-captain items as captain asks" ;;
 esac
 tally=$(state_query "$HOME15" 'd["summary"]["needs-captain"]')
@@ -636,5 +636,74 @@ case "$allclear" in
   *) fail "routing: with all asks routed away the board does not report a clear queue" ;;
 esac
 pass "with every ask routed away the captain's queue reads as clear, not as empty"
+
+# --- 16. every link survives Lavish's annotation layer ----------------------
+#
+# The board is read inside Lavish, whose annotation layer installs a
+# capture-phase click handler that preventDefault()s everything except
+# [data-lavish-ui], [data-lavish-action], and native controls
+# (button,input,select,textarea,option,optgroup,label,summary,[contenteditable]).
+# `a` is NOT on that list. So a plain anchor looks like a link, hovers like a
+# link, and does nothing - and on a board whose job is getting the captain to a
+# PR, an unfollowable link is a silent failure of the core job. The in-page
+# asks-index jumps are swallowed by the identical handler, which would break the
+# one mechanism that makes an ask impossible to scroll past.
+#
+# A plain <a> anywhere in the renderer regresses this, so it is pinned here.
+
+HOME16=$(new_home)
+FM_HOME=$HOME16 "$BRIDGE" ask -q --id l1 --project orca --title "an ask to jump to" \
+  --answer "A" >/dev/null
+FM_HOME=$HOME16 "$BRIDGE" note -q --project orca --title "a landed change" \
+  --pointer "https://github.com/o/r/pull/7" >/dev/null
+FM_HOME=$HOME16 "$BRIDGE" task -q --id l-pr --project orca --phase pr-open \
+  --state needs-captain --pointer "https://github.com/o/r/pull/8" \
+  --answer "merge it" >/dev/null
+FM_HOME=$HOME16 "$BRIDGE" ask -q --id l-co --project machine --title "a routed ask" \
+  --answer "A" --to cocaptain >/dev/null
+FM_HOME=$HOME16 "$RENDER" --html > "$TMP_ROOT/links.html"
+
+python3 - "$TMP_ROOT/links.html" <<'LINKCHECK' || fail "links: see the reported anchor"
+import re, sys
+html = open(sys.argv[1]).read()
+anchors = re.findall(r"<a [^>]*>", html)
+if not anchors:
+    sys.exit("the board rendered no anchors at all, so this guard proves nothing")
+for tag in anchors:
+    if "data-lavish-action" not in tag:
+        sys.exit("anchor without Lavish pass-through, unclickable for the captain: %s" % tag)
+external = [t for t in anchors if 'href="http' in t]
+if not external:
+    sys.exit("no external link in the fixture, so the pass-through guard proves nothing")
+for tag in external:
+    if 'target="_blank"' not in tag:
+        sys.exit("external link would navigate the board away inside its iframe: %s" % tag)
+    if "noopener" not in tag:
+        sys.exit("new-tab link without noopener: %s" % tag)
+for tag in [t for t in anchors if 'href="#' in t]:
+    if "target=" in tag:
+        sys.exit("in-page jump should not open a new tab: %s" % tag)
+# Where a link cannot be followed at all, the URL must still be readable and
+# selectable - a visible full URL beats an unclickable thing that looks clickable.
+for match in re.finditer(r'<a [^>]*href="(https?://[^"]+)"[^>]*>([^<]*)</a>', html):
+    if match.group(1) != match.group(2):
+        sys.exit("external link text is not the URL itself, so it cannot be "
+                 "read or copied where clicking fails: %s" % match.group(1))
+sys.exit(0)
+LINKCHECK
+pass "every link carries Lavish's pass-through, opens safely, and reads as its own URL"
+
+# The answer forms must keep working under the same layer. They are <button>,
+# which Lavish already treats as native, so this checks the form was not
+# "improved" into an anchor at some point.
+python3 - "$TMP_ROOT/links.html" <<'FORMCHECK' \
+  || fail "links: the answer forms are no longer native controls under Lavish"
+import re, sys
+html = open(sys.argv[1]).read()
+if not re.search(r'<button class="ans"', html):
+    sys.exit("answer forms are not <button>, so Lavish will swallow their clicks")
+sys.exit(0)
+FORMCHECK
+pass "answer forms stay native controls, so rulings still queue through annotation"
 
 echo "all bridge ledger and fold tests passed"

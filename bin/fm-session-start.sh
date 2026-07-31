@@ -419,15 +419,15 @@ fi
 # session only reports the path. Never fatal: a board that cannot render must
 # not stop a session from starting.
 section "BRIDGE"
-BRIDGE_BOARD=$("$SCRIPT_DIR/fm-bridge-render.sh" --path 2>/dev/null || true)
+BRIDGE_BOARD=$(FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-bridge-render.sh" --path 2>/dev/null || true)
 if [ -z "$BRIDGE_BOARD" ]; then
   printf 'The captain board could not be located; check bin/fm-bridge-render.sh.\n'
 elif [ "$READ_ONLY" -eq 1 ]; then
   printf 'Board (not refreshed - this session is read-only): %s\n' "$BRIDGE_BOARD"
-elif "$SCRIPT_DIR/fm-bridge-render.sh" --tick >/dev/null 2>&1; then
+elif FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-bridge-render.sh" --tick >/dev/null 2>&1; then
   printf 'Board refreshed: %s\n' "$BRIDGE_BOARD"
   printf 'It is generated from %s and is never hand-edited.\n' \
-    "$("$SCRIPT_DIR/fm-bridge-render.sh" --ledger-path 2>/dev/null || echo 'the ledger')"
+    "$(FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-bridge-render.sh" --ledger-path 2>/dev/null || echo 'the ledger')"
   printf 'Write captain-relevant facts there as they happen with bin/fm-bridge.sh;\n'
   printf 'anything that reaches the captain only through this terminal is a delivery failure.\n'
 else

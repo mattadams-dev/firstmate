@@ -785,7 +785,7 @@ while :; do
   # freshness line, so the common case is nearly free. Never fatal: a board that
   # cannot render must not take down supervision.
   if [ "$(age_of "$STATE/.last-bridge")" -ge "$BRIDGE_INTERVAL" ]; then
-    "$SCRIPT_DIR/fm-bridge-render.sh" --tick >/dev/null 2>&1 || true
+    FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-bridge-render.sh" --tick >/dev/null 2>&1 || true
     touch "$STATE/.last-bridge"
   fi
 

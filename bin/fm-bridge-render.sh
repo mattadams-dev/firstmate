@@ -58,7 +58,11 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$SCRIPT_DIR/fm-bridge-lib.sh"
 
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
-FM_HOME="${FM_HOME:-$FM_ROOT}"
+# Resolved exactly as every other firstmate script resolves it, including the
+# FM_ROOT_OVERRIDE fallback. Resolving it any other way would let this script's
+# state dir point at a different home than its caller's - so a secondmate's
+# board and its supervision cycle could end up reading different homes.
+FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE_DIR="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 STAMP="$STATE_DIR/.bridge-render"
 
@@ -942,6 +946,40 @@ def esc(text):
     return _html.escape(_text(text), quote=True)
 
 
+def link(href, label=None, external=None):
+    """Every anchor on this board, and the ONLY way one should be emitted.
+
+    The board is read inside Lavish, whose annotation layer installs a
+    capture-phase click handler that calls preventDefault() on everything except
+    `[data-lavish-ui]`, `[data-lavish-action]`, and native controls -
+    `button,input,select,textarea,option,optgroup,label,summary,[contenteditable]`.
+    `a` is not on that list, so a plain anchor renders as a link, hovers like a
+    link, and does nothing when clicked. On a board whose whole job is getting
+    the captain to a PR, that is a silent failure of the core job.
+
+    `data-lavish-action` is Lavish's own pass-through and costs nothing
+    elsewhere: it exempts the anchor from annotation capture and nothing else,
+    so every other element on the page stays annotatable and rulings still queue
+    through the annotation layer. The answer-form buttons already work there
+    because `button` is on the native list.
+
+    External links also open in a new tab: the board is served in an iframe, so
+    a same-tab navigation would replace the board with the PR and lose the
+    reader's place.
+
+    Belt and braces for surfaces that honour none of this - an exported copy, an
+    older Lavish, a plain file:// open: the visible text of an external link is
+    the full URL itself, so it stays selectable and copyable even where it
+    cannot be followed.
+    """
+    if external is None:
+        external = href.startswith("http://") or href.startswith("https://")
+    text = href if label is None else label
+    extra = ' target="_blank" rel="noopener noreferrer"' if external else ""
+    return ('<a href="%s" data-lavish-action%s>%s</a>'
+            % (esc(href), extra, esc(text)))
+
+
 def state_class(item):
     if not item.get("recognized", {}).get("state", True):
         return "odd"
@@ -983,7 +1021,7 @@ def pointer_line(item):
         return ""
     target = item["pointer"]
     if target.startswith("http://") or target.startswith("https://"):
-        shown = '<a href="%s">%s</a>' % (esc(target), esc(target))
+        shown = link(target)
     else:
         shown = '<code>%s</code>' % esc(target)
     return '<div class="pointer"><span class="lbl">outcome</span>%s</div>' % shown
@@ -1074,8 +1112,8 @@ def render_html(doc, checked_at):
         # the ordering does not support.
         longest = max(asks, key=lambda k: items[k]["age_seconds"] or 0)
         add('<div id="pin" class="pin-asks"><div class="wrap">'
-            '<a href="#waiting"><b>%d</b> waiting on you &middot; '
-            "longest %s</a></div></div>"
+            '<a href="#waiting" data-lavish-action><b>%d</b> waiting on you '
+            "&middot; longest %s</a></div></div>"
             % (len(asks), esc(items[longest]["age_label"])))
     else:
         add('<div id="pin" class="pin-clear"><div class="wrap">'
@@ -1145,7 +1183,8 @@ def render_html(doc, checked_at):
         add('<ol class="asks">')
         for key in asks:
             item = items[key]
-            add('<li%s><a href="#item-%s"><span class="ref">%s</span>'
+            add('<li%s><a href="#item-%s" data-lavish-action>'
+                '<span class="ref">%s</span>'
                 '<span class="proj">%s</span>'
                 '<span class="what">%s</span>'
                 '<span class="age">%s</span></a></li>'
@@ -1182,7 +1221,8 @@ def render_html(doc, checked_at):
         add('<ol class="asks co">')
         for key in cocaptain:
             item = items[key]
-            add('<li%s><a href="#item-%s"><span class="ref">%s</span>'
+            add('<li%s><a href="#item-%s" data-lavish-action>'
+                '<span class="ref">%s</span>'
                 '<span class="proj">%s</span><span class="what">%s</span>'
                 '<span class="age">%s</span></a></li>'
                 % (' class="aging"' if item.get("aging") else "",
@@ -1267,7 +1307,7 @@ def render_html(doc, checked_at):
             # one surface they read.
             target = item["pointer"]
             if target.startswith("http://") or target.startswith("https://"):
-                trail = ' <a href="%s">%s</a>' % (esc(target), esc(target))
+                trail = " " + link(target)
             elif target:
                 trail = ' <code>%s</code>' % esc(target)
             else:
@@ -1300,7 +1340,7 @@ def render_html(doc, checked_at):
             item = items[key]
             target = item["pointer"]
             if target.startswith("http"):
-                where = '<a href="%s">%s</a>' % (esc(target), esc(target))
+                where = link(target)
             elif target:
                 where = "<code>%s</code>" % esc(target)
             else:

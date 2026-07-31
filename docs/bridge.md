@@ -217,6 +217,25 @@ There is deliberately **no ack machinery in v1** - no read receipts, no dismissa
 
 The board embeds the exact state document it was drawn from in `<script type="application/json" id="fm-bridge-state">`, so it can be audited without trusting the renderer, and so `--state` and the board provably cannot diverge.
 
+### Links, and the Lavish annotation layer
+
+The board is read inside Lavish, whose annotation layer installs a capture-phase click handler that calls `preventDefault()` on everything except `[data-lavish-ui]`, `[data-lavish-action]`, and native controls (`button`, `input`, `select`, `textarea`, `option`, `optgroup`, `label`, `summary`, `[contenteditable]`).
+
+**`a` is not on that list.**
+A plain anchor therefore renders as a link, hovers as a link, and does nothing when clicked.
+On a board whose job is getting the captain to a PR, that is a silent failure of the core job - and it silently breaks the in-page asks-index jumps too, which are the mechanism that makes an ask impossible to scroll past.
+
+`data-lavish-action` is Lavish's own pass-through, and using it is the whole fix.
+It exempts that one anchor from annotation capture and nothing else, so every other element stays annotatable and rulings still queue through the annotation layer.
+Answer forms need nothing: they are `<button>`, which is already native-exempt.
+
+Every anchor goes through one `link()` helper in `bin/fm-bridge-render.sh`, which also:
+
+- opens external links with `target="_blank" rel="noopener noreferrer"`, because the board is served in an iframe and a same-tab navigation would replace it;
+- uses the **full URL as the visible link text**, so on any surface that honours none of this - an exported copy, an older Lavish, a plain `file://` open - the URL is still readable and selectable. A selectable plain-text URL beats an unclickable one that looks clickable.
+
+`tests/fm-bridge.test.sh` fails on any anchor that skips the helper.
+
 ### Styling
 
 The board reuses the tokyonight-storm token block from the canonical scaffold in `~/code/personal/dotfiles/docs/labs/`, with one deliberate departure: the scaffold's DaisyUI and Tailwind CDN layer is not used.
