@@ -643,13 +643,12 @@ pass "with every ask routed away the captain's queue reads as clear, not as empt
 # capture-phase click handler that preventDefault()s everything except
 # [data-lavish-ui], [data-lavish-action], and native controls
 # (button,input,select,textarea,option,optgroup,label,summary,[contenteditable]).
-# `a` is NOT on that list. So a plain anchor looks like a link, hovers like a
-# link, and does nothing - and on a board whose job is getting the captain to a
-# PR, an unfollowable link is a silent failure of the core job. The in-page
-# asks-index jumps are swallowed by the identical handler, which would break the
-# one mechanism that makes an ask impossible to scroll past.
+# `a` is NOT on that list, so a plain anchor swallows left-clicks - both PR
+# links and the in-page asks-index jumps. Right-click still works, so this is
+# friction rather than a blocker; data-lavish-action is Lavish's own
+# pass-through and costs one attribute, so the fix is pure authoring hygiene.
 #
-# A plain <a> anywhere in the renderer regresses this, so it is pinned here.
+# A plain <a> anywhere in the renderer regresses it silently, so it is pinned.
 
 HOME16=$(new_home)
 FM_HOME=$HOME16 "$BRIDGE" ask -q --id l1 --project orca --title "an ask to jump to" \
@@ -683,12 +682,12 @@ for tag in external:
 for tag in [t for t in anchors if 'href="#' in t]:
     if "target=" in tag:
         sys.exit("in-page jump should not open a new tab: %s" % tag)
-# Where a link cannot be followed at all, the URL must still be readable and
-# selectable - a visible full URL beats an unclickable thing that looks clickable.
+# A pointer's most useful label is the URL itself, which is also what keeps it
+# readable and copyable anywhere. This is the board's long-standing rendering,
+# not a fallback affordance.
 for match in re.finditer(r'<a [^>]*href="(https?://[^"]+)"[^>]*>([^<]*)</a>', html):
     if match.group(1) != match.group(2):
-        sys.exit("external link text is not the URL itself, so it cannot be "
-                 "read or copied where clicking fails: %s" % match.group(1))
+        sys.exit("external link text is not the URL itself: %s" % match.group(1))
 sys.exit(0)
 LINKCHECK
 pass "every link carries Lavish's pass-through, opens safely, and reads as its own URL"

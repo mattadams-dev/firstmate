@@ -949,28 +949,26 @@ def esc(text):
 def link(href, label=None, external=None):
     """Every anchor on this board, and the ONLY way one should be emitted.
 
-    The board is read inside Lavish, whose annotation layer installs a
-    capture-phase click handler that calls preventDefault() on everything except
+    Read inside Lavish, whose annotation layer installs a capture-phase click
+    handler that calls preventDefault() on everything except
     `[data-lavish-ui]`, `[data-lavish-action]`, and native controls -
     `button,input,select,textarea,option,optgroup,label,summary,[contenteditable]`.
-    `a` is not on that list, so a plain anchor renders as a link, hovers like a
-    link, and does nothing when clicked. On a board whose whole job is getting
-    the captain to a PR, that is a silent failure of the core job.
+    `a` is not on that list, so a plain anchor swallows left-clicks. Not a
+    blocker - right-click still opens the link - but `data-lavish-action` is
+    Lavish's own pass-through, so left-click working is a one-attribute
+    authoring fix rather than something to route around.
 
-    `data-lavish-action` is Lavish's own pass-through and costs nothing
-    elsewhere: it exempts the anchor from annotation capture and nothing else,
-    so every other element on the page stays annotatable and rulings still queue
-    through the annotation layer. The answer-form buttons already work there
-    because `button` is on the native list.
+    It exempts that anchor from annotation capture and nothing else: every other
+    element stays annotatable and rulings still queue through the annotation
+    layer. The answer-form buttons need nothing, because `button` is already on
+    the native list.
 
-    External links also open in a new tab: the board is served in an iframe, so
-    a same-tab navigation would replace the board with the PR and lose the
-    reader's place.
+    External links open in a new tab because the board is served in an iframe,
+    and a same-tab navigation would replace the board with the PR.
 
-    Belt and braces for surfaces that honour none of this - an exported copy, an
-    older Lavish, a plain file:// open: the visible text of an external link is
-    the full URL itself, so it stays selectable and copyable even where it
-    cannot be followed.
+    The visible text of an external link is the full URL, which is how this
+    board has always rendered pointers - the URL is the most useful label for
+    one. It is not a fallback affordance, and no second link mechanism exists.
     """
     if external is None:
         external = href.startswith("http://") or href.startswith("https://")
