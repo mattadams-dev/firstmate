@@ -168,6 +168,13 @@ An artifact at or below the direct-commit limit is committed whole and anything 
 A symlink is recorded in that same manifest by its target and never followed, since following one would copy the corpus it exists to reference without duplicating.
 `bin/fm-evidence.sh --help` owns the exact verbs, exit codes, and mechanics.
 
+## Bridge board and ledger (data/bridge/)
+
+The captain's board and the append-only ledger it is generated from live at `$FM_HOME/data/bridge/`, per home, gitignored.
+The supervision cycle renders the board on its own tick; nothing here needs setting for it to work.
+[docs/bridge.md](bridge.md) owns the record schema, the canonical paths, the one fold every consumer reads through, and the rendering caps.
+The `FM_BRIDGE_*` variables below tune it.
+
 ## Secondmate routes (data/secondmates.md)
 
 Persistent secondmate routes live locally in `data/secondmates.md`.
@@ -454,6 +461,13 @@ FM_HEARTBEAT=600        # base seconds between heartbeat scans; no-change heartb
 FM_HEARTBEAT_MAX=7200   # heartbeat backoff cap
 FM_CHECK_INTERVAL=300   # seconds between slow checks (authenticated merge polls, custom checks, or X-mode dispatch)
 FM_CHECK_TIMEOUT=30     # seconds allowed per slow check script
+FM_BRIDGE_INTERVAL=180  # seconds between Bridge board ticks in the watcher; an unchanged ledger only restamps freshness (docs/bridge.md)
+FM_BRIDGE_AGING_SECONDS=86400   # how long an open ask waits before the board flags it as aging
+FM_BRIDGE_LEDGER=       # absolute override of the Bridge ledger path; default is $FM_HOME/data/bridge/ledger.jsonl
+FM_BRIDGE_BOARD=        # absolute override of the generated board path; default is $FM_HOME/data/bridge/bridge.html
+FM_BRIDGE_NOW=          # fixed RFC3339 UTC clock for the Bridge, mainly for tests
+FM_BRIDGE_CAP_EVENTS=12   # notable events shown on the board before the zone overflows to the record
+FM_BRIDGE_MAX_RECORD_BYTES=3800   # per-record bound that keeps one ledger append atomic under O_APPEND
 FM_CODEX_WATCH_CHECKPOINT=180   # seconds per foreground watcher checkpoint in Codex primary supervision
 FM_CREW_STATE_NM_TIMEOUT=10   # seconds allowed per no-mistakes query inside fm-crew-state.sh
 FM_CREW_STATE_RUNS_LIMIT=200  # recent no-mistakes run rows scanned when axi status cannot be attributed to the current code
