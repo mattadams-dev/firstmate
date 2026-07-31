@@ -174,6 +174,13 @@ FM_HOME=$HOME4 "$BRIDGE" critical -q --id c-one --project fleet \
 FM_HOME=$HOME4 "$BRIDGE" note -q --project orca --title "seeded event" \
   --pointer "https://example.invalid/1" >/dev/null
 FM_HOME=$HOME4 "$BRIDGE" task -q --id t-one --project orca --phase validating >/dev/null
+# A PR waiting on a merge decision: a TASK that is also an ask. It reaches the
+# asks index like any other, so it needs an anchor to land on and a form to
+# answer with - the fleet strip renders rows, not cards, and an ask that links
+# nowhere is worse than one that was never listed.
+FM_HOME=$HOME4 "$BRIDGE" task -q --id t-pr --project orca --phase pr-open \
+  --state needs-captain --pointer "https://example.invalid/pull/9" \
+  --answer "merge it" --answer "hold" >/dev/null
 
 FM_HOME=$HOME4 "$RENDER" --state > "$TMP_ROOT/mode-state.json"
 FM_HOME=$HOME4 "$RENDER" --html > "$TMP_ROOT/mode-board.html"
@@ -205,6 +212,23 @@ sys.exit(0)
 PY
 pass "every folded ask reaches the board with an anchor and a title"
 
+# A task-kind ask renders as a table ROW, not a card, so it needs its own guard:
+# the asks index links to it, and an index entry that lands nowhere - or lands
+# somewhere with no way to answer - is worse than one that was never listed.
+python3 - "$TMP_ROOT/mode-board.html" <<'ROWCHECK' \
+  || fail "mode drift: a task-kind ask is listed but not answerable where it lands"
+import sys
+html = open(sys.argv[1]).read()
+if 'id="item-t-pr"' not in html:
+    sys.exit("the asks index links to #item-t-pr but the fleet strip has no such anchor")
+row = html.split('id="item-t-pr"', 1)[1].split("</tr>", 1)[0]
+for form in ("merge it", "hold"):
+    if form not in row:
+        sys.exit("the PR row offers no way to answer it: %r missing" % form)
+sys.exit(0)
+ROWCHECK
+pass "a PR waiting on a merge decision is anchored and answerable in the fleet strip"
+
 # --- 5. an ask looks like an ask --------------------------------------------
 
 state_of=$(state_query "$HOME4" 'd["items"]["o-one"]["state"]')
@@ -224,10 +248,10 @@ pass "the writer records disposition explicitly in the raw stream"
 
 # The ask is countable, findable, and cannot be scrolled past.
 asks=$(state_query "$HOME4" 'len(d["asks"])')
-[ "$asks" = 2 ] || fail "asks: expected 2 open asks, got $asks"
+[ "$asks" = 3 ] || fail "asks: expected 3 open asks, got $asks"
 boardhtml=$(cat "$TMP_ROOT/mode-board.html")
 case "$boardhtml" in
-  *"<title>Bridge - 2 need you</title>"*) : ;;
+  *"<title>Bridge - 3 need you</title>"*) : ;;
   *) fail "asks: the tab title does not carry the open-ask count" ;;
 esac
 case "$boardhtml" in
@@ -240,7 +264,7 @@ pass "the open-ask count rides in the tab title and a sticky counter"
 FM_HOME=$HOME4 "$BRIDGE" resolve -q --id o-one \
   --pointer "https://example.invalid/ruling" >/dev/null
 after=$(state_query "$HOME4" 'len(d["asks"])')
-[ "$after" = 1 ] || fail "asks: resolving did not clear the ask (still $after)"
+[ "$after" = 2 ] || fail "asks: resolving did not clear the ask (still $after)"
 ptr=$(state_query "$HOME4" 'd["items"]["o-one"]["pointer"]')
 [ "$ptr" = "https://example.invalid/ruling" ] || fail "asks: resolved item lost its pointer"
 pass "resolving clears the ask and keeps a pointer to where the outcome lives"

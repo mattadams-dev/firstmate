@@ -1305,10 +1305,20 @@ def render_html(doc, checked_at):
                 where = "<code>%s</code>" % esc(target)
             else:
                 where = '<span style="color:var(--tn-muted)">-</span>'
-            add("<tr><td><b>%s</b></td><td>%s</td><td>%s</td><td class=\"st\">%s</td>"
-                "<td>%s</td></tr>"
-                % (esc(item["title"] or item["id"]), esc(item["project"]),
-                   esc(item["phase"] or "-"), chip(item), where))
+            # The anchor is not decoration: a task waiting on the captain is
+            # listed in the asks index above, and that index links here. A row
+            # with no id would leave the captain clicking an ask that goes
+            # nowhere. The answer form is here for the same reason - a row that
+            # asks for a ruling and offers no way to give one is the one
+            # regression that matters on this surface.
+            forms = answer_forms(item)
+            aged = ('<span class="chip aging">waiting %s</span>' % esc(item["age_label"])
+                    if item.get("aging") else "")
+            add('<tr id="item-%s"><td><b>%s</b></td><td>%s</td><td>%s</td>'
+                '<td class="st">%s%s</td><td>%s%s</td></tr>'
+                % (esc(item["id"]), esc(item["title"] or item["id"]),
+                   esc(item["project"]), esc(item["phase"] or "-"),
+                   chip(item), aged, where, forms))
         add("</table></div>")
     else:
         add('<p class="empty">No tasks on the board.</p>')

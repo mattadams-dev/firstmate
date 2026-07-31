@@ -135,7 +135,18 @@ if [ "$BRIDGE_YOLO" = on ]; then
 else
   BRIDGE_STATE=needs-captain
 fi
-FM_HOME="$FM_HOME" "$FM_ROOT/bin/fm-bridge.sh" task --quiet \
-  --id "$ID" --project "$(basename "${BRIDGE_PROJECT:-fleet}")" \
-  --phase pr-open --state "$BRIDGE_STATE" --pointer "$URL" \
-  --title "$ID" >/dev/null 2>&1 || true
+if [ "$BRIDGE_STATE" = needs-captain ]; then
+  # It is an ask, so it carries the ways to answer it. A row that asks for a
+  # ruling and offers no way to give one makes the captain compose the reply
+  # from scratch, which is what the answer forms exist to prevent.
+  FM_HOME="$FM_HOME" "$FM_ROOT/bin/fm-bridge.sh" task --quiet \
+    --id "$ID" --project "$(basename "${BRIDGE_PROJECT:-fleet}")" \
+    --phase pr-open --state needs-captain --pointer "$URL" --title "$ID" \
+    --answer "merge it" --answer "hold, I want to look first" \
+    >/dev/null 2>&1 || true
+else
+  FM_HOME="$FM_HOME" "$FM_ROOT/bin/fm-bridge.sh" task --quiet \
+    --id "$ID" --project "$(basename "${BRIDGE_PROJECT:-fleet}")" \
+    --phase pr-open --state fm-handling --pointer "$URL" \
+    --title "$ID" >/dev/null 2>&1 || true
+fi
