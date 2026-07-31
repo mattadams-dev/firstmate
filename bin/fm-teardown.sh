@@ -30,10 +30,11 @@
 # product. Teardown proceeds only once the report exists and the shared
 # unresolved-decision completion gate verifies its captain-held inventory.
 # Before destructive cleanup, teardown acts as custodian for the task's evidence
-# through bin/fm-evidence.sh, which is a silent no-op unless this home opted in
-# with config/evidence-repo. That gate is on the local commit and never on the
-# push, so an unreachable remote never blocks reclaiming a worktree; --force
-# warns instead of refusing.
+# through bin/fm-evidence.sh, but only where this home opted in with
+# config/evidence-repo: with that file absent the step is inert and the helper is
+# never run at all. That gate is on the local commit and never on the push, so an
+# unreachable remote never blocks reclaiming a worktree; --force warns instead of
+# refusing.
 # Before destructive cleanup, teardown validates task check artifacts and any
 # matching quarantine entries as ordinary single-link files on the state
 # device. It refuses and preserves task state when that proof fails; otherwise
@@ -1364,15 +1365,25 @@ if [ "$FORCE" != "--force" ] \
 fi
 
 # Firstmate is the custodian for a work item's evidence, and it acts here,
-# before anything is destroyed. bin/fm-evidence.sh is a silent no-op unless this
-# home opted in with config/evidence-repo. It fails only when the local commit
-# fails, so this gate is on preserved evidence and never on a reachable network:
-# an unreachable remote must not block reclaiming a worktree, and cleanup must
-# not proceed over evidence that was never committed. Secondmate homes are not
-# work items and carry no task artifact directory.
+# before anything is destroyed. It fails only when the local commit fails, so
+# this gate is on preserved evidence and never on a reachable network: an
+# unreachable remote must not block reclaiming a worktree, and cleanup must not
+# proceed over evidence that was never committed. Secondmate homes are not work
+# items and carry no task artifact directory.
 # --force is the approved discard path, so it warns instead of refusing, exactly
 # as it does for every other teardown refusal.
-if [ "$KIND" != secondmate ]; then
+#
+# The write-through is opt-in and off by default, so the gate is ARMED ONLY
+# where config/evidence-repo names a destination. A home that never opted in has
+# no evidence to preserve and therefore nothing to refuse over, and it must not
+# acquire a dependency on the helper at all: this whole block has to be inert
+# there, not merely quiet, or an unrunnable helper would refuse every cleanup in
+# a home the feature was never turned on for. The test is [ -f ] rather than a
+# content check so it stays strictly weaker than bin/fm-evidence.sh's own
+# enablement predicate, which additionally requires a non-empty value: any file
+# it might accept still reaches it, and the helper alone decides whether a
+# configured destination is usable.
+if [ "$KIND" != secondmate ] && [ -f "$CONFIG/evidence-repo" ]; then
   if ! FM_HOME="$FM_HOME" FM_DATA_OVERRIDE="$DATA" FM_CONFIG_OVERRIDE="$CONFIG" \
       "$SCRIPT_DIR/fm-evidence.sh" preserve "$ID"; then
     if [ "$FORCE" != "--force" ]; then
