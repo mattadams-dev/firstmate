@@ -909,39 +909,79 @@ FM_HOME=$HOME20 "$BRIDGE" lint >/dev/null 2>&1 \
   || fail "lint: a readable, clean record no longer exits 0"
 pass "a readable clean record still lints clean"
 
-# --- 21. the counter travels with the viewport WITHOUT covering the board ---
+# --- 21. every out-of-flow element is confined to a column the page reserves --
 #
 # Two browser audits proved text on this board fully occluded, on rows in two
 # different zones. The rows were never the cause: chrome that travels with a
 # vertically scrolling page and sits across the top ends up over every row that
-# passes it, and parks an anchor target underneath itself. The fix is
-# geometric - the page reserves a gutter, nothing is laid out inside it, and
-# everything viewport-fixed lives there - so these guard the geometry rather
-# than any one symptom of losing it.
+# passes it, and parks an anchor target underneath itself. What replaced it is
+# geometric - the page reserves a column, no content is laid out inside it, and
+# everything out of flow lives there.
+#
+# A shell suite cannot measure geometry, so this does NOT claim the page has no
+# overlap; a browser audit is what says that. It pins the structural property
+# that overlap-freedom rests on, by PARSING the stylesheet the board emits
+# rather than matching how it happens to be written, so reformatting the CSS
+# cannot break the guard and cannot quietly satisfy it either.
 
-railboard=$(cat "$TMP_ROOT/links.html")
-case "$railboard" in
-  *"body { padding-right:var(--rail); }"*) : ;;
-  *) fail "rail: the page reserves no gutter, so viewport-fixed chrome sits over the board" ;;
-esac
-case "$railboard" in
-  *"#rail {"*"position:fixed"*) : ;;
-  *) fail "rail: the counter is not fixed to the viewport, so an ask can be scrolled past" ;;
-esac
-case "$railboard" in
+python3 - "$TMP_ROOT/links.html" <<'RAIL' || fail "rail: see the reported rule"
+import re, sys
+
+html = open(sys.argv[1]).read()
+sheet = re.search(r"<style>(.*?)</style>", html, re.S)
+if sheet is None:
+    sys.exit("the board carries no stylesheet at all")
+
+# selector -> {property: value}, whitespace, comments and ordering irrelevant.
+rules = {}
+stylesheet = re.sub(r"/\*.*?\*/", " ", sheet.group(1), flags=re.S)
+for selectors, body in re.findall(r"([^{}]+)\{([^{}]*)\}", stylesheet):
+    declarations = {}
+    for declaration in body.split(";"):
+        if ":" not in declaration:
+            continue
+        name, _, value = declaration.partition(":")
+        declarations[name.strip()] = value.strip()
+    for selector in selectors.split(","):
+        selector = " ".join(selector.split())
+        if selector.startswith(("@", "/*")) or not selector:
+            continue
+        rules.setdefault(selector, {}).update(declarations)
+
+out_of_flow = sorted(selector for selector, declarations in rules.items()
+                     if declarations.get("position") in ("fixed", "absolute", "sticky"))
+if out_of_flow != ["#rail"]:
+    sys.exit("out-of-flow elements other than the reserved column exist: %s"
+             % out_of_flow)
+
+rail_width = rules["#rail"].get("width", "")
+reserved = rules.get("body", {}).get("padding-right", "")
+variable = re.search(r"var\((--[a-z-]+)\)", rail_width)
+if variable is None:
+    sys.exit("the fixed column has no stated width to reserve: %r" % rail_width)
+if variable.group(1) not in reserved:
+    sys.exit("the page reserves %r, which is not the fixed column's width %r"
+             % (reserved, rail_width))
+if rules["#rail"].get("right") != "0":
+    sys.exit("the fixed column is not pinned to the edge it reserves")
+
+# Opening the ruling composer must widen that same reserved column rather than
+# introduce a second out-of-flow element over the board.
+docked = [selector for selector in rules if "dock-open" in selector]
+if not docked:
+    sys.exit("nothing widens the reserved column, so the composer must cover content")
+if not any(variable.group(1) in declarations
+           for selector, declarations in rules.items() if "dock-open" in selector):
+    sys.exit("the composer does not widen the reserved column: %s" % docked)
+sys.exit(0)
+RAIL
+pass "the only out-of-flow element is the column the page reserves for it"
+
+case "$(cat "$TMP_ROOT/links.html")" in
   *'<aside id="rail">'*'<div id="pin">'*) : ;;
-  *) fail "rail: the ask counter is not inside the reserved gutter" ;;
+  *) fail "rail: the ask counter is not inside the reserved column" ;;
 esac
-# The ruling composer widens the gutter rather than covering the page.
-case "$railboard" in
-  *"body.dock-open { --rail:"*) : ;;
-  *) fail "rail: the ruling composer is not docked into the gutter" ;;
-esac
-case "$railboard" in
-  *"position:sticky; top:0"*)
-    fail "rail: something is stuck across the top of the viewport again, where it covers rows" ;;
-esac
-pass "the counter travels with the viewport from a gutter the board never occupies"
+pass "the ask counter travels with the viewport from inside that column"
 
 # --- 22. a discarded task never reads as resolved --------------------------
 #
@@ -972,7 +1012,11 @@ resolved_tally=$(state_query "$HOME22" 'd["summary"]["resolved"]')
 [ "$resolved_tally" = 1 ] \
   || fail "discard: the resolved tally counts $resolved_tally, so a discard inflated it"
 discard_tally=$(state_query "$HOME22" 'd["summary"]["discarded"]')
-[ "$discard_tally" = 1 ] || fail "discard: discarded items are not tallied as discarded"
+[ "$discard_tally" = 2 ] \
+  || fail "discard: expected both discards tallied as discarded, got $discard_tally"
+handling_tally=$(state_query "$HOME22" 'd["summary"]["fm-handling"]')
+[ "$handling_tally" = 0 ] \
+  || fail "discard: discarded work is still counted as work firstmate is carrying"
 kept=$(state_query "$HOME22" 'd["items"]["t-known"]["state"]')
 [ "$kept" = fm-handling ] \
   || fail "discard: a discard overwrote the disposition the item had earned ($kept)"
@@ -980,9 +1024,13 @@ landed=$(state_query "$HOME22" 'd["items"]["t-landed"]["state"]')
 [ "$landed" = resolved ] || fail "discard: an ordinary cleanup stopped reading as resolved"
 pass "a discarded task is tallied as discarded; only a landed cleanup reads as resolved"
 
-# It is a task on the fleet strip, not an event filed somewhere quieter.
-zone=$(state_query "$HOME22" '"t-orphan" in d["zones"]["fleet_open"]')
+# It is a task on the fleet strip, not an event filed somewhere quieter - in the
+# strip's own discarded group, which is capped rather than growing forever.
+zone=$(state_query "$HOME22" '"t-orphan" in d["zones"]["fleet_discarded"]')
 [ "$zone" = True ] || fail "discard: a discarded task is not on the fleet strip"
+notopen=$(state_query "$HOME22" '"t-orphan" in d["zones"]["fleet_open"]')
+[ "$notopen" = False ] \
+  || fail "discard: thrown-away work is listed as open work firstmate is carrying"
 noask=$(state_query "$HOME22" 'len(d["asks"]) + len(d["cocaptain_asks"])')
 [ "$noask" = 0 ] || fail "discard: a discarded task landed on somebody's queue"
 pass "a discarded task stays on the fleet strip and on nobody's queue"
@@ -1010,7 +1058,7 @@ PY
 pass "a discarded row carries the skipped check, the discard, and the reason for it"
 
 case "$(cat "$TMP_ROOT/discard-board.html")" in
-  *"<b>1</b>discarded"*) : ;;
+  *"<b>2</b>discarded"*) : ;;
   *) fail "discard: the board tallies no discarded count" ;;
 esac
 pass "the board tallies discarded work separately from resolved work"
@@ -1020,5 +1068,120 @@ pass "the board tallies discarded work separately from resolved work"
 FM_HOME=$HOME22 "$BRIDGE" lint --strict >/dev/null 2>&1 \
   || fail "discard: a discarded record is reported as a record-hygiene problem"
 pass "a discarded record lints clean"
+
+# --- 23. discarded work is never an ask, whatever it was before ------------
+#
+# The dangerous case is not the discard-only record: it is a task that EARNED an
+# ask disposition first. fm-pr-check.sh marks every non-yolo PR needs-captain,
+# so a forced discard after that used to leave a live, aging request to rule on
+# merging a branch that had been thrown away - on the one surface built so the
+# captain never mistakes a non-ask for an ask.
+
+HOME23=$(new_home)
+# Exactly the sequence the producers write: spawn, then pr-check, then a forced
+# teardown's discard.
+FM_HOME=$HOME23 "$BRIDGE" task -q --id task-pr --project orca --phase dispatched \
+  --state fm-handling --owner task-pr --title task-pr >/dev/null
+FM_HOME=$HOME23 "$BRIDGE" task -q --id task-pr --project orca --phase pr-open \
+  --state needs-captain --pointer "https://example.invalid/pull/9" --title task-pr \
+  --answer "merge it" --answer "hold, I want to look first" --ts 2026-07-28T09:00:00Z >/dev/null
+FM_HOME=$HOME23 "$BRIDGE" append -q id=task-pr phase=discarded \
+  note="forced teardown: landed-work check skipped, work discarded - branch was a dead end" \
+  >/dev/null
+# A routed ask discarded the same way, because the co-captain's queue is the
+# same mechanism and must not keep it either.
+FM_HOME=$HOME23 "$BRIDGE" ask -q --id m-gone --project machine --title "a routed ask" \
+  --answer "A" --to cocaptain >/dev/null
+FM_HOME=$HOME23 "$BRIDGE" append -q id=m-gone phase=discarded \
+  note="forced teardown: landed-work check skipped, work discarded - box was reimaged" >/dev/null
+# And one genuinely open ask, so the guard cannot pass by emptying the board.
+FM_HOME=$HOME23 "$BRIDGE" ask -q --id o-live --project orca --title "a live decision" \
+  --answer "A" >/dev/null
+
+FM_HOME=$HOME23 "$RENDER" --state | python3 -c '
+import json, sys
+doc = json.load(sys.stdin)
+for key in ("task-pr", "m-gone"):
+    item = doc["items"][key]
+    if not item["discarded"]:
+        sys.exit("%s does not report itself discarded" % key)
+    if item["aging"]:
+        sys.exit("%s is flagged aging, so discarded work still nags" % key)
+    for name, queue in list(doc["queues"].items()) + [("asks", doc["asks"]),
+                                                      ("cocaptain_asks", doc["cocaptain_asks"])]:
+        if key in queue:
+            sys.exit("%s is still on %s after being discarded" % (key, name))
+# The earned disposition stays in the record for audit; only the classification
+# changed.
+if doc["items"]["task-pr"]["state"] != "needs-captain":
+    sys.exit("the discard rewrote the disposition the ledger recorded")
+if doc["summary"]["needs-captain"] != 1:
+    sys.exit("captain tally is %d, so discarded work is still counted as owed"
+             % doc["summary"]["needs-captain"])
+if doc["summary"]["needs-cocaptain"]:
+    sys.exit("the co-captain tally still counts discarded work")
+if doc["summary"]["discarded"] != 2:
+    sys.exit("discarded work is not counted as discarded: %r" % doc["summary"])
+if doc["asks"] != ["o-live"]:
+    sys.exit("the asks index is %r, not the one live ask" % doc["asks"])
+' || fail "discard: see the reported queue"
+pass "discarding work removes it from every queue, tally, and aging flag it had earned"
+
+FM_HOME=$HOME23 "$RENDER" --html > "$TMP_ROOT/discard-ask.html"
+askboard=$(cat "$TMP_ROOT/discard-ask.html")
+case "$askboard" in
+  *"<title>Bridge - 1 need you</title>"*) : ;;
+  *) fail "discard: the tab title still counts discarded work as needing the captain" ;;
+esac
+case "$askboard" in
+  *'title="1 waiting on you'*) : ;;
+  *) fail "discard: the rail badge still counts discarded work" ;;
+esac
+python3 - "$TMP_ROOT/discard-ask.html" <<'PY' || fail "discard: see the reported row"
+import re, sys
+html = open(sys.argv[1]).read()
+row = re.search(r'<tr id="item-task-pr">.*?</tr>', html, re.S)
+if row is None:
+    sys.exit("the discarded task vanished from the board instead of staying visible")
+row = row.group(0)
+if "discarded" not in row:
+    sys.exit("the row does not show the work was discarded: %s" % row)
+if "was needs-captain" not in row:
+    sys.exit("the row hides the disposition it had earned: %s" % row)
+if "branch was a dead end" not in row:
+    sys.exit("the row does not carry the reason it was discarded: %s" % row)
+if "button class=\"ans\"" in row:
+    sys.exit("the row still offers a ruling on work that no longer exists: %s" % row)
+index = re.search(r'<section id="waiting">.*?</section>', html, re.S).group(0)
+if "item-task-pr" in index:
+    sys.exit("discarded work is still listed in the asks index")
+sys.exit(0)
+PY
+pass "a discarded row stays visible with its reason, offers no ruling, and leaves the index"
+
+# --- 24. discarded rows are capped, and say what they are not showing ------
+
+HOME24=$(new_home)
+i=1
+while [ "$i" -le 9 ]; do
+  FM_HOME=$HOME24 "$BRIDGE" task -q --id "gone-$i" --project orca --phase cleaned \
+    --state fm-handling --ts "2026-07-31T10:0$i:00Z" >/dev/null
+  FM_HOME=$HOME24 "$BRIDGE" append -q id="gone-$i" phase=discarded \
+    note="forced teardown: landed-work check skipped, work discarded - reason $i" \
+    ts="2026-07-31T10:0$i:30Z" >/dev/null
+  i=$((i + 1))
+done
+capped=$(FM_HOME=$HOME24 "$RENDER" --html)
+shown=$(printf '%s' "$capped" | grep -c 'class="chip discarded"' || true)
+[ "$shown" = 6 ] || fail "discard cap: expected 6 discarded rows shown, got $shown"
+case "$capped" in
+  *"older discarded tasks in the record"*) : ;;
+  *) fail "discard cap: rows were dropped with no overflow pointer to the record" ;;
+esac
+case "$capped" in
+  *"+3 older discarded tasks"*) : ;;
+  *) fail "discard cap: the overflow does not say how many are not shown" ;;
+esac
+pass "discarded rows are capped with a visible pointer to the full record"
 
 echo "all bridge ledger and fold tests passed"

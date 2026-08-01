@@ -144,11 +144,18 @@ Those appends are best-effort and can never fail their caller.
 A persistent secondmate is not a work item, so neither spawn nor teardown ever gives one a row.
 An ordinary cleanup records `state=resolved`, which only its landed-work test can support; a `--force <reason>` cleanup skipped that test, so it records `phase=discarded` with the reason that authorized the override and leaves the row's last honest state alone.
 A forced retirement of a persistent secondmate records the same provenance as a `kind=event` note against `fleet`, because a secondmate is not a work item and must never become a strip row.
+The events zone renders that note on the board, so the most destructive override in the fleet is not the one whose reason is hardest to read.
 
 **`phase=discarded` is a fact, and never a disposition.**
 The fold reads it as one: an item carrying it reports `discarded: true`, and when the ledger never stated a disposition for that item the fold refuses to invent one rather than falling through to `resolved`.
 Every value in the set would be a claim - `resolved` says an outcome landed, `fm-handling` says someone is carrying it, the ask states say a reader owes an answer - and a cleanup that skipped the landed-work test observed none of them.
 Such an item folds as a `task` with an empty `state`, is tallied under `summary.discarded` rather than `summary.resolved`, sits on the fleet strip and on nobody's queue, and renders with a `discarded` chip plus the reason on the row itself.
+
+**Discarded is a classification, not an edit to the record.**
+Once an item carries the discard phase it is discarded for every captain-facing purpose, whatever disposition it had earned first.
+It is absent from `asks`, `cocaptain_asks`, `queues`, the `needs-captain` and `needs-cocaptain` tallies, the tab-title count, the rail badge, and the aging flag, and its answer forms are withdrawn - nobody can rule on work that no longer exists.
+The earned state stays in the ledger and in `--state` for audit, and the board shows it beside the `discarded` chip as `was needs-captain` rather than instead of it.
+Discarded tasks sit in their own capped tail of the fleet strip, `zones.fleet_discarded` under `caps.fleet_discarded` (default 6, `FM_BRIDGE_CAP_FLEET_DISCARDED`), with the same visible overflow pointer to the record that landed work uses - a rare override must not grow into a permanent wall of rows.
 
 ### Why append-only, and why records are bounded
 

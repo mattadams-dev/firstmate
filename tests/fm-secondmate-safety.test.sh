@@ -1457,7 +1457,27 @@ EOF
     || fail "forced secondmate retirement did not name the secondmate it discarded"
   grep -F '"kind":"task"' "$home/data/bridge/ledger.jsonl" >/dev/null \
     && fail "forced secondmate retirement wrote a task row for a persistent secondmate"
-  pass "secondmate force teardown discards child work, records its provenance, and creates no fleet-strip row"
+  # Recorded is not the same as readable. This is the most destructive override
+  # in the script, so its reason has to reach the board the captain reads, not
+  # only the ledger and the state document behind it.
+  if command -v python3 >/dev/null 2>&1; then
+    FM_HOME="$home" "$ROOT/bin/fm-bridge-render.sh" --html > "$TMP_ROOT/secondmate-board.html"
+    python3 - "$TMP_ROOT/secondmate-board.html" <<'PY' \
+      || fail "forced secondmate retirement: the reason never reaches the board"
+import re, sys
+html = open(sys.argv[1]).read()
+visible = re.sub(r"<script.*?</script>", "", html, flags=re.S)
+for fragment in ("secondmate domain retired under --force",
+                 "in-flight-work check skipped",
+                 "test: captain approved discarding this work"):
+    if fragment not in visible:
+        sys.exit("the board never shows %r" % fragment)
+if re.search(r'<tr id="item-domain"', visible):
+    sys.exit("the retirement rendered as a fleet-strip row")
+sys.exit(0)
+PY
+  fi
+  pass "secondmate force teardown discards child work, shows its provenance on the board, and creates no fleet-strip row"
 }
 
 test_secondmate_force_teardown_refuses_child_quarantine_symlink() {

@@ -118,6 +118,22 @@ LIFECYCLE_STAGES = ("sent", "delivered", "consumed")
 # a disposition on purpose: the work was thrown away, which is not one of the
 # four things a disposition can say about who owes what.
 DISCARD_PHASE = "discarded"
+
+
+def disposition(item):
+    """What the item is TO A READER, which is not always what `state` says.
+
+    The ledger keeps the disposition the item earned - a PR that reached
+    `needs-captain` really did, and that record stays exactly as written for
+    audit. But once the work is discarded nobody owes an answer about it, and a
+    board that still lists it as an ask is asking the captain to rule on a merge
+    of a branch that no longer exists. Classification is therefore derived here,
+    ONCE, and every queue, tally, and zone reads it - a second place that
+    reasons about `state` directly is how the two came apart in the first place.
+    """
+    if item.get("discarded"):
+        return DISCARD_PHASE
+    return item["state"]
 # `needs-cocaptain` is a ROUTING target, not a second flavour of "open". An
 # item addressed to the co-captain (the dotfiles session, which reads this
 # ledger directly) never joins the captain's ask list, because the cost being
@@ -162,6 +178,7 @@ AGING_SECONDS = int(os.environ.get("FM_BRIDGE_AGING_SECONDS", str(24 * 3600)))
 CAP_EVENTS = int(os.environ.get("FM_BRIDGE_CAP_EVENTS", "12"))
 CAP_RESOLVED_DECISIONS = int(os.environ.get("FM_BRIDGE_CAP_RESOLVED_DECISIONS", "3"))
 CAP_FLEET_RESOLVED = int(os.environ.get("FM_BRIDGE_CAP_FLEET_RESOLVED", "6"))
+CAP_FLEET_DISCARDED = int(os.environ.get("FM_BRIDGE_CAP_FLEET_DISCARDED", "6"))
 
 
 def _text(value):
@@ -450,15 +467,15 @@ def fold(ledger_path, folded_at):
     def recency(key):
         return (items[key]["ts"], index[key])
 
-    def disposition(key):
+    def triage(key):
         item = items[key]
-        return (STATE_RANK.get(item["state"], 3),
+        return (STATE_RANK.get(disposition(item), 3),
                 SEVERITY_RANK.get(item["severity"], 4),
                 -index[key])
 
     criticals = [k for k in order
                  if items[k]["kind"] == "critical" and items[k]["state"] != "resolved"]
-    criticals.sort(key=disposition)
+    criticals.sort(key=triage)
     criticals_resolved = sorted(
         [k for k in order if items[k]["kind"] == "critical" and items[k]["state"] == "resolved"],
         key=recency, reverse=True)
@@ -471,7 +488,7 @@ def fold(ledger_path, folded_at):
         if not keys:
             continue
         open_keys = sorted([k for k in keys if items[k]["state"] != "resolved"],
-                           key=disposition)
+                           key=triage)
         done_keys = sorted([k for k in keys if items[k]["state"] == "resolved"],
                            key=recency, reverse=True)
         decisions.append({
@@ -483,12 +500,20 @@ def fold(ledger_path, folded_at):
 
     events = sorted([k for k in order if items[k]["kind"] == "event"],
                     key=recency, reverse=True)
-    fleet_open = sorted([k for k in order
-                         if items[k]["kind"] == "task" and items[k]["state"] != "resolved"],
-                        key=disposition)
-    fleet_done = sorted([k for k in order
-                         if items[k]["kind"] == "task" and items[k]["state"] == "resolved"],
+    # Three fleet groups, because thrown-away work is neither open nor landed.
+    # Open work is uncapped - all of it has to be listed - while landed and
+    # discarded work is capped with a visible overflow pointer, so a rare
+    # forced discard cannot grow into a permanent wall of rows on the surface
+    # the captain reads first.
+    fleet_open = sorted([k for k in order if items[k]["kind"] == "task"
+                         and disposition(items[k]) not in ("resolved", DISCARD_PHASE)],
+                        key=triage)
+    fleet_done = sorted([k for k in order if items[k]["kind"] == "task"
+                         and disposition(items[k]) == "resolved"],
                         key=recency, reverse=True)
+    fleet_discarded = sorted([k for k in order if items[k]["kind"] == "task"
+                              and disposition(items[k]) == DISCARD_PHASE],
+                             key=recency, reverse=True)
     terms = [k for k in order if items[k]["kind"] == "term"]
     steering = [k for k in order if items[k]["kind"] == "steering"]
     unzoned = [k for k in order if not items[k]["recognized"]["kind"]]
@@ -518,7 +543,7 @@ def fold(ledger_path, folded_at):
         item["age_seconds"] = _age_seconds(item.get("state_since") or item["first_ts"],
                                            now_epoch)
         item["age_label"] = _age_label(item["age_seconds"])
-        item["aging"] = (item["state"] in ("needs-captain", "needs-cocaptain")
+        item["aging"] = (disposition(item) in ("needs-captain", "needs-cocaptain")
                          and item["age_seconds"] is not None
                          and item["age_seconds"] >= AGING_SECONDS)
 
@@ -527,7 +552,8 @@ def fold(ledger_path, folded_at):
     # whatever arrived most recently.
     def _queue(state):
         queue = [k for k in order
-                 if items[k]["kind"] in BOARD_KINDS and items[k]["state"] == state]
+                 if items[k]["kind"] in BOARD_KINDS
+                 and disposition(items[k]) == state]
         queue.sort(key=lambda k: (SEVERITY_RANK.get(items[k]["severity"], 4),
                                   -(items[k]["age_seconds"] or 0),
                                   index[k]))
@@ -549,13 +575,13 @@ def fold(ledger_path, folded_at):
     for item in items.values():
         if item["kind"] not in BOARD_KINDS:
             continue
-        if item["state"] in summary:
-            summary[item["state"]] += 1
-        elif item["discarded"]:
-            # Thrown away, and counted as thrown away. Folding it into resolved
-            # would be the board claiming an outcome that the cleanup which
-            # skipped the landed-work test never observed.
-            summary["discarded"] += 1
+        # Counted as what it is to a reader. Thrown-away work is never folded
+        # into resolved, and never left in the ask tallies either: the captain
+        # triages against these numbers, so an ask that no longer exists costs
+        # exactly the attention this surface was built to protect.
+        bucket = disposition(item)
+        if bucket in summary:
+            summary[bucket] += 1
         else:
             summary["unrecognized"] += 1
 
@@ -604,6 +630,7 @@ def fold(ledger_path, folded_at):
             "events": events,
             "fleet_open": fleet_open,
             "fleet_resolved": fleet_done,
+            "fleet_discarded": fleet_discarded,
             "unzoned": unzoned,
             "substrate": steering,
         },
@@ -614,6 +641,7 @@ def fold(ledger_path, folded_at):
             "events": CAP_EVENTS,
             "resolved_decisions": CAP_RESOLVED_DECISIONS,
             "fleet_resolved": CAP_FLEET_RESOLVED,
+            "fleet_discarded": CAP_FLEET_DISCARDED,
         },
         "checks": {
             "folded state": "bin/fm-bridge-render.sh --state",
@@ -872,10 +900,11 @@ table.strip td.st { white-space:nowrap; width:1%; }
 /* Why a row was discarded, on the row itself. The strip is scannable, so this
    stays small and secondary - but it is on the board, because the board is
    where the disposition is read. */
-table.strip .why {
+table.strip .why, ul.events .why {
   margin-top:.25rem; font-size:.76rem; line-height:1.45; color:var(--tn-orange);
   overflow-wrap:anywhere;
 }
+.chip.was { color:var(--tn-muted); }
 .stripwrap { overflow-x:auto; border:1px solid var(--tn-line); border-radius:.5rem; background:var(--tn-panel); }
 
 ul.events { list-style:none; margin:0; padding:0; }
@@ -1101,13 +1130,8 @@ def link(href, label=None, external=None):
             % (esc(href), extra, esc(text)))
 
 
-def is_discard_only(item):
-    """Discarded, and the ledger never stated a disposition for it."""
-    return bool(item.get("discarded")) and not item["state"]
-
-
 def state_class(item):
-    if is_discard_only(item):
+    if disposition(item) == DISCARD_PHASE:
         return "discarded"
     if not item.get("recognized", {}).get("state", True):
         return "odd"
@@ -1120,7 +1144,13 @@ def chip(item):
         # Not one of the four dispositions, and it does not pretend to be one.
         # A blank chip here would read as a rendering fault and a `?` would read
         # as a record nobody could parse; this was thrown away, and says so.
-        return '<span class="chip discarded">discarded</span>'
+        # Whatever disposition it had earned before that is shown beside it
+        # rather than instead of it: the ledger keeps that value for audit, and
+        # a red NEEDS-CAPTAIN chip on work nobody can act on is the exact
+        # confusion the state field exists to prevent.
+        was = ('<span class="chip was">was %s</span>' % esc(item["state"])
+               if item["state"] else "")
+        return '<span class="chip discarded">discarded</span>%s' % was
     label = item["state"] if cls != "odd" else item["state"] + " ?"
     return '<span class="chip %s">%s</span>' % (cls, esc(label))
 
@@ -1162,7 +1192,7 @@ def pointer_line(item):
 
 def answer_forms(item):
     """The mandatory answer forms. Clicking queues a ready-to-paste ruling."""
-    if item["state"] == "resolved" or not item["answers"]:
+    if disposition(item) in ("resolved", DISCARD_PHASE) or not item["answers"]:
         return ""
     label = item["ref"] or item["id"]
     buttons = []
@@ -1453,11 +1483,21 @@ def render_html(doc, checked_at):
                 trail = ' <code>%s</code>' % esc(target)
             else:
                 trail = ""
-            add('<li><span class="when">%s</span><span class="what">%s%s %s</span></li>'
+            # An event that carries a note carries it onto the board. A forced
+            # secondmate retirement lands here rather than on the fleet strip -
+            # a persistent secondmate is not a work item - and it is the most
+            # destructive override in the fleet, so the judgement that
+            # authorized it has to be readable where the captain reads, not
+            # only in the record behind the page.
+            why = ('<div class="why">%s</div>' % esc(item["note"])
+                   if item["note"] else "")
+            add('<li><span class="when">%s</span>'
+                '<span class="what">%s%s %s%s</span></li>'
                 % (esc((item["ts"] or "")[:16].replace("T", " ")),
                    esc(item["title"] or item["id"]),
                    trail,
-                   chip(item) if item["state"] != "resolved" else ""))
+                   chip(item) if item["state"] != "resolved" else "",
+                   why))
         add("</ul>")
     else:
         add('<p class="empty">No events recorded.</p>')
@@ -1472,7 +1512,12 @@ def render_html(doc, checked_at):
     add("<section><h2>Fleet</h2>")
     add('<p class="zone-note">Every task firstmate is carrying. Red rows are '
         "waiting on you.</p>")
-    rows = zones["fleet_open"] + zones["fleet_resolved"][:caps["fleet_resolved"]]
+    # Open work first and uncapped, then the recent tail of what was thrown
+    # away, then the recent tail of what landed. Both tails are capped and both
+    # say how much they are not showing.
+    discarded_shown = zones["fleet_discarded"][:caps["fleet_discarded"]]
+    resolved_shown = zones["fleet_resolved"][:caps["fleet_resolved"]]
+    rows = zones["fleet_open"] + discarded_shown + resolved_shown
     if rows:
         add('<div class="stripwrap"><table class="strip">')
         add("<tr><th>task</th><th>project</th><th>phase</th><th>state</th>"
@@ -1510,7 +1555,12 @@ def render_html(doc, checked_at):
         add("</table></div>")
     else:
         add('<p class="empty">No tasks on the board.</p>')
-    hidden = len(zones["fleet_resolved"]) - len(zones["fleet_resolved"][:caps["fleet_resolved"]])
+    hidden_discarded = len(zones["fleet_discarded"]) - len(discarded_shown)
+    if hidden_discarded > 0:
+        add('<div class="overflow">+%d older discarded tasks in the record. '
+            "They are capped here, not dropped - <code>%s</code> has every one."
+            "</div>" % (hidden_discarded, esc(doc["checks"]["raw stream"])))
+    hidden = len(zones["fleet_resolved"]) - len(resolved_shown)
     if hidden > 0:
         add('<div class="overflow">+%d older landed tasks in the record.</div>' % hidden)
     add("</section>")
