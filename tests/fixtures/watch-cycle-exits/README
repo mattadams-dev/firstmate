@@ -1,0 +1,7 @@
+# cycle-exits.log: 499 watcher lifecycle records captured 2026-07-31 verbatim from
+# a live home's state/.watch-cycle-exits.log. Preserved because that log accumulates
+# over days and cannot be regenerated, so it is raw evidence, not a generated input.
+#
+# The record breakdown it shows, and the contract that breakdown drove, are owned by
+# docs/verification/supervision.md, section "Arm-layer successor and parked check-in
+# cadence". Do not restate them here; a second copy would drift.
