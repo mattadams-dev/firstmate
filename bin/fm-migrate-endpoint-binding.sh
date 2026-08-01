@@ -63,8 +63,17 @@
 #
 # THE ONE-SHOT GUARD
 #
-# `--apply` refuses against a home where any state/*.meta already carries an
-# `endpoint_task_id_provenance=` line. Observe-only mode stays allowed there.
+# `--apply` refuses against a home that is already FULLY migrated: some
+# state/*.meta carries an `endpoint_task_id_provenance=` line AND no unbound
+# candidate remains. Observe-only mode stays allowed there.
+#
+# The second half of that condition is load-bearing. Refusing on provenance
+# alone would make a partially completed run unresumable: a run interrupted
+# after writing some records would leave the rest stranded forever, with the
+# hand-write as the only remaining remedy - the exact action this migration
+# exists to prevent. A resumed run is safe because the per-record filter writes
+# only to a record with zero binding lines, so it cannot rewrite or re-stamp an
+# already-migrated record.
 #
 # It cannot drift. The proof that the backfill already ran is the repaired
 # records themselves, not a marker file kept alongside them. A marker can be
@@ -79,7 +88,9 @@
 #
 # It preserves the recovery use this script is retained for. A genuinely new
 # legacy home carries zero provenance lines, so the documented procedure works
-# there on first run and refuses on the second.
+# there on first run and refuses once that run has finished the home. An
+# interrupted run leaves unbound candidates behind, so the next `--apply`
+# resumes and repairs only what is still stranded.
 #
 # It blocks the hazard, not the looking. The failure mode is a tool that fills a
 # safety field on demand, so the guard gates the write. Observing and reporting
@@ -97,7 +108,7 @@
 #            mistyped invocation cannot silently repair the wrong home)
 #
 # Exit: 0 when every candidate was either migrated or reported; 1 on a usage
-# or environment error, including `--apply` against an already-migrated home.
+# or environment error, including `--apply` against a fully migrated home.
 # A disposition item is a reported outcome, not a failure of this script.
 
 set -uo pipefail
@@ -108,7 +119,7 @@ APPLY=0
 case "${1:-}" in
   '') ;;
   --apply) APPLY=1 ;;
-  -h|--help) sed -n '2,101p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
+  -h|--help) sed -n '2,112p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
   *) echo "usage: $(basename "$0") [--apply]" >&2; exit 1 ;;
 esac
 
@@ -119,10 +130,38 @@ STATE="$FM_HOME/state"
 # One-shot guard. The repaired records are their own "already ran" marker, so
 # this cannot drift away from the fact it reports. Gating the write rather than
 # the run keeps observation available on an already-migrated home.
-provenance_records=$(grep -l '^endpoint_task_id_provenance=' "$STATE"/*.meta 2>/dev/null | wc -l | tr -d ' ')
-if [ "$APPLY" -eq 1 ] && [ "${provenance_records:-0}" -gt 0 ]; then
-  echo "REFUSED: $STATE already carries migration provenance on $provenance_records record(s); this backfill is one-shot per home." >&2
-  echo "Re-run without --apply to observe and report this home, then resolve anything it reports by hand." >&2
+#
+# The condition is provenance present AND no unbound candidate left, which is
+# exactly "this home is already fully migrated, nothing legitimate remains".
+# Gating on provenance alone would strand every record an interrupted run had
+# not reached yet, and the only remedy left would be the hand-write this whole
+# migration exists to avoid.
+#
+# Resuming is safe because the per-record filter below writes only to a record
+# with zero binding lines: a resumed run physically cannot rewrite, overwrite,
+# or re-stamp an already-migrated record. The per-record filter carries the
+# anti-overwrite guarantee; this guard only has to stop a casual re-run when
+# there is nothing left to do.
+#
+# An unbound candidate is any record with a window line and zero
+# endpoint_task_id= lines, the same set the loop considers for repair. Do not
+# narrow it to herdr-backed records: that would duplicate backend routing here
+# where it could drift out of step with the loop, and a permissive guard cannot
+# cause a write the per-record filter would not already allow.
+provenance_records=0
+unbound_candidates=0
+for scan_meta in "$STATE"/*.meta; do
+  [ -e "$scan_meta" ] || continue
+  if grep -q '^endpoint_task_id_provenance=' "$scan_meta" 2>/dev/null; then
+    provenance_records=$((provenance_records + 1))
+  fi
+  if grep -q '^window=' "$scan_meta" 2>/dev/null && ! grep -q '^endpoint_task_id=' "$scan_meta" 2>/dev/null; then
+    unbound_candidates=$((unbound_candidates + 1))
+  fi
+done
+if [ "$APPLY" -eq 1 ] && [ "$provenance_records" -gt 0 ] && [ "$unbound_candidates" -eq 0 ]; then
+  echo "REFUSED: $STATE is already fully migrated: $provenance_records record(s) carry migration provenance and no unbound record remains; this backfill is one-shot per home." >&2
+  echo "Re-run without --apply to observe and report this home. A disposition item needs a decision, and a binding is only ever populated from a live observation of the endpoint." >&2
   exit 1
 fi
 

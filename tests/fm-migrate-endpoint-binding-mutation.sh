@@ -24,8 +24,14 @@ set -u
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SRC="$ROOT/bin/fm-migrate-endpoint-binding.sh"
 SUITE="$ROOT/tests/fm-migrate-endpoint-binding.test.sh"
-MUTANT="$ROOT/bin/fm-migrate-endpoint-binding.mutant.sh"
+# The mutant lives in bin/ so the copy's own FM_ROOT resolution still finds the
+# repo, but deliberately carries no .sh suffix: bin/fm-lint.sh lints bin/*.sh,
+# and a residue left by a signal the EXIT trap cannot catch must not become a
+# lint failure in an unrelated later run. Removed up front as well as on exit,
+# so a stale copy from a killed run heals rather than accumulating.
+MUTANT="$ROOT/bin/fm-migrate-endpoint-binding.mutant"
 
+rm -f "$MUTANT"
 trap 'rm -f "$MUTANT"' EXIT
 
 overall=0
@@ -97,10 +103,10 @@ echo "== mutations that let an unobserved value be written =="
 # instead of from the live label. This is exactly "assertion instead of
 # observation" - the field would be filled by belief and the check would still
 # pass. It must break the case that owns that property, and only that case.
-guard_line 210 'local observed_id=${observed_label#fm-}' &&
+guard_line 249 'local observed_id=${observed_label#fm-}' &&
 mutate value-from-filename-not-label \
   label_names_other_task_refused \
-  '210s/.*/  local observed_id=$id/'
+  '249s/.*/  local observed_id=$id/'
 
 # Each remaining mutation neutralises ONE guard by replacing its condition with
 # `true`, leaving the `|| { ... }` refusal block syntactically intact. A
@@ -108,24 +114,24 @@ mutate value-from-filename-not-label \
 # red, which proves nothing about any individual guard.
 
 # M2: stop requiring the live pane to be the recorded pane.
-guard_line 233 '[ "$observed_pane" = "$pane" ]' &&
+guard_line 272 '[ "$observed_pane" = "$pane" ]' &&
 mutate skip-pane-identity-check \
   pane_mismatch_refused \
-  '233s/.*/  true || {/'
+  '272s/.*/  true || {/'
 
 # M3: stop requiring the workspace to belong to this home. The fixture gives
 # the foreign workspace a correctly-labelled tab, so only this check stands
 # between the migration and another home's endpoint.
-guard_line 182 'grep -qx -- "$workspace"' &&
+guard_line 221 'grep -qx -- "$workspace"' &&
 mutate skip-home-workspace-check \
   foreign_workspace_refused \
-  '182s/.*/  true || {/'
+  '221s/.*/  true || {/'
 
 # M4: accept a tab that holds more than one pane instead of refusing ambiguity.
-guard_line 228 '"$pane_matches" | wc -l' &&
+guard_line 267 '"$pane_matches" | wc -l' &&
 mutate accept-ambiguous-pane \
   ambiguous_pane_refused \
-  '228s/.*/  true || {/'
+  '267s/.*/  true || {/'
 
 echo
 echo "== mutations that turn a refusal shape back into a silent skip =="
@@ -135,30 +141,41 @@ echo "== mutations that turn a refusal shape back into a silent skip =="
 # the record, which is the silent-skip class this migration must never have.
 
 # M6: an empty endpoint_task_id= line stops being reported.
-guard_line 290 'empty endpoint task binding' &&
+guard_line 329 'empty endpoint task binding' &&
 mutate silent-skip-empty-binding \
   empty_binding_reported_not_skipped \
-  '290s/.*/      continue/'
+  '329s/.*/      continue/'
 
 # M7: a duplicated endpoint_task_id= line stops being reported.
-guard_line 285 'ambiguous endpoint task binding' &&
+guard_line 324 'ambiguous endpoint task binding' &&
 mutate silent-skip-duplicated-binding \
   duplicated_binding_reported_not_skipped \
-  '285s/.*/    continue/'
+  '324s/.*/    continue/'
 
 echo
-echo "== mutation that removes the one-shot property =="
+echo "== mutations on the one-shot property, in both directions =="
 
-# M8: neuter the guard that refuses --apply against an already-migrated home.
-# Only the refusal case can see this: every other fixture home carries zero
-# provenance lines, so the guard never fires there and removing it changes
-# nothing. Observe-only mode is unaffected by construction, so listing
-# one_shot_allows_observe_on_migrated_home would be an expectation this
-# experiment could satisfy only by accident.
-guard_line 123 '${provenance_records:-0}' &&
+# M8: neuter the guard that refuses --apply against a fully migrated home.
+# Only the refusal case can see this: every other fixture home either has an
+# unbound candidate left or carries zero provenance lines, so the guard never
+# fires there and removing it changes nothing. Observe-only mode is unaffected
+# by construction, and the resume case expects the run to proceed anyway, so
+# listing either would be an expectation this experiment could satisfy only by
+# accident.
+guard_line 162 '"$unbound_candidates" -eq 0' &&
 mutate neuter-one-shot-guard \
   one_shot_refuses_second_apply \
-  '123s/.*/if false; then/'
+  '162s/.*/if false; then/'
+
+# M9: reintroduce the defect this guard was corrected for - refuse whenever any
+# provenance exists, ignoring whether unbound candidates remain. That strands
+# every record an interrupted run never reached. It must break exactly the
+# resume case; a fully migrated home refuses under both conditions, so the
+# refusal case cannot see this mutation.
+guard_line 162 '"$provenance_records" -gt 0' &&
+mutate refuse-on-any-prior-work \
+  one_shot_allows_resume_after_partial_run \
+  '162s/.*/if [ "$APPLY" -eq 1 ] \&\& [ "$provenance_records" -gt 0 ]; then/'
 
 echo
 echo "== control: a blanket bypass should be caught broadly, not narrowly =="
@@ -171,10 +188,10 @@ echo "== control: a blanket bypass should be caught broadly, not narrowly =="
 # set: a zellij record is turned away by the earlier backend branch and never
 # reaches this line, so this mutation genuinely cannot affect it. Listing it
 # anyway would be an expectation the experiment could only satisfy by accident.
-guard_line 316 'if ! result=$(observe_herdr_binding' &&
+guard_line 355 'if ! result=$(observe_herdr_binding' &&
 mutate blanket-write-without-observation \
   "absent_endpoint_refused ambiguous_pane_refused foreign_workspace_refused label_names_other_task_refused pane_mismatch_refused" \
-  '316s|.*|  result=$(observe_herdr_binding "$id" "$meta") \|\| result=$(printf "%s\\tsource=UNOBSERVED" "$id"); if false; then|'
+  '355s|.*|  result=$(observe_herdr_binding "$id" "$meta") \|\| result=$(printf "%s\\tsource=UNOBSERVED" "$id"); if false; then|'
 
 echo
 if [ "$overall" -eq 0 ]; then
