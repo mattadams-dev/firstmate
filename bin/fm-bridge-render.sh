@@ -822,7 +822,18 @@ ul.events li .what { min-width:0; overflow-wrap:anywhere; }
 .glossary dt:first-child { margin-top:0; }
 .glossary dd { margin:.15rem 0 0 0; font-size:.83rem; color:var(--tn-dim); }
 .glossary .collide { color:var(--tn-orange); font-size:.72rem; text-transform:uppercase; letter-spacing:.07em; margin-left:.4rem; }
-.local-terms { margin:0 0 .8rem; font-size:.79rem; color:var(--tn-dim); border-left:2px solid var(--tn-line); padding-left:.6rem; }
+/* The project heading and the terms line under it need real separation: a
+   hairline gap let their text boxes collide, which a browser layout audit
+   flagged as overlapping text at 1024px. Explicit line-height and margins,
+   not inline styles, so the spacing is stated once and stays checkable. */
+h3.projhead {
+  margin:1.6rem 0 .55rem; font-size:.95rem; font-weight:600; line-height:1.45;
+  color:var(--tn-fg); overflow-wrap:anywhere;
+}
+h3.projhead .refs {
+  color:var(--tn-muted); font-weight:400; font-size:.8rem; white-space:nowrap;
+}
+.local-terms { margin:0 0 .8rem; font-size:.79rem; line-height:1.5; color:var(--tn-dim); border-left:2px solid var(--tn-line); padding-left:.6rem; }
 
 /* The ask counter travels with the viewport, so an open ask cannot be
    scrolled past no matter where the reader is on the page. */
@@ -838,15 +849,25 @@ ul.events li .what { min-width:0; overflow-wrap:anywhere; }
 
 ol.asks { list-style:none; margin:0; padding:0; counter-reset:ask; }
 ol.asks li { border-bottom:1px solid rgba(59,66,97,.4); }
+/* Explicit grid tracks rather than flex with min-widths. A flex row whose
+   items cannot shrink lets its text boxes collide once a cell's content
+   outgrows its share, which a browser layout audit caught here as overlapping
+   text. Every track is either intrinsic or minmax(0, ...), so no cell can be
+   pushed over its neighbour at any width. */
 ol.asks li a {
-  display:flex; gap:.7rem; align-items:baseline; padding:.45rem .2rem;
+  display:grid;
+  grid-template-columns:minmax(2.4rem,max-content) minmax(0,7rem) minmax(0,1fr) max-content;
+  gap:.7rem; align-items:baseline; padding:.45rem .2rem;
   text-decoration:none; color:var(--tn-fg);
 }
 ol.asks li a:hover { background:rgba(122,162,247,.07); }
-ol.asks .ref { flex:none; min-width:2.4rem; }
-ol.asks .proj { flex:none; color:var(--tn-dim); font-size:.78rem; min-width:5.5rem; }
-ol.asks .what { flex:1 1 auto; min-width:0; overflow-wrap:anywhere; }
-ol.asks .age { flex:none; color:var(--tn-muted); font-size:.78rem; font-family:ui-monospace,monospace; }
+ol.asks .ref { min-width:0; }
+ol.asks .proj {
+  color:var(--tn-dim); font-size:.78rem;
+  min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
+}
+ol.asks .what { min-width:0; overflow-wrap:anywhere; }
+ol.asks .age { color:var(--tn-muted); font-size:.78rem; font-family:ui-monospace,monospace; white-space:nowrap; }
 ol.asks li.aging .age { color:var(--tn-orange); }
 .card.aging { box-shadow:inset 3px 0 0 var(--tn-orange); }
 .chip.aging { color:var(--tn-orange); }
@@ -1265,9 +1286,8 @@ def render_html(doc, checked_at):
     if not zones["decisions"]:
         add('<p class="empty">No decisions on the board.</p>')
     for group in zones["decisions"]:
-        add("<h3 style=\"margin:1.2rem 0 .1rem;font-size:.95rem;color:var(--tn-fg)\">"
-            "%s <span style=\"color:var(--tn-muted);font-weight:400;font-size:.8rem\">"
-            "refs %s1, %s2, &hellip;</span></h3>"
+        add('<h3 class="projhead">%s <span class="refs">refs %s1, %s2, '
+            "&hellip;</span></h3>"
             % (esc(group["project"]), esc(group["prefix"]), esc(group["prefix"])))
         local = [g for g in doc["glossary"]
                  if any(sub["project"] == group["project"] for sub in g["entries"])]
