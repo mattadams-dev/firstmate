@@ -808,11 +808,15 @@ table.strip td.st { white-space:nowrap; width:1%; }
 .stripwrap { overflow-x:auto; border:1px solid var(--tn-line); border-radius:.5rem; background:var(--tn-panel); }
 
 ul.events { list-style:none; margin:0; padding:0; }
+/* Same shape as the asks rows, and the same reason: a fixed timestamp cell
+   beside free text with no wrap is how the collision the audit caught happens.
+   Grid tracks make it unreachable here too. */
 ul.events li {
-  display:flex; gap:.6rem; padding:.4rem 0; border-bottom:1px solid rgba(59,66,97,.4);
+  display:grid; grid-template-columns:max-content minmax(0,1fr);
+  gap:.6rem; padding:.4rem 0; border-bottom:1px solid rgba(59,66,97,.4);
   font-size:.88rem; align-items:baseline;
 }
-ul.events li .when { color:var(--tn-muted); font-size:.74rem; flex:none; font-family:ui-monospace,monospace; }
+ul.events li .when { color:var(--tn-muted); font-size:.74rem; font-family:ui-monospace,monospace; white-space:nowrap; }
 ul.events li .what { min-width:0; overflow-wrap:anywhere; }
 .overflow { margin-top:.55rem; font-size:.8rem; color:var(--tn-orange); }
 
