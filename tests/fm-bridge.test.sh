@@ -266,10 +266,14 @@ case "$boardhtml" in
   *) fail "asks: the tab title does not carry the open-ask count" ;;
 esac
 case "$boardhtml" in
-  *'class="pin-asks"'*) : ;;
-  *) fail "asks: the board has no sticky ask counter" ;;
+  *'<div id="pin">'*) : ;;
+  *) fail "asks: the board has no viewport-fixed ask counter" ;;
 esac
-pass "the open-ask count rides in the tab title and a sticky counter"
+case "$boardhtml" in
+  *'title="3 waiting on you'*) : ;;
+  *) fail "asks: the counter does not carry the open-ask count" ;;
+esac
+pass "the open-ask count rides in the tab title and a counter that travels with the viewport"
 
 # Resolving must clear the ask, and must carry a pointer to the outcome.
 FM_HOME=$HOME4 "$BRIDGE" resolve -q --id o-one \
@@ -609,8 +613,8 @@ case "$routed" in
   *) fail "routing: the tab title counts co-captain items as captain asks" ;;
 esac
 case "$routed" in
-  *'<b>1</b> waiting on you'*) : ;;
-  *) fail "routing: the sticky counter counts co-captain items as captain asks" ;;
+  *'title="1 waiting on you'*) : ;;
+  *) fail "routing: the viewport counter counts co-captain items as captain asks" ;;
 esac
 tally=$(state_query "$HOME15" 'd["summary"]["needs-captain"]')
 [ "$tally" = 1 ] || fail "routing: the captain tally counts $tally instead of 1"
@@ -643,7 +647,7 @@ pass "routing refuses an unknown reader"
 # like a board that failed to load.
 allclear=$(FM_HOME=$HOME15 "$RENDER" --html)
 case "$allclear" in
-  *"nothing is waiting on you"*) : ;;
+  *"the queue is clear"*) : ;;
   *) fail "routing: with all asks routed away the board does not report a clear queue" ;;
 esac
 pass "with every ask routed away the captain's queue reads as clear, not as empty"
@@ -905,22 +909,116 @@ FM_HOME=$HOME20 "$BRIDGE" lint >/dev/null 2>&1 \
   || fail "lint: a readable, clean record no longer exits 0"
 pass "a readable clean record still lints clean"
 
-# --- 21. an anchor jump lands clear of the sticky chrome -------------------
+# --- 21. the counter travels with the viewport WITHOUT covering the board ---
 #
-# The counter is sticky, opaque, and owns the top of the viewport, and a browser
-# scrolls an anchor target to exactly there. Without a scroll offset the asks
-# index defeats itself: clicking an ask hides the card it was supposed to
-# reveal, which a browser layout audit reported as text fully occluded on the
-# board. The offset is keyed to the measured height of what is actually stuck.
+# Two browser audits proved text on this board fully occluded, on rows in two
+# different zones. The rows were never the cause: chrome that travels with a
+# vertically scrolling page and sits across the top ends up over every row that
+# passes it, and parks an anchor target underneath itself. The fix is
+# geometric - the page reserves a gutter, nothing is laid out inside it, and
+# everything viewport-fixed lives there - so these guard the geometry rather
+# than any one symptom of losing it.
 
-case "$(cat "$TMP_ROOT/links.html")" in
-  *"scroll-padding-top:calc(var(--stack)"*) : ;;
-  *) fail "sticky: anchor targets are not offset from the sticky counter, so a jump lands under it" ;;
+railboard=$(cat "$TMP_ROOT/links.html")
+case "$railboard" in
+  *"body { padding-right:var(--rail); }"*) : ;;
+  *) fail "rail: the page reserves no gutter, so viewport-fixed chrome sits over the board" ;;
 esac
-case "$(cat "$TMP_ROOT/links.html")" in
-  *"--stack"*) : ;;
-  *) fail "sticky: the board states no sticky-stack height for jumps to clear" ;;
+case "$railboard" in
+  *"#rail {"*"position:fixed"*) : ;;
+  *) fail "rail: the counter is not fixed to the viewport, so an ask can be scrolled past" ;;
 esac
-pass "in-page jumps clear the sticky counter instead of landing under it"
+case "$railboard" in
+  *'<aside id="rail">'*'<div id="pin">'*) : ;;
+  *) fail "rail: the ask counter is not inside the reserved gutter" ;;
+esac
+# The ruling composer widens the gutter rather than covering the page.
+case "$railboard" in
+  *"body.dock-open { --rail:"*) : ;;
+  *) fail "rail: the ruling composer is not docked into the gutter" ;;
+esac
+case "$railboard" in
+  *"position:sticky; top:0"*)
+    fail "rail: something is stuck across the top of the viewport again, where it covers rows" ;;
+esac
+pass "the counter travels with the viewport from a gutter the board never occupies"
+
+# --- 22. a discarded task never reads as resolved --------------------------
+#
+# A forced cleanup skips the landed-work test, so the board must not claim more
+# than was observed. The trap is the fold's own backstop: a record that opens no
+# item still needs a disposition, and every value in the set is a claim.
+
+HOME22=$(new_home)
+# Exactly what a forced teardown writes when nothing ever opened the item.
+FM_HOME=$HOME22 "$BRIDGE" append -q id=t-orphan phase=discarded \
+  note="forced teardown: landed-work check skipped, work discarded - captain said drop the spike" \
+  >/dev/null
+# And the same discard over a task that already earned a disposition.
+FM_HOME=$HOME22 "$BRIDGE" task -q --id t-known --project orca --phase dispatched \
+  --state fm-handling >/dev/null
+FM_HOME=$HOME22 "$BRIDGE" append -q id=t-known phase=discarded \
+  note="forced teardown: landed-work check skipped, work discarded - hardware died" >/dev/null
+# A landed cleanup, so the guard proves the fix did not just relabel everything.
+FM_HOME=$HOME22 "$BRIDGE" task -q --id t-landed --project orca --phase cleaned \
+  --state resolved >/dev/null
+
+orphan_state=$(state_query "$HOME22" 'repr(d["items"]["t-orphan"]["state"])')
+[ "$orphan_state" != "'resolved'" ] \
+  || fail "discard: a discard-only task folded to resolved, which nothing observed"
+orphan_flag=$(state_query "$HOME22" 'd["items"]["t-orphan"]["discarded"]')
+[ "$orphan_flag" = True ] || fail "discard: a discarded task does not report itself discarded"
+resolved_tally=$(state_query "$HOME22" 'd["summary"]["resolved"]')
+[ "$resolved_tally" = 1 ] \
+  || fail "discard: the resolved tally counts $resolved_tally, so a discard inflated it"
+discard_tally=$(state_query "$HOME22" 'd["summary"]["discarded"]')
+[ "$discard_tally" = 1 ] || fail "discard: discarded items are not tallied as discarded"
+kept=$(state_query "$HOME22" 'd["items"]["t-known"]["state"]')
+[ "$kept" = fm-handling ] \
+  || fail "discard: a discard overwrote the disposition the item had earned ($kept)"
+landed=$(state_query "$HOME22" 'd["items"]["t-landed"]["state"]')
+[ "$landed" = resolved ] || fail "discard: an ordinary cleanup stopped reading as resolved"
+pass "a discarded task is tallied as discarded; only a landed cleanup reads as resolved"
+
+# It is a task on the fleet strip, not an event filed somewhere quieter.
+zone=$(state_query "$HOME22" '"t-orphan" in d["zones"]["fleet_open"]')
+[ "$zone" = True ] || fail "discard: a discarded task is not on the fleet strip"
+noask=$(state_query "$HOME22" 'len(d["asks"]) + len(d["cocaptain_asks"])')
+[ "$noask" = 0 ] || fail "discard: a discarded task landed on somebody's queue"
+pass "a discarded task stays on the fleet strip and on nobody's queue"
+
+# And the board itself says all three things a reader of a discarded row needs:
+# that the check was skipped, that the work was discarded, and who judged it
+# safe. The reason is on the row, not only in the embedded state document.
+FM_HOME=$HOME22 "$RENDER" --html > "$TMP_ROOT/discard-board.html"
+python3 - "$TMP_ROOT/discard-board.html" <<'PY' || fail "discard: see the reported row"
+import re, sys
+html = open(sys.argv[1]).read()
+row = re.search(r'<tr id="item-t-orphan">.*?</tr>', html, re.S)
+if row is None:
+    sys.exit("the discarded task has no row on the fleet strip")
+row = row.group(0)
+if "resolved" in row.lower():
+    sys.exit("the discarded row reads as resolved: %s" % row)
+if "discarded" not in row:
+    sys.exit("the discarded row never says it was discarded: %s" % row)
+for fragment in ("landed-work check skipped", "captain said drop the spike"):
+    if fragment not in row:
+        sys.exit("the row does not carry %r, so the board hides why: %s" % (fragment, row))
+sys.exit(0)
+PY
+pass "a discarded row carries the skipped check, the discard, and the reason for it"
+
+case "$(cat "$TMP_ROOT/discard-board.html")" in
+  *"<b>1</b>discarded"*) : ;;
+  *) fail "discard: the board tallies no discarded count" ;;
+esac
+pass "the board tallies discarded work separately from resolved work"
+
+# Record hygiene stays clean: the fold declining to invent a disposition is the
+# honest reading, not a problem for the captain to fix.
+FM_HOME=$HOME22 "$BRIDGE" lint --strict >/dev/null 2>&1 \
+  || fail "discard: a discarded record is reported as a record-hygiene problem"
+pass "a discarded record lints clean"
 
 echo "all bridge ledger and fold tests passed"

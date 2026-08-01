@@ -1592,7 +1592,8 @@ echo "teardown $ID complete (window $T, worktree $WT)"
 # resolved. A scout's outcome lives in its report; every other task's lives at
 # whatever pointer earlier records already set, which these partial updates
 # deliberately leave alone. A persistent secondmate is not a work item, so - as
-# in fm-spawn.sh - it never becomes a strip row. Best-effort append.
+# in fm-spawn.sh - it never becomes a strip row; a forced retirement still
+# records its provenance, as an event rather than as a row. Best-effort append.
 if [ "$KIND" != secondmate ]; then
   # Only point at the report when the report is there: --force skips the
   # missing-report refusal, and a pointer to a file nobody wrote sends the
@@ -1618,6 +1619,19 @@ if [ "$KIND" != secondmate ]; then
     FM_HOME="$FM_HOME" "$FM_ROOT/bin/fm-bridge.sh" task --quiet \
       "${BRIDGE_ARGS[@]}" >/dev/null 2>&1 || true
   fi
+elif [ "$FORCE" = "--force" ]; then
+  # A secondmate never becomes a strip row, and an override always carries
+  # provenance. Both hold here: this is the most destructive path in the script
+  # - child windows killed, child work discarded, route dropped, lease
+  # released, home removed - so the reason is recorded as an ordinary EVENT
+  # against the fleet rather than as a task row that would invent a work item
+  # out of a retirement.
+  FM_HOME="$FM_HOME" "$FM_ROOT/bin/fm-bridge.sh" note --quiet \
+    --id "secondmate-retired-$ID" --project fleet \
+    --title "secondmate $ID retired under --force" \
+    --body "Its home and any in-flight child work were discarded without the checks a normal retirement runs." \
+    --note "forced teardown: in-flight-work check skipped, secondmate home and child work discarded - $FORCE_REASON" \
+    >/dev/null 2>&1 || true
 fi
 
 backlog_refresh_reminder

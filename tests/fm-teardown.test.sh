@@ -1286,6 +1286,26 @@ test_forced_teardown_records_discarded_not_resolved() {
     *'"phase":"discarded"'*) : ;;
     *) fail "force-discard-record: a discarded cleanup did not record phase=discarded: $records" ;;
   esac
+  # What the RECORD says is only half of it. This teardown ran with an empty
+  # ledger - the ordinary case for anything in flight when the Bridge arrives,
+  # and for any task whose best-effort spawn append did not land - so the row
+  # the captain reads is built from this record alone, and it must not come out
+  # of the fold reading as resolved.
+  folded=$(FM_HOME="$case_dir" FM_DATA_OVERRIDE="$case_dir/data" \
+    "$ROOT/bin/fm-bridge-render.sh" --state --id task-x1)
+  printf '%s' "$folded" | python3 -c '
+import json, sys
+doc = json.load(sys.stdin)
+item = doc["items"].get("task-x1")
+if item is None:
+    sys.exit("the discarded task is not in folded state at all")
+if item["state"] == "resolved":
+    sys.exit("a forced discard folds to resolved, which the skipped check never supported")
+if not item.get("discarded"):
+    sys.exit("folded state does not report the task as discarded")
+if doc["summary"]["resolved"]:
+    sys.exit("a forced discard was counted in the resolved tally")
+' || fail "force-discard-record: $(printf '%s' "$folded" | head -c 400)"
   case "$records" in
     *'"state":"resolved"'*)
       fail "force-discard-record: a forced cleanup claimed resolved, which the skipped landed-work test never supported: $records" ;;
@@ -1358,6 +1378,15 @@ test_ordinary_teardown_still_records_resolved() {
     *'"phase":"cleaned"'*) : ;;
     *) fail "ordinary-resolved-record: a landed cleanup did not record phase=cleaned: $records" ;;
   esac
+  FM_HOME="$case_dir" FM_DATA_OVERRIDE="$case_dir/data" \
+    "$ROOT/bin/fm-bridge-render.sh" --state --id task-x1 | python3 -c '
+import json, sys
+item = json.load(sys.stdin)["items"].get("task-x1")
+if item is None or item["state"] != "resolved":
+    sys.exit("a landed cleanup no longer folds to resolved: %r" % (item and item["state"]))
+if item.get("discarded"):
+    sys.exit("a landed cleanup folded as discarded")
+' || fail "ordinary-resolved-record: the landed cleanup does not read as resolved"
   pass "an ordinary cleanup still records the row resolved"
 }
 

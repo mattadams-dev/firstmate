@@ -78,7 +78,7 @@ Only `ts` and `id` are required on every record.
 | `answers` | array | the answer forms; a bare string is tolerated and coerced |
 | `check` | string | a command that verifies this item |
 | `note` | string | free text |
-| `phase` | string | lifecycle position, e.g. `dispatched`, `pr-open`, `merged`, or `sent`/`delivered`/`consumed` |
+| `phase` | string | lifecycle position, e.g. `dispatched`, `pr-open`, `merged`, `discarded`, or `sent`/`delivered`/`consumed` |
 | `truncated` | bool | the writer had to shorten this record |
 
 **The state field is load-bearing.**
@@ -143,6 +143,12 @@ Most fleet-strip rows are never written by hand at all: `fm-spawn.sh`, `fm-pr-ch
 Those appends are best-effort and can never fail their caller.
 A persistent secondmate is not a work item, so neither spawn nor teardown ever gives one a row.
 An ordinary cleanup records `state=resolved`, which only its landed-work test can support; a `--force <reason>` cleanup skipped that test, so it records `phase=discarded` with the reason that authorized the override and leaves the row's last honest state alone.
+A forced retirement of a persistent secondmate records the same provenance as a `kind=event` note against `fleet`, because a secondmate is not a work item and must never become a strip row.
+
+**`phase=discarded` is a fact, and never a disposition.**
+The fold reads it as one: an item carrying it reports `discarded: true`, and when the ledger never stated a disposition for that item the fold refuses to invent one rather than falling through to `resolved`.
+Every value in the set would be a claim - `resolved` says an outcome landed, `fm-handling` says someone is carrying it, the ask states say a reader owes an answer - and a cleanup that skipped the landed-work test observed none of them.
+Such an item folds as a `task` with an empty `state`, is tallied under `summary.discarded` rather than `summary.resolved`, sits on the fleet strip and on nobody's queue, and renders with a `discarded` chip plus the reason on the row itself.
 
 ### Why append-only, and why records are bounded
 
@@ -218,7 +224,10 @@ Zones, in the order the captain reads them:
 5. **Notable events** - capped, with a visible overflow pointer to the record.
 6. **Fleet** - one row per task.
 
-Because an ask that scrolls out of view is the failure this surface exists to prevent, the open-ask count rides in the browser tab title and in a sticky counter that travels with the viewport.
+Because an ask that scrolls out of view is the failure this surface exists to prevent, the open-ask count rides in the browser tab title and in a counter that travels with the viewport.
+That counter lives in a reserved right-hand gutter, not across the top.
+Chrome that travels with a vertically scrolling page and spans the content column ends up over every row that passes it, and parks an anchor target underneath itself - two browser layout audits proved exactly that, on rows in two different zones.
+A gutter the content is never laid out inside is the one place viewport-fixed chrome cannot come to cover it, so the ruling composer docks there too and widens the gutter instead of covering the board.
 Asks carry their age, and one older than `FM_BRIDGE_AGING_SECONDS` (default 24h) is flagged: an ask that old is usually one that was already answered and never closed, and nothing about "open" distinguishes those from the rest.
 
 Answer forms are mandatory on asks.

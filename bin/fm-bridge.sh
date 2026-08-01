@@ -248,8 +248,13 @@ for bad in doc["malformed"]:
 for key, item in sorted(doc["items"].items()):
     label = item["ref"] or key
     recognized = item.get("recognized", {})
+    # A discarded item with no disposition is the fold declining to invent one,
+    # which is the honest reading and not a record to clean up.
+    discard_only = bool(item.get("discarded")) and not item["state"]
     for field in ("kind", "state", "severity"):
         if not recognized.get(field, True):
+            if field == "state" and discard_only:
+                continue
             problems.append("%s: unrecognized %s %r (kept verbatim, shown as odd)"
                             % (label, field, item[field]))
     if item["state"] == "resolved" and not item["pointer"] \
@@ -258,7 +263,8 @@ for key, item in sorted(doc["items"].items()):
     if item["kind"] in ("decision", "critical") and item["state"] == "needs-captain" \
             and not item["answers"]:
         problems.append("%s: is an ask with no answer form" % label)
-    if item["kind"] in ("decision", "critical", "task") and not item["title"]:
+    if item["kind"] in ("decision", "critical", "task") and not item["title"] \
+            and not discard_only:
         problems.append("%s: has no title" % label)
     if item["truncated"]:
         problems.append("%s: record was truncated at write time" % label)

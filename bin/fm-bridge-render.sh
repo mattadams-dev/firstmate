@@ -95,6 +95,7 @@ half cannot re-read or re-parse the stream.
 import html as _html
 import json
 import os
+import stat
 import sys
 import tempfile
 
@@ -112,6 +113,11 @@ BOARD_KINDS = ("critical", "decision", "event", "task")
 # The steering lifecycle, in order. Monotonic: a stage once recorded is never
 # unrecorded, so out-of-order arrival cannot walk a message backwards.
 LIFECYCLE_STAGES = ("sent", "delivered", "consumed")
+
+# The phase a forced cleanup records (bin/fm-teardown.sh). It is a phase and not
+# a disposition on purpose: the work was thrown away, which is not one of the
+# four things a disposition can say about who owes what.
+DISCARD_PHASE = "discarded"
 # `needs-cocaptain` is a ROUTING target, not a second flavour of "open". An
 # item addressed to the co-captain (the dotfiles session, which reads this
 # ledger directly) never joins the captain's ask list, because the cost being
@@ -355,11 +361,31 @@ def fold(ledger_path, folded_at):
             "state": item["state"] in KNOWN_STATES,
             "severity": item["severity"] in KNOWN_SEVERITIES,
         }
+        # A record that says the work was DISCARDED is a fact the ledger
+        # carries, not a disposition the reader may invent one from. It matters
+        # here because the two are easy to confuse: a discarded item is not
+        # resolved, and the cleanup that discarded it skipped the very test that
+        # could have supported the word resolved.
+        item["discarded"] = DISCARD_PHASE in item["phases_seen"]
         if not item["kind"]:
-            item["kind"] = "event"
+            # A discard is always about work, so a kind-less discard record
+            # folds to a task rather than to the generic event default - it
+            # belongs on the fleet strip, where a reader looks for what happened
+            # to a task.
+            item["kind"] = "task" if item["discarded"] else "event"
             item["recognized"]["kind"] = True
             item["defaulted_kind"] = True
-        if not item["state"]:
+        if not item["state"] and item["discarded"]:
+            # DELIBERATELY NO DEFAULT. Every value in the disposition set would
+            # be a claim: resolved says an outcome landed, fm-handling says
+            # someone is carrying it, and the ask states say a reader owes an
+            # answer. A discard with no prior record supports none of them, so
+            # the fold reports the disposition as unstated rather than picking
+            # the one that reads best. The item stays visibly a discard through
+            # `discarded`, and it is tallied under its own heading rather than
+            # inflating resolved.
+            item["recognized"]["state"] = False
+        elif not item["state"]:
             # Mirrors fm_bridge_default_state in bin/fm-bridge-lib.sh. Firstmate's
             # own writer always states this explicitly; the backstop exists for
             # other producers, and it must land an ask kind on `needs-captain` -
@@ -519,12 +545,17 @@ def fold(ledger_path, folded_at):
     # because a machinery record inflating "resolved" would quietly change what
     # the tallies mean.
     summary = {"needs-captain": 0, "needs-cocaptain": 0, "fm-handling": 0,
-               "resolved": 0, "unrecognized": 0}
+               "resolved": 0, "discarded": 0, "unrecognized": 0}
     for item in items.values():
         if item["kind"] not in BOARD_KINDS:
             continue
         if item["state"] in summary:
             summary[item["state"]] += 1
+        elif item["discarded"]:
+            # Thrown away, and counted as thrown away. Folding it into resolved
+            # would be the board claiming an outcome that the cleanup which
+            # skipped the landed-work test never observed.
+            summary["discarded"] += 1
         else:
             summary["unrecognized"] += 1
 
@@ -810,6 +841,7 @@ h2 {
 .chip.fm-handling   { color:var(--tn-blue); }
 .chip.resolved      { color:var(--tn-green); }
 .chip.odd           { color:var(--tn-orange); }
+.chip.discarded     { color:var(--tn-orange); }
 .chip.sev           { color:var(--tn-dim); }
 .meta { color:var(--tn-dim); font-size:.76rem; margin-top:.3rem; }
 .meta .sep { color:var(--tn-line); margin:0 .35rem; }
@@ -837,6 +869,13 @@ table.strip th {
 }
 table.strip td { padding:.42rem .5rem; border-bottom:1px solid rgba(59,66,97,.45); vertical-align:top; }
 table.strip td.st { white-space:nowrap; width:1%; }
+/* Why a row was discarded, on the row itself. The strip is scannable, so this
+   stays small and secondary - but it is on the board, because the board is
+   where the disposition is read. */
+table.strip .why {
+  margin-top:.25rem; font-size:.76rem; line-height:1.45; color:var(--tn-orange);
+  overflow-wrap:anywhere;
+}
 .stripwrap { overflow-x:auto; border:1px solid var(--tn-line); border-radius:.5rem; background:var(--tn-panel); }
 
 ul.events { list-style:none; margin:0; padding:0; }
@@ -871,27 +910,36 @@ h3.projhead .refs {
 }
 .local-terms { margin:0 0 .8rem; font-size:.79rem; line-height:1.5; color:var(--tn-dim); border-left:2px solid var(--tn-line); padding-left:.6rem; }
 
-/* The ask counter travels with the viewport, so an open ask cannot be
-   scrolled past no matter where the reader is on the page.
-   That counter is opaque and owns the top of the viewport, so anything an
-   in-page link jumps to has to land BELOW it. Without scroll-padding-top the
-   asks index defeats itself: a browser scrolls an anchor target to y=0, which
-   is exactly where the counter sits, so clicking an ask hides the card it was
-   supposed to reveal - proven in a browser, the card's whole head covered.
-   --stack is the one statement of that height; the queue bar sits on it rather
-   than guessing an offset, and the JS below re-measures both after any change
-   to what is stuck up there. */
-:root { --pin-h:2.6rem; --stack:var(--pin-h); }
-html { scroll-padding-top:calc(var(--stack) + .7rem); }
-.pin-asks, .pin-clear {
-  position:sticky; top:0; z-index:6; padding:.45rem 0; font-size:.85rem;
-  border-bottom:1px solid var(--tn-line);
+/* THE RAIL. The ask counter has to travel with the viewport so an open ask
+   cannot be scrolled past - and it must never cover the board to do it.
+   Chrome that travels with a vertically scrolling page ALWAYS ends up over the
+   content when it sits across the top: every row passes behind it on the way
+   past, and an anchor jump parks its target underneath it. A browser layout
+   audit proved exactly that, twice, on rows in two different zones - the row
+   was never the problem, the bar above it was.
+   So the chrome moves out of the content column entirely. The page reserves a
+   right-hand gutter, no content is ever laid out inside it, and everything
+   viewport-fixed lives there. Scrolling is vertical, so a column the content
+   never enters is the one place fixed chrome cannot come to cover it. */
+:root { --rail:3.6rem; }
+body { padding-right:var(--rail); }
+#rail {
+  position:fixed; top:0; right:0; bottom:0; width:var(--rail); z-index:6;
+  display:flex; flex-direction:column; gap:.5rem; padding:.5rem .4rem;
+  background:var(--tn-deep); border-left:1px solid var(--tn-line);
+  overflow-y:auto; overflow-x:hidden;
 }
-.pin-asks { background:#3d2430; color:var(--tn-red); }
-.pin-asks a { color:var(--tn-red); text-decoration:none; }
-.pin-asks a:hover { text-decoration:underline; }
-.pin-asks b { font-size:1.05rem; margin-right:.3rem; }
-.pin-clear { background:var(--tn-panel); color:var(--tn-dim); }
+#pin { flex:none; }
+#pin a, #pin .clear {
+  display:block; text-align:center; text-decoration:none; border-radius:.4rem;
+  padding:.45rem .2rem; font-size:.62rem; text-transform:uppercase;
+  letter-spacing:.05em; line-height:1.3; white-space:nowrap;
+}
+#pin a { background:#3d2430; color:var(--tn-red); }
+#pin a:hover { outline:1px solid var(--tn-red); }
+#pin .clear { background:var(--tn-panel); color:var(--tn-dim); }
+#pin b { display:block; font-size:1.35rem; letter-spacing:0; }
+#pin .since { display:block; color:var(--tn-muted); margin-top:.15rem; }
 
 ol.asks { list-style:none; margin:0; padding:0; counter-reset:ask; }
 ol.asks li { border-bottom:1px solid rgba(59,66,97,.4); }
@@ -919,19 +967,22 @@ ol.asks li.aging .age { color:var(--tn-orange); }
 .chip.aging { color:var(--tn-orange); }
 .allclear { color:var(--tn-green); font-size:.9rem; }
 
-#queue {
-  position:sticky; top:var(--pin-h); z-index:5; background:var(--tn-bg);
-  border-bottom:1px solid var(--tn-line); padding:.6rem 0; display:none;
-}
-#queue.on { display:block; }
-#queue .inner { display:flex; gap:.6rem; align-items:flex-start; }
+/* The ruling composer docks in the same gutter. Opening it WIDENS the gutter
+   rather than covering the page: the board reflows to the narrower column and
+   every row stays fully readable beside it. */
+body.dock-open { --rail:min(21rem,42vw); }
+#queue { display:none; flex:1 1 auto; min-height:0; flex-direction:column; gap:.45rem; }
+body.dock-open #queue { display:flex; }
+#queue .lbl { font-size:.6rem; text-transform:uppercase; letter-spacing:.08em; color:var(--tn-muted); }
+#queue .inner { display:flex; flex-direction:column; gap:.45rem; flex:1 1 auto; min-height:0; }
 #queue textarea {
-  flex:1 1 auto; min-width:0; min-height:3.4rem; resize:vertical; font-family:ui-monospace,monospace;
-  font-size:.82rem; background:var(--tn-deep); color:var(--tn-fg);
+  flex:1 1 auto; min-width:0; min-height:6rem; resize:vertical; font-family:ui-monospace,monospace;
+  font-size:.78rem; background:var(--tn-deep); color:var(--tn-fg);
   border:1px solid var(--tn-line); border-radius:.4rem; padding:.45rem .55rem;
 }
+#queue .buttons { display:flex; gap:.4rem; flex-wrap:wrap; }
 #queue button {
-  font:inherit; font-size:.82rem; cursor:pointer; border-radius:.35rem; padding:.4rem .7rem;
+  font:inherit; font-size:.78rem; cursor:pointer; border-radius:.35rem; padding:.35rem .6rem;
   border:1px solid var(--tn-red); background:transparent; color:var(--tn-red); flex:none;
 }
 #queue button.clear { border-color:var(--tn-line); color:var(--tn-dim); }
@@ -960,28 +1011,18 @@ footer .row { margin:.3rem 0; overflow-x:auto; white-space:nowrap; }
 JS = """
 (function () {
   var picks = [];
-  var box = document.getElementById('queue');
   var out = document.getElementById('queue-text');
-  // What is stuck to the top of the viewport is measured, not assumed, so an
-  // anchor jump always lands clear of it however tall the counter and the
-  // ruling composer happen to render.
-  function restack() {
-    var pin = document.getElementById('pin');
-    var pinHeight = pin ? pin.getBoundingClientRect().height : 0;
-    var stack = pinHeight;
-    if (box && box.className === 'on') { stack += box.getBoundingClientRect().height; }
-    var root = document.documentElement.style;
-    root.setProperty('--pin-h', pinHeight + 'px');
-    root.setProperty('--stack', stack + 'px');
-  }
+  // Opening the composer widens the reserved gutter instead of covering the
+  // board, so the page reflows beside it and no row is ever hidden behind it.
   function redraw() {
-    if (!picks.length) { box.className = ''; out.value = ''; restack(); return; }
-    box.className = 'on';
+    if (!picks.length) {
+      document.body.classList.remove('dock-open');
+      out.value = '';
+      return;
+    }
+    document.body.classList.add('dock-open');
     out.value = picks.join('\\n');
-    restack();
   }
-  restack();
-  window.addEventListener('resize', restack);
   document.addEventListener('click', function (event) {
     var button = event.target.closest ? event.target.closest('button.ans') : null;
     if (!button) { return; }
@@ -1060,7 +1101,14 @@ def link(href, label=None, external=None):
             % (esc(href), extra, esc(text)))
 
 
+def is_discard_only(item):
+    """Discarded, and the ledger never stated a disposition for it."""
+    return bool(item.get("discarded")) and not item["state"]
+
+
 def state_class(item):
+    if is_discard_only(item):
+        return "discarded"
     if not item.get("recognized", {}).get("state", True):
         return "odd"
     return item["state"]
@@ -1068,6 +1116,11 @@ def state_class(item):
 
 def chip(item):
     cls = state_class(item)
+    if cls == "discarded":
+        # Not one of the four dispositions, and it does not pretend to be one.
+        # A blank chip here would read as a rendering fault and a `?` would read
+        # as a record nobody could parse; this was thrown away, and says so.
+        return '<span class="chip discarded">discarded</span>'
     label = item["state"] if cls != "odd" else item["state"] + " ?"
     return '<span class="chip %s">%s</span>' % (cls, esc(label))
 
@@ -1184,27 +1237,34 @@ def render_html(doc, checked_at):
         % ("Bridge - %d need you" % len(asks) if asks else "Bridge - clear"))
     add("<style>%s</style></head><body>" % CSS)
 
-    # Sticky, and always present. An ask cannot be scrolled past, because the
-    # count travels with the viewport no matter where the reader is on the page.
+    # Fixed to the viewport and OUTSIDE the content column: an ask cannot be
+    # scrolled past, and the counter that guarantees it never covers a row to
+    # do so. Everything in here lives in the gutter the page reserves for it.
+    add('<aside id="rail">')
     if asks:
         # The genuinely longest-waiting ask, not the first row of a
         # severity-sorted list. Calling the top row "oldest" would be a claim
         # the ordering does not support.
         longest = max(asks, key=lambda k: items[k]["age_seconds"] or 0)
-        add('<div id="pin" class="pin-asks"><div class="wrap">'
-            '<a href="#waiting" data-lavish-action><b>%d</b> waiting on you '
-            "&middot; longest %s</a></div></div>"
-            % (len(asks), esc(items[longest]["age_label"])))
+        add('<div id="pin"><a href="#waiting" data-lavish-action '
+            'title="%d waiting on you, longest %s">'
+            "<b>%d</b>asks"
+            '<span class="since">%s</span></a></div>'
+            % (len(asks), esc(items[longest]["age_label"]), len(asks),
+               esc(items[longest]["age_label"])))
     else:
-        add('<div id="pin" class="pin-clear"><div class="wrap">'
-            "nothing is waiting on you</div></div>")
+        add('<div id="pin"><div class="clear" '
+            'title="0 waiting on you, the queue is clear">'
+            "<b>0</b>clear</div></div>")
 
-    add('<div id="queue"><div class="wrap"><div class="inner">')
+    add('<div id="queue"><div class="lbl">queued rulings</div><div class="inner">')
     add('<textarea id="queue-text" spellcheck="false" '
         'aria-label="queued rulings"></textarea>')
+    add('<div class="buttons">')
     add('<button id="queue-copy" type="button">copy</button>')
     add('<button id="queue-clear" class="clear" type="button">clear</button>')
     add("</div></div></div>")
+    add("</aside>")
 
     add('<header class="top"><div class="wrap">')
     add('<h1>Bridge<span class="sub">fleet state, generated from the ledger</span></h1>')
@@ -1216,6 +1276,8 @@ def render_html(doc, checked_at):
             % summary["needs-cocaptain"])
     add('<div class="tally fm"><b>%d</b>firstmate has</div>' % summary.get("fm-handling", 0))
     add('<div class="tally ok"><b>%d</b>resolved</div>' % summary.get("resolved", 0))
+    if summary.get("discarded", 0):
+        add('<div class="tally warn"><b>%d</b>discarded</div>' % summary["discarded"])
     if summary.get("unrecognized", 0):
         add('<div class="tally warn"><b>%d</b>unrecognized state</div>'
             % summary["unrecognized"])
@@ -1433,9 +1495,16 @@ def render_html(doc, checked_at):
             forms = answer_forms(item)
             aged = ('<span class="chip aging">waiting %s</span>' % esc(item["age_label"])
                     if item.get("aging") else "")
-            add('<tr id="item-%s"><td><b>%s</b></td><td>%s</td><td>%s</td>'
+            # A discarded row has to carry its own provenance. The cleanup that
+            # wrote it skipped the landed-work test, so a reader needs all three
+            # facts here - that the check was skipped, that the work was thrown
+            # away, and the judgement someone gave for skipping it - rather than
+            # only in the record behind the board.
+            why = ('<div class="why">%s</div>' % esc(item["note"])
+                   if item.get("discarded") and item["note"] else "")
+            add('<tr id="item-%s"><td><b>%s</b>%s</td><td>%s</td><td>%s</td>'
                 '<td class="st">%s%s</td><td>%s%s</td></tr>'
-                % (esc(item["id"]), esc(item["title"] or item["id"]),
+                % (esc(item["id"]), esc(item["title"] or item["id"]), why,
                    esc(item["project"]), esc(item["phase"] or "-"),
                    chip(item), aged, where, forms))
         add("</table></div>")
@@ -1535,6 +1604,14 @@ def restamp(board_path, checked_at):
     try:
         with os.fdopen(handle_fd, "w", encoding="utf-8") as handle:
             handle.writelines(lines)
+        # mkstemp creates 0600 and os.replace carries that mode onto the board,
+        # so without this the board's permissions flip on every skip tick and
+        # then flip back on the next full render. Which path ran last is not
+        # supposed to be readable from the file's mode.
+        try:
+            os.chmod(tmp, stat.S_IMODE(os.stat(board_path).st_mode))
+        except OSError:
+            pass
         os.replace(tmp, board_path)
     except BaseException:
         try:

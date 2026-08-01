@@ -1444,7 +1444,20 @@ EOF
     && grep -F '"id":"domain"' "$home/data/bridge/ledger.jsonl" >/dev/null; then
     fail "secondmate teardown created a Bridge fleet-strip row for a home that never had one"
   fi
-  pass "secondmate force teardown discards child work and creates no fleet-strip row"
+  # It is still the most destructive override in the script, so the reason that
+  # authorized it has to land somewhere durable - as an event, which is not a
+  # work item and never becomes a row.
+  [ -f "$home/data/bridge/ledger.jsonl" ] \
+    || fail "forced secondmate retirement recorded its override nowhere"
+  grep -F '"kind":"event"' "$home/data/bridge/ledger.jsonl" >/dev/null \
+    || fail "forced secondmate retirement did not record the override as an event"
+  grep -F 'test: captain approved discarding this work' "$home/data/bridge/ledger.jsonl" >/dev/null \
+    || fail "forced secondmate retirement did not record the reason that authorized it"
+  grep -F 'domain' "$home/data/bridge/ledger.jsonl" >/dev/null \
+    || fail "forced secondmate retirement did not name the secondmate it discarded"
+  grep -F '"kind":"task"' "$home/data/bridge/ledger.jsonl" >/dev/null \
+    && fail "forced secondmate retirement wrote a task row for a persistent secondmate"
+  pass "secondmate force teardown discards child work, records its provenance, and creates no fleet-strip row"
 }
 
 test_secondmate_force_teardown_refuses_child_quarantine_symlink() {
