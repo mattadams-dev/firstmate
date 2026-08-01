@@ -308,6 +308,10 @@
       "audience": "maintainer-verification"
     },
     {
+      "path": "docs/verification/endpoint-binding-migration.md",
+      "audience": "maintainer-verification"
+    },
+    {
       "path": "docs/verification/public-followup.md",
       "audience": "maintainer-verification"
     },
@@ -321,10 +325,6 @@
     },
     {
       "path": "docs/verification/supervision.md",
-      "audience": "maintainer-verification"
-    },
-    {
-      "path": "docs/verification/endpoint-binding-migration.md",
       "audience": "maintainer-verification"
     },
     {

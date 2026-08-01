@@ -1,9 +1,14 @@
 # Endpoint binding migration
 
-One-shot repair of `endpoint_task_id=` in `state/<id>.meta` records created before `bin/fm-spawn.sh` began writing that field.
-Run 2026-08-01 against the primary home, `/home/jamada/code/personal/firstmate`.
+Audience: maintainer verification.
 
-The migration script and its tests were deleted in the same change that landed this record; see "Retirement" below.
+One-shot repair of `endpoint_task_id=` in `state/<id>.meta` records created before `bin/fm-spawn.sh` began writing that field.
+Run 2026-08-01 against the primary home.
+
+Unlike its sibling records, this one embeds captured live tool output, whose paths and identifiers are the evidence itself and are never edited; the siblings' zero-absolute-path form binds prose only.
+That divergence is declared here so a later path-counting audit reads it as deliberate rather than as a defect, which is what an undeclared divergence is indistinguishable from.
+
+`bin/fm-migrate-endpoint-binding.sh` and its two test files ship; see "Retirement" below for what "one-shot" is carried by now that it is not carried by deletion.
 This page is the durable evidence that the repair happened and that its guards were load-bearing when it ran.
 
 ## What the field guards, and what it does not
@@ -31,6 +36,19 @@ fm_home=/home/jamada/code/personal/firstmate
 
 Derived as the `state/*.meta` files carrying a `window=` line and no `endpoint_task_id=` line.
 All four were `backend=herdr`; no tmux or other-backend candidate existed.
+
+### What the applied run's `disposition=0` did and did not mean
+
+The validator refuses four binding shapes: absent, empty, ambiguous, and unequal to the task id.
+At the time of the run, the script treated only *absent* as a candidate and skipped the other three in silence, so a record carrying an empty, duplicated, or mismatched binding would have produced no disposition item.
+
+That run's guarantee was therefore outcome-verified - zero affected, checked - and never mechanism-carried.
+It was correct because the home was checked and contained no empty, duplicated, or mismatched binding, not because the script would have caught one.
+The check that established zero affected was made against the home at run time and is not reproduced in this record; what the captured output below does show is the shape of the four candidates, each refused before migration with the validator's absent-binding message `lacks an exact task binding` rather than its empty or ambiguous message.
+Read `disposition=0` as exactly that fact about this home at that moment, not as a general claim that no stranded records remain anywhere.
+
+All four refusal shapes report as disposition items from this fix forward, each with a fixture proving it fires.
+The migration appends a binding to a record that has none and never edits or removes an existing one, so the three broken shapes are reported for a maintainer to resolve by hand rather than rewritten.
 
 ## Live read the values came from
 
@@ -142,37 +160,59 @@ The refusal half matters as much as the acceptance half: without it, acceptance 
 
 ## Guard-class evidence: mutation testing, both directions
 
+The output below is the suite and mutation harness as they stand with all four refusal shapes reporting and the one-shot guard in place.
+The twelve-case output captured against the script at the moment of the applied run is superseded by it; the run's own captured output above is unchanged.
+
 Behavior suite, driven through a fake herdr CLI serving canned inventory by content:
 
 ```
+$ bash tests/fm-migrate-endpoint-binding.test.sh
 ok - absent_endpoint_refused
 ok - ambiguous_pane_refused
 ok - dry_run_writes_nothing
+ok - duplicated_binding_reported_not_skipped
+ok - empty_binding_reported_not_skipped
 ok - existing_binding_untouched
 ok - foreign_workspace_refused
 ok - label_names_other_task_refused
+ok - mismatched_binding_reported_not_skipped
 ok - observable_binding_migrates
+ok - one_shot_allows_observe_on_migrated_home
+ok - one_shot_refuses_second_apply
 ok - pane_mismatch_refused
 ok - teardown_validator_accepts_migrated_record
 ok - teardown_validator_rejects_unmigrated_record
 ok - tmux_reported_not_silent
 ok - unobservable_backend_refused
+ok - valid_binding_is_not_a_disposition
 
-all 12 cases passed
+all 18 cases passed
 ```
+
+The empty-binding and duplicated-binding fixtures are synthetic on purpose, because zero real specimens existed in the migrated home.
+A refusal shape without a fixture proving it fires is how the silent-skip hole survived review the first time.
+`valid_binding_is_not_a_disposition` proves the other direction: a correctly bound record is simply not a candidate, so reporting the three broken shapes did not turn every bound record into a disposition item.
 
 Mutation experiment.
 Each mutation neutralises one guard by replacing its condition with `true`, leaving the refusal block intact, and is pinned to its target line by content so a drifted line number fails loudly rather than silently mutating unrelated code.
 
 ```
+$ bash tests/fm-migrate-endpoint-binding-mutation.sh
 == baseline: unmutated script ==
-BASELINE green (12)
+BASELINE green (18)
 
 == mutations that let an unobserved value be written ==
 CAUGHT   value-from-filename-not-label      failing: label_names_other_task_refused
 CAUGHT   skip-pane-identity-check           failing: pane_mismatch_refused
 CAUGHT   skip-home-workspace-check          failing: foreign_workspace_refused
 CAUGHT   accept-ambiguous-pane              failing: ambiguous_pane_refused
+
+== mutations that turn a refusal shape back into a silent skip ==
+CAUGHT   silent-skip-empty-binding          failing: empty_binding_reported_not_skipped
+CAUGHT   silent-skip-duplicated-binding     failing: duplicated_binding_reported_not_skipped
+
+== mutation that removes the one-shot property ==
+CAUGHT   neuter-one-shot-guard              failing: one_shot_refuses_second_apply
 
 == control: a blanket bypass should be caught broadly, not narrowly ==
 CAUGHT   blanket-write-without-observation  failing: absent_endpoint_refused ambiguous_pane_refused foreign_workspace_refused label_names_other_task_refused pane_mismatch_refused
@@ -181,22 +221,36 @@ RESULT: every mutation was caught by exactly the expected case(s)
 ```
 
 Both directions hold.
-A genuinely observable binding still migrates (baseline green, twelve cases).
+A genuinely observable binding still migrates (baseline green, eighteen cases).
 Each mutation that would let an unobserved value be written is caught by exactly the case that owns that guard, so the suite identifies which protection is missing rather than going uniformly red.
 
 The `value-from-filename-not-label` mutation is the one that matters most: it is precisely "assertion instead of observation", and it is caught by exactly one case.
+The two silent-skip mutations restore the original blind spot by dropping a report and skipping the record, and each is caught by exactly the fixture that owns that refusal shape.
+`neuter-one-shot-guard` is expected to break only `one_shot_refuses_second_apply`: every other fixture home carries zero provenance lines, so the guard never fires there and removing it changes nothing, and observe-only mode is unaffected by construction.
+Listing `one_shot_allows_observe_on_migrated_home` for it would be an expectation the experiment could satisfy only by accident, which is the same rule the blanket-bypass control already follows for `unobservable_backend_refused`.
 The blanket-bypass control breaks five cases at once, which is the correct shape for a change that removes observation entirely rather than one specific check.
 
 Existing guard suites were re-run unchanged: `fm-teardown-endpoint-safety` (5 ok), `fm-teardown-evidence` (6 ok), `fm-backend-herdr` (159 ok).
 
 ## Retirement
 
-The script and its tests were deleted in the same change that landed this record, so the merged default branch does not carry them.
+The script and its tests ship.
+Retired here means the script cannot be run casually or by accident, not that it was erased.
+It is retained deliberately as the documented recovery procedure for a future legacy lane, and its tests are retained with it because they are what keeps the next re-runner's guards honest.
 
-Deletion was chosen over a refuse-to-run-twice marker.
-A marker is home-local, so it would only stop a second run in the home that already ran; every other home would still hold a working tool that fills a safety field on demand.
-The window this backfill addressed is closed - `fm-spawn.sh` has written the field since before these records' successors - so a surviving re-runnable backfill would be liability with no remaining use, which is the "standing bypass machinery" failure mode this was written to avoid.
+The one-shot property is carried by a guard rather than by absence: `--apply` refuses against a home where any `state/*.meta` already carries an `endpoint_task_id_provenance=` line, reporting how many it found.
+Observe-only mode stays allowed on such a home.
 
-The tests were one-shot for the same reason: a permanent test for a deleted script would assert nothing.
-Their value is the recorded result above, taken against the real script at the time it ran.
+That guard cannot drift, because the proof the backfill already ran is the repaired records themselves rather than a marker kept alongside them.
+A marker can be deleted, lost in a home copy, or never written after a partial run; the provenance lines cannot go missing without the repair itself going missing.
+
+It cannot be satisfied by accident, because there is no flag to pass, no variable to set, and no file to remember.
+Defeating it means stripping the provenance lines off already-repaired records, which is deliberate, visible in a diff, and simultaneously destroys the audit trail those lines exist to keep.
+The guard and the provenance record protect each other.
+
+It preserves the recovery use the script is retained for, because a genuinely new legacy home carries zero provenance lines, so the procedure works there on first run and refuses on the second.
+
+It blocks the hazard rather than the looking.
+The failure mode this rider guards against is a tool that fills a safety field on demand, so the guard gates the write; observing and reporting an already-migrated home stays available, which is what a future investigator actually needs.
+
 The permanent guarantee - that teardown refuses an unbound or mismatched record - is owned by `tests/fm-teardown-endpoint-safety.test.sh`, which this change left untouched and green.
