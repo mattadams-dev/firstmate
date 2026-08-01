@@ -329,6 +329,10 @@
       "audience": "maintainer-verification"
     },
     {
+      "path": "docs/verification/endpoint-binding-migration.md",
+      "audience": "maintainer-verification"
+    },
+    {
       "path": "docs/verification/process-event-sources.md",
       "audience": "maintainer-verification"
     },
@@ -350,10 +354,6 @@
     },
     {
       "path": "docs/verification/trace-context.md",
-      "audience": "maintainer-verification"
-    },
-    {
-      "path": "docs/verification/endpoint-binding-migration.md",
       "audience": "maintainer-verification"
     },
     {
