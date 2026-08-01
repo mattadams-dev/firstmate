@@ -6,8 +6,9 @@
 # It is retained deliberately as the documented recovery procedure for a future
 # legacy lane. The property that keeps it from becoming standing bypass
 # machinery is carried by a guard, not by absence: `--apply` refuses against a
-# home that already carries migration provenance. See THE ONE-SHOT GUARD below,
-# and docs/verification/endpoint-binding-migration.md.
+# home that is already fully migrated. That guard has a known gap; see THE
+# ONE-SHOT GUARD below for what it holds and what it does not, and
+# docs/verification/endpoint-binding-migration.md.
 #
 # WHY THE FIELD MATTERS
 #
@@ -80,17 +81,34 @@
 # deleted, lost in a home copy, or never written after a partial run; the
 # provenance lines cannot go missing without the repair itself going missing.
 #
-# It cannot be satisfied by accident. There is no flag to pass, no variable to
-# set, and no file to remember. Defeating it means stripping the provenance
-# lines off already-repaired records, which is deliberate, visible in a diff,
-# and simultaneously destroys the audit trail those lines exist to keep. The
-# guard and the provenance record protect each other.
+# WHAT THE GUARD HOLDS, AND WHAT IT DOES NOT
 #
-# It preserves the recovery use this script is retained for. A genuinely new
-# legacy home carries zero provenance lines, so the documented procedure works
-# there on first run and refuses once that run has finished the home. An
-# interrupted run leaves unbound candidates behind, so the next `--apply`
-# resumes and repairs only what is still stranded.
+# It holds on a home where every unbound record is one this migration could
+# actually repair: once they are all repaired, `--apply` refuses. That is the
+# casual-re-run case, and it is the one the retirement rider targets.
+#
+# It does NOT hold on a home containing any record that is unbound but
+# permanently unrepairable by this script. A legacy tmux record carries a
+# `window=` line and no `endpoint_task_id=` line for good - the loop only ever
+# reports it NOT-REQUIRED - and a record on a backend with no observation path
+# is only ever reported as a disposition. Either kind keeps the unbound count
+# above zero forever, so `--apply` never refuses on that home. This needs no
+# tampering: it is an ordinary home state, which is why this guard must not be
+# described as one that cannot be satisfied by accident.
+#
+# The anti-assertion guarantee does not rest on this guard. The per-record
+# filter is what enforces it, unconditionally: the script only ever APPENDS a
+# binding to a record that has none, and only from a live observation of that
+# record's own endpoint. No path through this script writes an unobserved or
+# asserted value, on any home, in any of the states above. That is the stronger
+# of the two protections and it is unaffected by the gap described here.
+#
+# Status: the gap is known, not overlooked. It was found in review before this
+# landed, its real-world impact was checked and is currently zero (the primary
+# home's recorded run left no unbound candidate), and the redesign is escalated
+# rather than patched, because this was the third review finding on the same
+# boundary. The design question is written up in this task's private report and
+# PR evidence.
 #
 # It blocks the hazard, not the looking. The failure mode is a tool that fills a
 # safety field on demand, so the guard gates the write. Observing and reporting
@@ -119,7 +137,7 @@ APPLY=0
 case "${1:-}" in
   '') ;;
   --apply) APPLY=1 ;;
-  -h|--help) sed -n '2,112p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
+  -h|--help) sed -n '2,130p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
   *) echo "usage: $(basename "$0") [--apply]" >&2; exit 1 ;;
 esac
 
@@ -144,10 +162,19 @@ STATE="$FM_HOME/state"
 # there is nothing left to do.
 #
 # An unbound candidate is any record with a window line and zero
-# endpoint_task_id= lines, the same set the loop considers for repair. Do not
-# narrow it to herdr-backed records: that would duplicate backend routing here
-# where it could drift out of step with the loop, and a permissive guard cannot
-# cause a write the per-record filter would not already allow.
+# endpoint_task_id= lines, the same set the loop considers for repair.
+#
+# OPEN QUESTION, do not treat the line below as settled. This counting was
+# chosen to avoid duplicating backend routing here, on the reasoning that a
+# permissive guard cannot cause a write the per-record filter would not already
+# allow. That is still true of writes, but review has since shown the counting
+# is wrong for the guard's own purpose: a record that is unbound and
+# permanently unrepairable, such as a legacy tmux record or one on a backend
+# with no observation path, keeps this count above zero forever and so disables
+# the refusal entirely on that home. Narrowing it to repairable records is the
+# proposed redesign; it is escalated and deliberately not applied here, because
+# this was the third review finding on this boundary. See the header section
+# "WHAT THE GUARD HOLDS, AND WHAT IT DOES NOT" and this task's private report.
 provenance_records=0
 unbound_candidates=0
 for scan_meta in "$STATE"/*.meta; do
