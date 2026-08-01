@@ -933,20 +933,52 @@ if sheet is None:
     sys.exit("the board carries no stylesheet at all")
 
 # selector -> {property: value}, whitespace, comments and ordering irrelevant.
-rules = {}
-stylesheet = re.sub(r"/\*.*?\*/", " ", sheet.group(1), flags=re.S)
-for selectors, body in re.findall(r"([^{}]+)\{([^{}]*)\}", stylesheet):
-    declarations = {}
-    for declaration in body.split(";"):
-        if ":" not in declaration:
+# Blocks are matched by counting braces and at-rules are DESCENDED INTO, because
+# the whole point of this guard is "no second out-of-flow element", and a parser
+# that skips `@media { ... }` would answer that question without looking at
+# whatever is nested inside one.
+def parse(stylesheet, rules=None):
+    rules = {} if rules is None else rules
+    cursor = 0
+    while True:
+        opened = stylesheet.find("{", cursor)
+        if opened < 0:
+            return rules
+        prelude = stylesheet[cursor:opened].strip()
+        depth, index = 1, opened + 1
+        while index < len(stylesheet) and depth:
+            if stylesheet[index] == "{":
+                depth += 1
+            elif stylesheet[index] == "}":
+                depth -= 1
+            index += 1
+        if depth:
+            sys.exit("the stylesheet has an unclosed block, so it cannot be checked")
+        body = stylesheet[opened + 1:index - 1]
+        cursor = index
+        if prelude.startswith("@"):
+            if "{" in body:
+                parse(body, rules)
             continue
-        name, _, value = declaration.partition(":")
-        declarations[name.strip()] = value.strip()
-    for selector in selectors.split(","):
-        selector = " ".join(selector.split())
-        if selector.startswith(("@", "/*")) or not selector:
-            continue
-        rules.setdefault(selector, {}).update(declarations)
+        declarations = {}
+        for declaration in body.split(";"):
+            if ":" not in declaration:
+                continue
+            name, _, value = declaration.partition(":")
+            declarations[name.strip()] = value.strip()
+        for selector in prelude.split(","):
+            selector = " ".join(selector.split())
+            if selector:
+                rules.setdefault(selector, {}).update(declarations)
+
+# The guard's own blind spot, checked first: a parser that cannot see into an
+# at-rule reports a clean board while chrome sits over it inside a @media.
+probe = parse("@media (max-width:700px) { #sneaky { position:fixed; top:0 } }")
+if probe.get("#sneaky", {}).get("position") != "fixed":
+    sys.exit("this guard cannot see out-of-flow rules nested in an at-rule, "
+             "so it would pass a board with chrome hidden in one")
+
+rules = parse(re.sub(r"/\*.*?\*/", " ", sheet.group(1), flags=re.S))
 
 out_of_flow = sorted(selector for selector, declarations in rules.items()
                      if declarations.get("position") in ("fixed", "absolute", "sticky"))
@@ -1069,6 +1101,44 @@ FM_HOME=$HOME22 "$BRIDGE" lint --strict >/dev/null 2>&1 \
   || fail "discard: a discarded record is reported as a record-hygiene problem"
 pass "a discarded record lints clean"
 
+# Every zone reads the same classification, not raw state. A discarded critical
+# under a heading that reads "these stay pinned until resolved", or a discarded
+# decision still listed as open, is the board contradicting itself in public -
+# the same two-readers-of-one-fact shape as the incident this fold exists for.
+HOME22B=$(new_home)
+FM_HOME=$HOME22B "$BRIDGE" critical -q --id c-gone --project fleet \
+  --title "a critical that was thrown away" --answer act >/dev/null
+FM_HOME=$HOME22B "$BRIDGE" append -q id=c-gone phase=discarded \
+  note="forced teardown: landed-work check skipped, work discarded - superseded" >/dev/null
+FM_HOME=$HOME22B "$BRIDGE" ask -q --id d-gone --project orca \
+  --title "a decision that was thrown away" --answer A >/dev/null
+FM_HOME=$HOME22B "$BRIDGE" append -q id=d-gone phase=discarded \
+  note="forced teardown: landed-work check skipped, work discarded - superseded" >/dev/null
+FM_HOME=$HOME22B "$BRIDGE" critical -q --id c-live --project fleet \
+  --title "a critical that still stands" --answer act >/dev/null
+
+FM_HOME=$HOME22B "$RENDER" --state | python3 -c '
+import json, sys
+doc = json.load(sys.stdin)
+if "c-gone" in doc["zones"]["criticals"]:
+    sys.exit("a discarded critical is still pinned as unresolved")
+if "c-gone" not in doc["zones"]["criticals_resolved"]:
+    sys.exit("a discarded critical vanished from the criticals zone entirely")
+if doc["zones"]["criticals"] != ["c-live"]:
+    sys.exit("the live critical is no longer pinned: %r" % doc["zones"]["criticals"])
+for group in doc["zones"]["decisions"]:
+    if "d-gone" in group["open"]:
+        sys.exit("a discarded decision is still listed as open")
+    if group["project"] == "orca" and "d-gone" not in group["resolved"]:
+        sys.exit("a discarded decision vanished from its project section")
+' || fail "zones: see the reported placement"
+# And record hygiene reads the same classification, so it does not ask for an
+# answer form the board has already withdrawn.
+FM_HOME=$HOME22B "$BRIDGE" append -q id=d-gone answer= >/dev/null 2>&1 || true
+FM_HOME=$HOME22B "$BRIDGE" lint --strict >/dev/null 2>&1 \
+  || fail "zones: a discarded decision is reported as a record-hygiene problem"
+pass "a discarded critical and decision leave the open zones the board pins"
+
 # --- 23. discarded work is never an ask, whatever it was before ------------
 #
 # The dangerous case is not the discard-only record: it is a task that EARNED an
@@ -1137,6 +1207,28 @@ case "$askboard" in
   *'title="1 waiting on you'*) : ;;
   *) fail "discard: the rail badge still counts discarded work" ;;
 esac
+# An override's provenance carries the accent; an ordinary note does not, so a
+# routine event never reads as a problem on a board where orange means one thing.
+FM_HOME=$HOME23 "$BRIDGE" note -q --id ev-plain --project orca \
+  --title "a routine landed change" --note "picked up the pin bump too" >/dev/null
+FM_HOME=$HOME23 "$RENDER" --html > "$TMP_ROOT/accent.html"
+python3 - "$TMP_ROOT/accent.html" <<'ACCENT' || fail "accent: see the reported note"
+import re, sys
+html = open(sys.argv[1]).read()
+seen_plain = False
+for match in re.finditer(r'<div class="why([^"]*)">([^<]*)</div>', html):
+    accented = "override" in match.group(1)
+    provenance = "check skipped" in match.group(2)
+    if accented and not provenance:
+        sys.exit("an ordinary note carries the override accent: %r" % match.group(2))
+    if provenance and not accented:
+        sys.exit("override provenance lost its accent: %r" % match.group(2))
+    seen_plain = seen_plain or not accented
+if not seen_plain:
+    sys.exit("no ordinary note rendered, so this proves nothing")
+sys.exit(0)
+ACCENT
+pass "only override provenance carries the alarm accent; an ordinary note reads as ordinary"
 python3 - "$TMP_ROOT/discard-ask.html" <<'PY' || fail "discard: see the reported row"
 import re, sys
 html = open(sys.argv[1]).read()

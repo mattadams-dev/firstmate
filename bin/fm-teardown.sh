@@ -1627,7 +1627,7 @@ elif [ "$FORCE" = "--force" ]; then
   # against the fleet rather than as a task row that would invent a work item
   # out of a retirement.
   FM_HOME="$FM_HOME" "$FM_ROOT/bin/fm-bridge.sh" note --quiet \
-    --id "secondmate-retired-$ID" --project fleet \
+    --id "secondmate-retired-$ID" --project fleet --phase discarded \
     --title "secondmate $ID retired under --force" \
     --body "Its home and any in-flight child work were discarded without the checks a normal retirement runs." \
     --note "forced teardown: in-flight-work check skipped, secondmate home and child work discarded - $FORCE_REASON" \

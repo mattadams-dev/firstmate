@@ -473,11 +473,12 @@ def fold(ledger_path, folded_at):
                 SEVERITY_RANK.get(item["severity"], 4),
                 -index[key])
 
-    criticals = [k for k in order
-                 if items[k]["kind"] == "critical" and items[k]["state"] != "resolved"]
+    criticals = [k for k in order if items[k]["kind"] == "critical"
+                 and disposition(items[k]) not in ("resolved", DISCARD_PHASE)]
     criticals.sort(key=triage)
     criticals_resolved = sorted(
-        [k for k in order if items[k]["kind"] == "critical" and items[k]["state"] == "resolved"],
+        [k for k in order if items[k]["kind"] == "critical"
+         and disposition(items[k]) in ("resolved", DISCARD_PHASE)],
         key=recency, reverse=True)
 
     decisions = []
@@ -487,9 +488,11 @@ def fold(ledger_path, folded_at):
                 if items[k]["kind"] == "decision" and items[k]["project"] == slug]
         if not keys:
             continue
-        open_keys = sorted([k for k in keys if items[k]["state"] != "resolved"],
+        open_keys = sorted([k for k in keys
+                            if disposition(items[k]) not in ("resolved", DISCARD_PHASE)],
                            key=triage)
-        done_keys = sorted([k for k in keys if items[k]["state"] == "resolved"],
+        done_keys = sorted([k for k in keys
+                            if disposition(items[k]) in ("resolved", DISCARD_PHASE)],
                            key=recency, reverse=True)
         decisions.append({
             "project": slug,
@@ -900,10 +903,15 @@ table.strip td.st { white-space:nowrap; width:1%; }
 /* Why a row was discarded, on the row itself. The strip is scannable, so this
    stays small and secondary - but it is on the board, because the board is
    where the disposition is read. */
+/* Secondary text under a row. It is DIM by default because a note is an
+   ordinary field on every write command, and only the override accent below
+   may claim the reader's alarm - one meaning per accent, and orange already
+   means something is off. */
 table.strip .why, ul.events .why {
-  margin-top:.25rem; font-size:.76rem; line-height:1.45; color:var(--tn-orange);
+  margin-top:.25rem; font-size:.76rem; line-height:1.45; color:var(--tn-dim);
   overflow-wrap:anywhere;
 }
+table.strip .why.override, ul.events .why.override { color:var(--tn-orange); }
 .chip.was { color:var(--tn-muted); }
 .stripwrap { overflow-x:auto; border:1px solid var(--tn-line); border-radius:.5rem; background:var(--tn-panel); }
 
@@ -1149,7 +1157,7 @@ def chip(item):
         # a red NEEDS-CAPTAIN chip on work nobody can act on is the exact
         # confusion the state field exists to prevent.
         was = ('<span class="chip was">was %s</span>' % esc(item["state"])
-               if item["state"] else "")
+               if item["state"] not in ("", "resolved") else "")
         return '<span class="chip discarded">discarded</span>%s' % was
     label = item["state"] if cls != "odd" else item["state"] + " ?"
     return '<span class="chip %s">%s</span>' % (cls, esc(label))
@@ -1177,7 +1185,7 @@ def meta_line(item):
 
 def pointer_line(item):
     if not item["pointer"]:
-        if item["state"] == "resolved" and item["kind"] in ("decision", "critical"):
+        if disposition(item) == "resolved" and item["kind"] in ("decision", "critical"):
             return ('<div class="pointer"><span class="lbl">outcome</span>'
                     '<span style="color:var(--tn-orange)">resolved with no pointer '
                     '- see record hygiene</span></div>')
@@ -1318,7 +1326,7 @@ def render_html(doc, checked_at):
         '<span class="l-purple">needs the co-captain</span>'
         '<span class="l-blue">firstmate has it</span>'
         '<span class="l-green">resolved</span>'
-        '<span class="l-orange">something is off</span>'
+        '<span class="l-orange">discarded, aging, or otherwise off</span>'
         '<span class="l-cyan">pointer or command</span>'
         "</div>")
     add("</div></header>")
@@ -1489,14 +1497,15 @@ def render_html(doc, checked_at):
             # destructive override in the fleet, so the judgement that
             # authorized it has to be readable where the captain reads, not
             # only in the record behind the page.
-            why = ('<div class="why">%s</div>' % esc(item["note"])
+            why = ('<div class="why%s">%s</div>'
+                   % (" override" if item.get("discarded") else "", esc(item["note"]))
                    if item["note"] else "")
             add('<li><span class="when">%s</span>'
                 '<span class="what">%s%s %s%s</span></li>'
                 % (esc((item["ts"] or "")[:16].replace("T", " ")),
                    esc(item["title"] or item["id"]),
                    trail,
-                   chip(item) if item["state"] != "resolved" else "",
+                   chip(item) if disposition(item) != "resolved" else "",
                    why))
         add("</ul>")
     else:
@@ -1545,7 +1554,7 @@ def render_html(doc, checked_at):
             # facts here - that the check was skipped, that the work was thrown
             # away, and the judgement someone gave for skipping it - rather than
             # only in the record behind the board.
-            why = ('<div class="why">%s</div>' % esc(item["note"])
+            why = ('<div class="why override">%s</div>' % esc(item["note"])
                    if item.get("discarded") and item["note"] else "")
             add('<tr id="item-%s"><td><b>%s</b>%s</td><td>%s</td><td>%s</td>'
                 '<td class="st">%s%s</td><td>%s%s</td></tr>'

@@ -156,6 +156,8 @@ Once an item carries the discard phase it is discarded for every captain-facing 
 It is absent from `asks`, `cocaptain_asks`, `queues`, the `needs-captain` and `needs-cocaptain` tallies, the tab-title count, the rail badge, and the aging flag, and its answer forms are withdrawn - nobody can rule on work that no longer exists.
 The earned state stays in the ledger and in `--state` for audit, and the board shows it beside the `discarded` chip as `was needs-captain` rather than instead of it.
 Discarded tasks sit in their own capped tail of the fleet strip, `zones.fleet_discarded` under `caps.fleet_discarded` (default 6, `FM_BRIDGE_CAP_FLEET_DISCARDED`), with the same visible overflow pointer to the record that landed work uses - a rare override must not grow into a permanent wall of rows.
+Every zone predicate reads that one classification rather than `state`, so a discarded critical leaves the pinned criticals and a discarded decision leaves its project's open list, both joining the closed group instead of contradicting the zone note above them.
+`bin/fm-bridge.sh lint` reads it too, so it never asks for an answer form on work the board has already withdrawn one from.
 
 ### Why append-only, and why records are bounded
 
@@ -262,7 +264,8 @@ External link text is the full URL because that is the most useful label for a p
 
 The board reuses the tokyonight-storm token block from the canonical scaffold in `~/code/personal/dotfiles/docs/labs/`, with one deliberate departure: the scaffold's DaisyUI and Tailwind CDN layer is not used.
 The board is regenerated from disk every few minutes and must render identically with no network, so its styling is inlined.
-Accents keep one meaning each: red needs the captain, purple needs the co-captain, blue firstmate has it, green resolved, orange something is off, cyan pointer or command.
+Accents keep one meaning each: red needs the captain, purple needs the co-captain, blue firstmate has it, green resolved, orange discarded or otherwise off, cyan pointer or command.
+Ordinary secondary text, including a record's `note`, is dim rather than accented - `--note` is a general field on every write command, so accenting it would make a routine event read as a problem and give orange a second meaning.
 
 ## Cadence and cost
 
