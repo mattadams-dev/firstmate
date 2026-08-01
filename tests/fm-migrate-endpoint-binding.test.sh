@@ -399,13 +399,33 @@ case_one_shot_allows_resume_after_partial_run() {
 
 # The guard blocks the hazard, not the looking: an investigator must still be
 # able to observe and report an already-migrated home.
+#
+# This case must use the fully migrated home, because that is the only state
+# where --apply is actually refused. On any home where the write is permitted
+# anyway, "observe is allowed" and "the write is refused" produce the same
+# reading, and the case would prove nothing about the guard.
 case_one_shot_allows_observe_on_migrated_home() {
-  local h; h=$(partial_run_home migratedobserve)
+  local h; h=$(fully_migrated_home migratedobserve)
+
+  local err rc
+  err=$(FM_HOME="$h" FM_FAKE_HERDR_FIX="$h/fix" "$MIGRATE" 2>&1 >/dev/null)
+  rc=$?
+  [ "$rc" -eq 0 ] || fail "observe-only mode was refused on a fully migrated home: $err"
+  case "$err" in *REFUSED*) fail "observe-only mode printed a refusal: $err" ;; esac
+  cmp -s "$h/alpha.before" "$h/state/alpha.meta" \
+    || fail "observe-only mode modified a record"
+}
+
+# Observe mode on a partially migrated home still reports the record an
+# interrupted run never reached. Kept separate from the case above because that
+# one owns the refusal state, where nothing is left to report.
+case_observe_reports_unbound_record_on_partial_home() {
+  local h; h=$(partial_run_home partialobserve)
 
   local out rc
   out=$(run_migrate "$h")
   rc=$?
-  [ "$rc" -eq 0 ] || fail "observe-only mode was refused on an already-migrated home: $out"
+  [ "$rc" -eq 0 ] || fail "observe-only mode failed on a partially migrated home: $out"
   case "$out" in *"WOULD-MIGRATE"$'\t'"beta"*) ;;
     *) fail "observe-only mode did not report the unbound record: $out" ;; esac
   cmp -s "$h/beta.before" "$h/state/beta.meta" \
