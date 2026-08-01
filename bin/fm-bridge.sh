@@ -215,9 +215,27 @@ case "$COMMAND" in
     case "${1:-}" in --strict) STRICT=1 ;; '') ;; *) die "lint takes --strict" ;; esac
     command -v python3 >/dev/null 2>&1 || die "python3 is required to lint"
     export FM_BRIDGE_LINT_STRICT="$STRICT"
-    "$RENDER" --state | python3 -c '
+    # Clean, dirty, and COULD-NOT-READ are three different answers, and only the
+    # first two are about the record. Reading the fold into a variable first
+    # keeps a failed fold from arriving as empty stdin and being reported as a
+    # clean record - a caller checking the exit status would have no way to tell
+    # "nothing is wrong" from "the lint never ran".
+    STATE_DOC=$("$RENDER" --state) || {
+      printf 'bridge lint: UNKNOWN - the fold failed, so nothing was checked\n' >&2
+      exit 3
+    }
+    [ -n "$STATE_DOC" ] || {
+      printf 'bridge lint: UNKNOWN - the fold returned nothing, so nothing was checked\n' >&2
+      exit 3
+    }
+    printf '%s' "$STATE_DOC" | python3 -c '
 import json, sys
-doc = json.load(sys.stdin)
+try:
+    doc = json.load(sys.stdin)
+except ValueError as err:
+    sys.stderr.write("bridge lint: UNKNOWN - folded state did not parse (%s), "
+                     "so nothing was checked\n" % err)
+    sys.exit(3)
 problems = []
 
 if not doc["conserved"]:
@@ -250,6 +268,9 @@ for line in problems:
 print("bridge lint: %d item(s), %d problem(s)" % (len(doc["items"]), len(problems)))
 sys.exit(1 if (problems and __import__("os").environ.get("FM_BRIDGE_LINT_STRICT") == "1") else 0)
 ' && rc=0 || rc=$?
+    # An unknown outcome propagates in BOTH modes: default mode forgives
+    # problems it could see, never a check it could not run.
+    [ "${rc:-0}" -eq 3 ] && exit 3
     [ "$STRICT" -eq 1 ] && exit "${rc:-0}"
     exit 0
     ;;

@@ -45,6 +45,10 @@ bin/fm-bridge-render.sh --state --id <id>       # the same document, one item
 bin/fm-bridge-render.sh --lifecycle <id>        # typed answer about one id
 ```
 
+The narrowed document is narrowed everywhere, not just in `items`: `asks`, `cocaptain_asks`, `queues`, and every `zones` list name only the retained id.
+The documented traversal is `for k in doc["asks"]: doc["items"][k]`, so a queue still naming a dropped id would hand a targeted consumer a `KeyError` on the document meant to be easier to read.
+The ledger-wide `counts` stay ledger-wide, because conservation is a claim about the stream rather than about the slice.
+
 The plural matters here.
 A shared fold with a single consumer decays back into private logic, because nothing else exercises its contract.
 On day one it has four: the HTML board, the co-captain's independent audit, firstmate's own record linter (`bin/fm-bridge.sh lint`), and targeted lifecycle queries.
@@ -137,12 +141,15 @@ Omit `--id` and one is derived from kind, project, and title, so re-appending th
 
 Most fleet-strip rows are never written by hand at all: `fm-spawn.sh`, `fm-pr-check.sh`, `fm-pr-merge.sh`, and `fm-teardown.sh` append at the moment they cause the event.
 Those appends are best-effort and can never fail their caller.
+A persistent secondmate is not a work item, so neither spawn nor teardown ever gives one a row.
+An ordinary cleanup records `state=resolved`, which only its landed-work test can support; a `--force <reason>` cleanup skipped that test, so it records `phase=discarded` with the reason that authorized the override and leaves the row's last honest state alone.
 
 ### Why append-only, and why records are bounded
 
 An append must be one write with no read, no rewrite, and no lock.
 A single write to an `O_APPEND` file is atomic up to `PIPE_BUF` (4096 bytes), so concurrent lanes cannot interleave a record while records stay under that bound.
-`FM_BRIDGE_MAX_RECORD_BYTES` (default 3800) enforces it by shortening `body`, then `title`, and marking the record `truncated`.
+`FM_BRIDGE_MAX_RECORD_BYTES` (default 3800) enforces it by assembling the record, measuring it **in bytes**, and shortening one field at a time - `body`, `note`, answer forms, `check`, `pointer`, `phase`, `owner`, then `title` last - until the line fits, marking any record that lost something `truncated`.
+Bytes, not characters: a multibyte title that a character count calls small is exactly the line a concurrent append can tear.
 
 ## Tolerance, and the incident behind it
 
@@ -262,6 +269,9 @@ bin/fm-bridge-render.sh --lifecycle <id>                     # one item
 bin/fm-bridge-render.sh --state | jq -r '.cocaptain_asks[]'  # the co-captain's queue
 tail -n 40 "$(bin/fm-bridge.sh path ledger)"                 # the raw stream
 ```
+
+`lint` keeps clean, dirty, and could-not-read apart.
+Default mode forgives problems it could see and exits 0; `--strict` exits 1 on problems; either mode exits **3** when the fold itself could not be read, because "the record is clean" and "the lint never ran" must never share an exit status.
 
 `lint` flags a resolved decision with no pointer, an ask with no answer form, an unrecognized value, a truncated record, and any conservation or readability failure.
 It reads through `--state` and never opens the ledger itself: a linter with its own parser would be exactly the second reading this design exists to make impossible.

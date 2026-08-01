@@ -38,7 +38,7 @@ run_case() {  # <case> <id>
   local dir=$1 id=$2
   FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" \
   FM_RUNTIME_LOG="$dir/runtime.log" PATH="$dir/fakebin:$PATH" \
-    "$TEARDOWN" "$id" --force
+    "$TEARDOWN" "$id" --force "test: captain approved discarding this work"
 }
 
 assert_refused_without_mutation() {  # <case> <id> <description>
@@ -218,7 +218,7 @@ SH
   set +e
   env -u TMUX -u TMUX_PANE FM_TEST_TMUX_SOCKET="$socket_id" \
     FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" FM_RUNTIME_LOG="$dir/runtime.log" \
-    PATH="$dir/fakebin:$PATH" "$TEARDOWN" invalid --force \
+    PATH="$dir/fakebin:$PATH" "$TEARDOWN" invalid --force "test: captain approved discarding this work" \
     > "$dir/invalid.out" 2> "$dir/invalid.err"
   rc=$?
   set -e
@@ -254,7 +254,7 @@ SH
     "kind=scout" "mode=no-mistakes"
   env -u TMUX -u TMUX_PANE FM_TEST_TMUX_SOCKET="$socket_id" \
     FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" FM_RUNTIME_LOG="$dir/runtime.log" \
-    PATH="$dir/fakebin:$PATH" "$TEARDOWN" "$target_id" --force \
+    PATH="$dir/fakebin:$PATH" "$TEARDOWN" "$target_id" --force "test: captain approved discarding this work" \
     > "$dir/valid.out" 2> "$dir/valid.err" \
     || fail "isolated valid endpoint teardown failed: $(cat "$dir/valid.err")"
   isolated_tmux_window_exists "$dir" "$socket" "$session" "$target" \

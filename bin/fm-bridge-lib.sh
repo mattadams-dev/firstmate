@@ -20,9 +20,13 @@
 # happening, never separate bookkeeping. A single write(2) to an O_APPEND file
 # is atomic up to PIPE_BUF (4096 bytes on every platform firstmate supports), so
 # concurrent lanes cannot interleave a record as long as records stay under that
-# bound. FM_BRIDGE_MAX_RECORD_BYTES enforces it by truncating body, then title,
-# and marking the record truncated:true rather than emitting a line that could
-# be torn by a concurrent writer.
+# bound. FM_BRIDGE_MAX_RECORD_BYTES enforces it by assembling the record,
+# MEASURING IT IN BYTES, and shortening one free-text field at a time - body,
+# note, answer forms, check, pointer, phase, owner, then title last - until the
+# line fits, marking any record that lost something truncated:true rather than
+# emitting a line a concurrent writer could tear. Bytes, not characters:
+# a character count calls a multibyte title small right up until the write
+# splits it.
 #
 # WRITERS NORMALIZE; THE READER TOLERATES EVERYTHING EVER WRITTEN, FOREVER.
 # That split is the captain's standing ruling. This file is the normalizing
@@ -181,6 +185,50 @@ fm_bridge_in_set() {  # <value> <space-separated-set>
   return 1
 }
 
+# --- the record bound, measured in BYTES ------------------------------------
+#
+# PIPE_BUF is a byte bound, so every measurement here has to be one too.
+# `${#text}` counts CHARACTERS, and a title of multibyte characters sails past
+# a character-counted budget and lands as a line twice its supposed size - which
+# is precisely the line a concurrent lane can tear.
+
+fm_bridge_byte_len() {  # <text>
+  local n
+  n=$(printf '%s' "$1" | wc -c)
+  printf '%s' "${n//[![:digit:]]/}"
+}
+
+# The longest prefix of <text> that fits in <max> BYTES, cut on a character
+# boundary. Binary search over the character count, so a long value costs a
+# handful of measurements rather than one per byte.
+fm_bridge_prefix_bytes() {  # <text> <max-bytes>
+  local text=$1 max=$2 lo=0 hi=${#1} mid
+  [ "$max" -le 0 ] && return 0
+  if [ "$(fm_bridge_byte_len "$text")" -le "$max" ]; then
+    printf '%s' "$text"
+    return 0
+  fi
+  while [ "$lo" -lt "$hi" ]; do
+    mid=$(( (lo + hi + 1) / 2 ))
+    if [ "$(fm_bridge_byte_len "${text:0:$mid}")" -le "$max" ]; then
+      lo=$mid
+    else
+      hi=$(( mid - 1 ))
+    fi
+  done
+  printf '%s' "${text:0:$lo}"
+}
+
+# Shorten <text> so that it costs at most <give-up-bytes> fewer bytes, leaving
+# an ellipsis behind when there is room for one. Empty output means the field
+# gave up everything it had.
+fm_bridge_shrink_by() {  # <text> <bytes-to-drop>
+  local text=$1 drop=$2 target
+  target=$(( $(fm_bridge_byte_len "$text") - drop - 3 ))
+  [ "$target" -le 0 ] && return 0
+  printf '%s…' "$(fm_bridge_prefix_bytes "$text" "$target")"
+}
+
 # Default disposition per kind. A decision or a critical starts as an ask; a
 # task starts with firstmate; a notable event is a fact with nothing owed.
 fm_bridge_default_state() {  # <kind>
@@ -218,10 +266,70 @@ fm_bridge_default_severity() {  # <kind>
 # dropped rather than written as empty strings, so a partial update record
 # carries only the fields it actually changes - the fold merges present fields
 # over the item's prior state.
+
+# Assemble the caller's record as one JSON line. Bash's dynamic scope makes
+# fm_bridge_append's locals visible here, which is what lets the bound below
+# MEASURE the real line, shorten one field, and measure again - rather than
+# estimate an overhead and hope the estimate was right.
+fm_bridge_record_json() {
+  local json answers='' index=0
+  while [ "$index" -lt "$n_answers" ]; do
+    [ "$index" -gt 0 ] && answers="$answers,"
+    answers="$answers$(fm_bridge_json_str "${answer_values[$index]}")"
+    index=$(( index + 1 ))
+  done
+  json="{\"v\":$FM_BRIDGE_SCHEMA_VERSION"
+  json="$json,\"ts\":$(fm_bridge_json_str "$ts")"
+  json="$json,\"id\":$(fm_bridge_json_str "$id")"
+  [ -n "$kind" ]     && json="$json,\"kind\":$(fm_bridge_json_str "$kind")"
+  [ -n "$project" ]  && json="$json,\"project\":$(fm_bridge_json_str "$project")"
+  [ -n "$state" ]    && json="$json,\"state\":$(fm_bridge_json_str "$state")"
+  [ -n "$severity" ] && json="$json,\"severity\":$(fm_bridge_json_str "$severity")"
+  [ -n "$owner" ]    && json="$json,\"owner\":$(fm_bridge_json_str "$owner")"
+  [ -n "$title" ]    && json="$json,\"title\":$(fm_bridge_json_str "$title")"
+  [ -n "$body" ]     && json="$json,\"body\":$(fm_bridge_json_str "$body")"
+  [ -n "$pointer" ]  && json="$json,\"pointer\":$(fm_bridge_json_str "$pointer")"
+  [ -n "$check" ]    && json="$json,\"check\":$(fm_bridge_json_str "$check")"
+  [ -n "$note" ]     && json="$json,\"note\":$(fm_bridge_json_str "$note")"
+  [ -n "$phase" ]    && json="$json,\"phase\":$(fm_bridge_json_str "$phase")"
+  [ "$n_answers" -gt 0 ] && json="$json,\"answers\":[$answers]"
+  [ "$truncated" -eq 1 ] && json="$json,\"truncated\":true"
+  json="$json}"
+  printf '%s' "$json"
+}
+
+# Drop <bytes> from the caller's longest-lived free text, one field per call,
+# cheapest detail first. Returns 1 when there is nothing left to shorten.
+fm_bridge_shorten_one() {  # <bytes-to-drop>
+  local drop=$1 index
+  if [ -n "$body" ];    then body=$(fm_bridge_shrink_by "$body" "$drop"); return 0; fi
+  if [ -n "$note" ];    then note=$(fm_bridge_shrink_by "$note" "$drop"); return 0; fi
+  index=$(( n_answers - 1 ))
+  while [ "$index" -ge 0 ]; do
+    if [ -n "${answer_values[$index]}" ]; then
+      answer_values[index]=$(fm_bridge_shrink_by "${answer_values[$index]}" "$drop")
+      return 0
+    fi
+    index=$(( index - 1 ))
+  done
+  if [ -n "$check" ];   then check=$(fm_bridge_shrink_by "$check" "$drop"); return 0; fi
+  if [ -n "$pointer" ]; then pointer=$(fm_bridge_shrink_by "$pointer" "$drop"); return 0; fi
+  if [ -n "$phase" ];   then phase=$(fm_bridge_shrink_by "$phase" "$drop"); return 0; fi
+  if [ -n "$owner" ];   then owner=$(fm_bridge_shrink_by "$owner" "$drop"); return 0; fi
+  # Title last: it is what names the item on the board, so it survives every
+  # other field. id and project are already slugified to a bounded ASCII
+  # length, and ts is a stamp, so between them the record cannot stay oversized
+  # once the free text is gone.
+  if [ -n "$title" ];   then title=$(fm_bridge_shrink_by "$title" "$drop"); return 0; fi
+  if [ -n "$ts" ];      then ts=$(fm_bridge_prefix_bytes "$ts" 32); return 0; fi
+  return 1
+}
+
 fm_bridge_append() {  # <name=value> ...
-  local arg name value ledger json='' answers='' n_answers=0
+  local arg name value ledger json='' n_answers=0
   local id='' kind='' project='' state='' severity='' owner='' title='' body=''
   local pointer='' check='' note='' phase='' ts=''
+  local answer_values=()
 
   for arg in "$@"; do
     case "$arg" in
@@ -244,8 +352,7 @@ fm_bridge_append() {  # <name=value> ...
       ts) ts=$value ;;
       answer)
         [ -n "$value" ] || continue
-        [ "$n_answers" -gt 0 ] && answers="$answers,"
-        answers="$answers$(fm_bridge_json_str "$value")"
+        answer_values[n_answers]=$value
         n_answers=$((n_answers + 1))
         ;;
       *) printf 'fm-bridge: unknown field: %s\n' "$name" >&2; return 2 ;;
@@ -289,48 +396,32 @@ fm_bridge_append() {  # <name=value> ...
   [ -n "$project" ] && project=$(fm_bridge_slug "$project" 40)
   [ -n "$ts" ] || ts=$(fm_bridge_now)
 
-  # Bound the record so one write(2) stays atomic under O_APPEND. Body first,
-  # then title: losing detail is recoverable, losing the whole record is not.
-  local truncated=0 overhead
-  overhead=$(( ${#id} + ${#kind} + ${#project} + ${#state} + ${#severity} \
-    + ${#owner} + ${#pointer} + ${#check} + ${#note} + ${#phase} + ${#answers} + 220 ))
-  local budget=$(( FM_BRIDGE_MAX_RECORD_BYTES - overhead ))
-  [ "$budget" -lt 120 ] && budget=120
-  if [ $(( ${#title} + ${#body} )) -gt "$budget" ]; then
+  # Bound the record so one write(2) stays atomic under O_APPEND. The line is
+  # ASSEMBLED, MEASURED IN BYTES, and - while it is over the bound - shortened
+  # one field at a time and measured again. Estimating an overhead and trimming
+  # only title and body left two ways to emit a line that could be torn: a
+  # multibyte title that a character count called small, and a note, answer,
+  # pointer, or check big enough on its own to blow the bound the earlier code
+  # then clamped its way past. A record over the bound is never emitted, and a
+  # record that lost anything always says so with truncated:true.
+  local truncated=0 excess rounds=0
+  json=$(fm_bridge_record_json)
+  while [ "$(fm_bridge_byte_len "$json")" -gt "$FM_BRIDGE_MAX_RECORD_BYTES" ]; do
+    excess=$(( $(fm_bridge_byte_len "$json") - FM_BRIDGE_MAX_RECORD_BYTES ))
+    fm_bridge_shorten_one "$excess" || break
     truncated=1
-    local title_budget=$(( budget / 3 ))
-    [ "$title_budget" -lt 80 ] && title_budget=80
-    if [ ${#title} -gt "$title_budget" ]; then
-      title="${title:0:$((title_budget - 1))}…"
-    fi
-    local body_budget=$(( budget - ${#title} ))
-    [ "$body_budget" -lt 0 ] && body_budget=0
-    if [ ${#body} -gt "$body_budget" ]; then
-      if [ "$body_budget" -gt 1 ]; then
-        body="${body:0:$((body_budget - 1))}…"
-      else
-        body=''
-      fi
-    fi
+    rounds=$(( rounds + 1 ))
+    json=$(fm_bridge_record_json)
+    # Escaping can expand what shortening removed, so the loop re-measures
+    # rather than trusting one subtraction. The cap only exists so a pathological
+    # value cannot spin here forever; the fields run out long before it.
+    [ "$rounds" -gt 64 ] && break
+  done
+  if [ "$(fm_bridge_byte_len "$json")" -gt "$FM_BRIDGE_MAX_RECORD_BYTES" ]; then
+    printf 'fm-bridge: record for %s could not be bounded to %d bytes; refusing to write a line a concurrent append could tear\n' \
+      "$id" "$FM_BRIDGE_MAX_RECORD_BYTES" >&2
+    return 1
   fi
-
-  json="{\"v\":$FM_BRIDGE_SCHEMA_VERSION"
-  json="$json,\"ts\":$(fm_bridge_json_str "$ts")"
-  json="$json,\"id\":$(fm_bridge_json_str "$id")"
-  [ -n "$kind" ]     && json="$json,\"kind\":$(fm_bridge_json_str "$kind")"
-  [ -n "$project" ]  && json="$json,\"project\":$(fm_bridge_json_str "$project")"
-  [ -n "$state" ]    && json="$json,\"state\":$(fm_bridge_json_str "$state")"
-  [ -n "$severity" ] && json="$json,\"severity\":$(fm_bridge_json_str "$severity")"
-  [ -n "$owner" ]    && json="$json,\"owner\":$(fm_bridge_json_str "$owner")"
-  [ -n "$title" ]    && json="$json,\"title\":$(fm_bridge_json_str "$title")"
-  [ -n "$body" ]     && json="$json,\"body\":$(fm_bridge_json_str "$body")"
-  [ -n "$pointer" ]  && json="$json,\"pointer\":$(fm_bridge_json_str "$pointer")"
-  [ -n "$check" ]    && json="$json,\"check\":$(fm_bridge_json_str "$check")"
-  [ -n "$note" ]     && json="$json,\"note\":$(fm_bridge_json_str "$note")"
-  [ -n "$phase" ]    && json="$json,\"phase\":$(fm_bridge_json_str "$phase")"
-  [ "$n_answers" -gt 0 ] && json="$json,\"answers\":[$answers]"
-  [ "$truncated" -eq 1 ] && json="$json,\"truncated\":true"
-  json="$json}"
 
   ledger=$(fm_bridge_ledger_path)
   mkdir -p "$(dirname "$ledger")" || return 1

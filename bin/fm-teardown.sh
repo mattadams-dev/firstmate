@@ -58,10 +58,18 @@
 # leased home releases its durable treehouse lease so the pool slot is freed,
 # never left leased forever. If the treehouse return fails, teardown leaves the
 # leased home and state in place instead of hiding a still-held lease.
-# Usage: fm-teardown.sh <task-id> [--force]
+# Usage: fm-teardown.sh <task-id> [--force <reason>]
 #   --force skips ordinary-task dirty and landed-work checks, skips scout report
 #   checks, and discards secondmate child work for kind=secondmate. Only use it
 #   when the captain has explicitly said to discard the work.
+#   <reason> is REQUIRED and is one line saying why skipping those checks was
+#   safe. A force with no reason refuses before anything is removed. Overrides
+#   carry provenance: a later reader has to see not just that the check was
+#   skipped but the human judgement that authorized skipping it, and an optional
+#   field decays to an empty one. The reason is recorded on the Bridge row
+#   alongside phase=discarded, and a forced cleanup never records the work as
+#   resolved - the landed-work test it skipped is the only thing that could have
+#   supported that claim.
 #
 # Transient / stale worktree git lock recovery (teardown-lock-race): a crew process
 # killed mid-git-operation can leave a .git/worktrees/<wt>/index.lock (or, for a
@@ -120,9 +128,19 @@ if [ "$#" -lt 1 ] || ! fm_task_id_path_safe "$1"; then
 fi
 ID=$1
 FORCE=${2:-}
+FORCE_REASON=${3:-}
 # Fail closed before any fleet mutation: a no-mistakes gate agent must never tear
 # down a worktree (see bin/fm-gate-refuse-lib.sh).
 fm_refuse_if_gate_agent
+# An override carries provenance or it does not happen. --force skips the checks
+# that prove the work landed, so the only remaining record of why that was safe
+# is what the person running it says here - and a reason nobody had to give is a
+# field that ends up empty exactly when it matters.
+if [ "$FORCE" = "--force" ] && [ -z "${FORCE_REASON// /}" ]; then
+  echo "REFUSED: --force needs a one-line reason, and nothing has been removed." >&2
+  echo "Run: fm-teardown.sh $ID --force \"why discarding this work is safe\"" >&2
+  exit 2
+fi
 FM_LOCK_LOG_PREFIX=teardown
 
 META="$STATE/$ID.meta"
@@ -1565,18 +1583,41 @@ if [ "$KIND" != scout ] && [ "$KIND" != secondmate ] && [ "$MODE" != local-only 
 fi
 echo "teardown $ID complete (window $T, worktree $WT)"
 
-# Bridge: cleanup is what closes the strip row, and it only ever runs after the
-# landed-work test passed - so this is the one point where "resolved" is a claim
-# the record can actually support. A scout's outcome lives in its report; every
-# other task's lives at whatever pointer earlier records already set, which this
-# partial update deliberately leaves alone. Best-effort append.
-if [ "$KIND" = scout ]; then
-  FM_HOME="$FM_HOME" "$FM_ROOT/bin/fm-bridge.sh" task --quiet \
-    --id "$ID" --phase cleaned --state resolved \
-    --pointer "data/$ID/report.md" >/dev/null 2>&1 || true
-else
-  FM_HOME="$FM_HOME" "$FM_ROOT/bin/fm-bridge.sh" task --quiet \
-    --id "$ID" --phase cleaned --state resolved >/dev/null 2>&1 || true
+# Bridge: cleanup is what closes the strip row. An ordinary cleanup only ever
+# runs after the landed-work test passed, so that is the one path where
+# "resolved" is a claim the record can actually support. A FORCED cleanup
+# skipped that test and discarded the work, so it records what actually
+# happened - phase=discarded, with the reason that authorized the override -
+# and leaves the row's last honest state alone rather than promoting it to
+# resolved. A scout's outcome lives in its report; every other task's lives at
+# whatever pointer earlier records already set, which these partial updates
+# deliberately leave alone. A persistent secondmate is not a work item, so - as
+# in fm-spawn.sh - it never becomes a strip row. Best-effort append.
+if [ "$KIND" != secondmate ]; then
+  # Only point at the report when the report is there: --force skips the
+  # missing-report refusal, and a pointer to a file nobody wrote sends the
+  # captain hunting for a work product that does not exist.
+  BRIDGE_REPORT=0
+  if [ "$KIND" = scout ] && [ -f "$DATA/$ID/report.md" ]; then
+    BRIDGE_REPORT=1
+  fi
+  if [ "$FORCE" = "--force" ]; then
+    # A raw append with NO kind, which the writer treats as a partial update:
+    # it sets the phase and the provenance and touches nothing else, so the
+    # row keeps whatever disposition it had honestly earned. Passing kind=task
+    # here would make the writer fill in a disposition of its own, which is the
+    # overclaim this whole branch exists to avoid.
+    BRIDGE_ARGS=(id="$ID" phase=discarded
+      note="forced teardown: landed-work check skipped, work discarded - $FORCE_REASON")
+    [ "$BRIDGE_REPORT" -eq 1 ] && BRIDGE_ARGS+=(pointer="data/$ID/report.md")
+    FM_HOME="$FM_HOME" "$FM_ROOT/bin/fm-bridge.sh" append --quiet \
+      "${BRIDGE_ARGS[@]}" >/dev/null 2>&1 || true
+  else
+    BRIDGE_ARGS=(--id "$ID" --phase cleaned --state resolved)
+    [ "$BRIDGE_REPORT" -eq 1 ] && BRIDGE_ARGS+=(--pointer "data/$ID/report.md")
+    FM_HOME="$FM_HOME" "$FM_ROOT/bin/fm-bridge.sh" task --quiet \
+      "${BRIDGE_ARGS[@]}" >/dev/null 2>&1 || true
+  fi
 fi
 
 backlog_refresh_reminder

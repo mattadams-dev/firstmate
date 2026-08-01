@@ -130,23 +130,17 @@ printf 'armed: state/%s.check.sh\n' "$ID"
 # assumed. Best-effort: never able to fail arming the merge watch.
 BRIDGE_YOLO=$(grep '^yolo=' "$META" 2>/dev/null | tail -1 | cut -d= -f2- || true)
 BRIDGE_PROJECT=$(grep '^project=' "$META" 2>/dev/null | tail -1 | cut -d= -f2- || true)
+BRIDGE_ANSWERS=()
 if [ "$BRIDGE_YOLO" = on ]; then
   BRIDGE_STATE=fm-handling
 else
-  BRIDGE_STATE=needs-captain
-fi
-if [ "$BRIDGE_STATE" = needs-captain ]; then
   # It is an ask, so it carries the ways to answer it. A row that asks for a
   # ruling and offers no way to give one makes the captain compose the reply
   # from scratch, which is what the answer forms exist to prevent.
-  FM_HOME="$FM_HOME" "$FM_ROOT/bin/fm-bridge.sh" task --quiet \
-    --id "$ID" --project "$(basename "${BRIDGE_PROJECT:-fleet}")" \
-    --phase pr-open --state needs-captain --pointer "$URL" --title "$ID" \
-    --answer "merge it" --answer "hold, I want to look first" \
-    >/dev/null 2>&1 || true
-else
-  FM_HOME="$FM_HOME" "$FM_ROOT/bin/fm-bridge.sh" task --quiet \
-    --id "$ID" --project "$(basename "${BRIDGE_PROJECT:-fleet}")" \
-    --phase pr-open --state fm-handling --pointer "$URL" \
-    --title "$ID" >/dev/null 2>&1 || true
+  BRIDGE_STATE=needs-captain
+  BRIDGE_ANSWERS=(--answer "merge it" --answer "hold, I want to look first")
 fi
+FM_HOME="$FM_HOME" "$FM_ROOT/bin/fm-bridge.sh" task --quiet \
+  --id "$ID" --project "$(basename "${BRIDGE_PROJECT:-fleet}")" \
+  --phase pr-open --state "$BRIDGE_STATE" --pointer "$URL" --title "$ID" \
+  ${BRIDGE_ANSWERS[@]+"${BRIDGE_ANSWERS[@]}"} >/dev/null 2>&1 || true

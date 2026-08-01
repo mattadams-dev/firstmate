@@ -403,7 +403,7 @@ teardown_task() {  # <id> <home>
   FM_GATE_REFUSE_BYPASS=1 FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_CONFIG_OVERRIDE="$home/config" \
-    "$ROOT/bin/fm-teardown.sh" "$id" --force
+    "$ROOT/bin/fm-teardown.sh" "$id" --force "test: captain approved discarding this work"
 }
 
 normalize_meta() {  # <meta>

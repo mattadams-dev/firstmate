@@ -21,6 +21,17 @@
 #   5. ABSENCE GETS ASSERTED FROM NOTHING. Consumed and never-arrived look
 #      identical on screen, so a lifecycle answer may only say "consumed" from a
 #      durable consumption record, and must say "unknown" otherwise.
+#   6. LEDGER TEXT ESCAPES ITS CONTAINER. The board embeds the state document in
+#      a <script type="application/json"> element, which ends at the first
+#      `</script` in its text - so an ordinary title could end the block early
+#      and hand the rest of the fold to the HTML parser as live markup.
+#   7. A RECORD OUTGROWS PIPE_BUF. The bound is why an append needs no lock, so
+#      a line over it is a line a concurrent lane can tear. It is a BYTE bound,
+#      and every free-text field can carry the weight, not just title and body.
+#   8. AN INSTRUMENT REPORTS SOMETHING IT DID NOT OBSERVE. A lint that could not
+#      read the fold must say unknown, not clean; a narrowed document must not
+#      name items it does not carry; a jump from the asks index must land where
+#      the reader can actually see the card.
 #
 # Everything is hermetic: a temp FM_HOME, a fixed clock, and the real scripts.
 set -u
@@ -704,5 +715,212 @@ if not re.search(r'<button class="ans"', html):
 sys.exit(0)
 FORMCHECK
 pass "answer forms stay native controls, so rulings still queue through annotation"
+
+# --- 17. ledger text cannot break out of the embedded state document -------
+#
+# The board carries the exact state document it drew from inside a
+# <script type="application/json"> element. That element ends at the first
+# `</script` in its text, so a title, note, answer, or unreadable raw line
+# carrying one would end the block early and hand the REST of the fold to the
+# HTML parser as live markup - in a page served in an iframe. The two output
+# modes must stay byte-identical through the fix, so the escaping lives in the
+# one serializer both modes call.
+
+HOME17=$(new_home)
+FM_HOME=$HOME17 "$BRIDGE" ask -q --id x-one --project orca \
+  --title 'guard against </script><img src=x onerror=alert(1)> here' \
+  --answer 'A: <b>yes</b>' --answer 'B: no' >/dev/null
+FM_HOME=$HOME17 "$BRIDGE" note -q --id x-note --project orca --title "a note" \
+  --body 'closing </SCRIPT > and an opener <script>' >/dev/null
+# The tolerance path echoes an unreadable line verbatim, which is exactly the
+# garbled-line case this design expects to survive.
+printf '%s\n' '{"v":1,"ts":"2026-07-31T10:00:00Z" broken </script><img src=x>' \
+  >> "$(ledger_of "$HOME17")"
+
+FM_HOME=$HOME17 "$RENDER" --state > "$TMP_ROOT/esc-state.json"
+FM_HOME=$HOME17 "$RENDER" --html > "$TMP_ROOT/esc-board.html"
+python3 - "$TMP_ROOT/esc-state.json" "$TMP_ROOT/esc-board.html" <<'PY' \
+  || fail "embed: see the reported breakout"
+import json, re, sys
+state = open(sys.argv[1]).read().rstrip("\n")
+html = open(sys.argv[2]).read()
+open_tag = '<script type="application/json" id="fm-bridge-state">\n'
+start = html.index(open_tag) + len(open_tag)
+# Where the BROWSER ends the element, not where the renderer meant to: the first
+# `</script` in the raw text, case-insensitively, whatever follows it.
+ends_at = re.search(r"</script", html[start:], re.I)
+if ends_at is None:
+    sys.exit("the embedded state document is never closed")
+embedded = html[start:start + ends_at.start()].rstrip("\n")
+if embedded != state:
+    sys.exit("ledger text ended the state element early: the browser sees %d of %d bytes"
+             % (len(embedded), len(state)))
+doc = json.loads(embedded)
+if doc["items"]["x-one"]["title"] != \
+        "guard against </script><img src=x onerror=alert(1)> here":
+    sys.exit("escaping changed the value a consumer reads back")
+if not doc["malformed"]:
+    sys.exit("the unreadable line was not carried into the document, so this proves nothing")
+sys.exit(0)
+PY
+pass "no ledger text can end the embedded state document early"
+
+diff "$TMP_ROOT/esc-state.json" <(python3 - "$TMP_ROOT/esc-board.html" <<'PY'
+import re, sys
+html = open(sys.argv[1]).read()
+match = re.search(r'<script type="application/json" id="fm-bridge-state">\n(.*?)\n</script>',
+                  html, re.S)
+sys.stdout.write(match.group(1) + "\n")
+PY
+) >/dev/null || fail "embed: escaping made the board and --state diverge"
+pass "the escaped document is still byte-identical in both output modes"
+
+# The page must also carry no live markup from that text.
+case "$(cat "$TMP_ROOT/esc-board.html")" in
+  *"<img src=x"*) fail "embed: ledger text reached the page as live markup" ;;
+esac
+pass "ledger text never reaches the board as live markup"
+
+# --- 18. the record bound is a BYTE bound, and truncation always says so ----
+#
+# PIPE_BUF is why an append needs no lock, so a record over it is a record a
+# concurrent lane can tear in half. Characters are not bytes, and title and body
+# are not the only fields that can carry weight.
+
+HOME18=$(new_home)
+BIG_MULTIBYTE=$(python3 -c "print('é' * 3500)")
+BIG_NOTE=$(python3 -c "print('n' * 6000)")
+BIG_ANSWER=$(python3 -c "print('a' * 5000)")
+FM_HOME=$HOME18 "$BRIDGE" ask -q --id b-multibyte --project orca \
+  --title "$BIG_MULTIBYTE" --answer "A" >/dev/null
+FM_HOME=$HOME18 "$BRIDGE" note -q --id b-note --project orca --title "short title" \
+  --note "$BIG_NOTE" >/dev/null
+FM_HOME=$HOME18 "$BRIDGE" ask -q --id b-answer --project orca --title "short title" \
+  --answer "$BIG_ANSWER" >/dev/null
+FM_HOME=$HOME18 "$BRIDGE" note -q --id b-small --project orca \
+  --title "an ordinary record" >/dev/null
+
+python3 - "$(ledger_of "$HOME18")" <<'PY' || fail "bound: see the reported record"
+import json, sys
+bound = 3800
+for number, line in enumerate(open(sys.argv[1], "rb"), 1):
+    raw = line.rstrip(b"\n")
+    record = json.loads(raw.decode("utf-8"))
+    if len(raw) > bound:
+        sys.exit("line %d is %d bytes, over the %d-byte bound a concurrent append "
+                 "can tear: id=%s" % (number, len(raw), bound, record["id"]))
+    if len(raw) > bound - 400 and not record.get("truncated"):
+        sys.exit("line %d sits at the bound with no truncated flag: id=%s"
+                 % (number, record["id"]))
+sys.exit(0)
+PY
+pass "every record fits the byte bound, whatever field carried the weight"
+
+for id in b-multibyte b-note b-answer; do
+  flagged=$(state_query "$HOME18" "d['items']['$id']['truncated']")
+  [ "$flagged" = True ] || fail "bound: $id lost content without saying so"
+done
+kept=$(state_query "$HOME18" "d['items']['b-small']['truncated']")
+[ "$kept" = False ] || fail "bound: an ordinary record was marked truncated"
+pass "a shortened record always says truncated, and an ordinary one never does"
+
+# --- 19. a narrowed document never points at an item it does not carry ------
+
+HOME19=$(new_home)
+FM_HOME=$HOME19 "$BRIDGE" ask -q --id n-one --project orca --title "first ask" \
+  --answer "A" >/dev/null
+FM_HOME=$HOME19 "$BRIDGE" ask -q --id n-two --project orca --title "second ask" \
+  --answer "A" >/dev/null
+FM_HOME=$HOME19 "$BRIDGE" ask -q --id n-co --project machine --title "a routed ask" \
+  --answer "A" --to cocaptain >/dev/null
+
+FM_HOME=$HOME19 "$RENDER" --state --id n-one | python3 -c '
+import json, sys
+doc = json.load(sys.stdin)
+keys = set(doc["items"])
+if keys != {"n-one"}:
+    sys.exit("narrowing kept %s" % sorted(keys))
+def check(where, listed):
+    dangling = [key for key in listed if key not in keys]
+    if dangling:
+        sys.exit("%s still names %s, which the document does not carry" % (where, dangling))
+check("asks", doc["asks"])
+check("cocaptain_asks", doc["cocaptain_asks"])
+for reader, queue in doc["queues"].items():
+    check("queues.%s" % reader, queue)
+for name, zone in doc["zones"].items():
+    if name == "decisions":
+        for group in zone:
+            check("zones.decisions[%s].open" % group["project"], group["open"])
+            check("zones.decisions[%s].resolved" % group["project"], group["resolved"])
+    else:
+        check("zones.%s" % name, zone)
+# The documented traversal has to work on the narrowed document too.
+[doc["items"][key] for key in doc["asks"]]
+if not doc["query"]["found"]:
+    sys.exit("the narrowed document does not report the item as found")
+' || fail "narrow: see the reported dangling reference"
+pass "a narrowed document is narrowed in every list, not only in items"
+
+FM_HOME=$HOME19 "$RENDER" --state --id never-written | python3 -c '
+import json, sys
+doc = json.load(sys.stdin)
+if doc["query"]["found"] or doc["items"] or doc["asks"] or doc["order"]:
+    sys.exit("narrowing to an unknown id carried items or references anyway")
+' || fail "narrow: an unknown id still carried references"
+pass "narrowing to an unknown id carries no references at all"
+
+# --- 20. lint keeps clean, dirty, and could-not-read apart ------------------
+#
+# A lint that could not read the fold reporting success is the expensive lie:
+# the caller cannot tell "the record is clean" from "the check never ran".
+
+HOME20=$(new_home)
+FM_HOME=$HOME20 "$BRIDGE" ask -q --id fine --project orca --title "well-formed" \
+  --answer "A" >/dev/null
+FAKEBIN="$TMP_ROOT/lint-fakebin"
+mkdir -p "$FAKEBIN"
+cat > "$FAKEBIN/fm-bridge-render.sh" <<'SH'
+#!/usr/bin/env bash
+echo "fold blew up" >&2
+exit 1
+SH
+chmod +x "$FAKEBIN/fm-bridge-render.sh"
+cp "$BRIDGE" "$FAKEBIN/fm-bridge.sh"
+cp "$ROOT/bin/fm-bridge-lib.sh" "$FAKEBIN/fm-bridge-lib.sh"
+
+set +e
+FM_HOME=$HOME20 "$FAKEBIN/fm-bridge.sh" lint > "$TMP_ROOT/lint-unknown.out" 2>&1
+lint_rc=$?
+set -e
+[ "$lint_rc" -ne 0 ] \
+  || fail "lint: a fold that failed was reported as a clean record (exit $lint_rc)"
+case "$(cat "$TMP_ROOT/lint-unknown.out")" in
+  *UNKNOWN*) : ;;
+  *) fail "lint: a fold failure was not reported as unknown: $(cat "$TMP_ROOT/lint-unknown.out")" ;;
+esac
+pass "a lint that could not read the fold reports unknown, never a clean record"
+
+FM_HOME=$HOME20 "$BRIDGE" lint >/dev/null 2>&1 \
+  || fail "lint: a readable, clean record no longer exits 0"
+pass "a readable clean record still lints clean"
+
+# --- 21. an anchor jump lands clear of the sticky chrome -------------------
+#
+# The counter is sticky, opaque, and owns the top of the viewport, and a browser
+# scrolls an anchor target to exactly there. Without a scroll offset the asks
+# index defeats itself: clicking an ask hides the card it was supposed to
+# reveal, which a browser layout audit reported as text fully occluded on the
+# board. The offset is keyed to the measured height of what is actually stuck.
+
+case "$(cat "$TMP_ROOT/links.html")" in
+  *"scroll-padding-top:calc(var(--stack)"*) : ;;
+  *) fail "sticky: anchor targets are not offset from the sticky counter, so a jump lands under it" ;;
+esac
+case "$(cat "$TMP_ROOT/links.html")" in
+  *"--stack"*) : ;;
+  *) fail "sticky: the board states no sticky-stack height for jumps to clear" ;;
+esac
+pass "in-page jumps clear the sticky counter instead of landing under it"
 
 echo "all bridge ledger and fold tests passed"

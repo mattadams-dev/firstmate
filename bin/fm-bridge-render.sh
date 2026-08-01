@@ -96,6 +96,7 @@ import html as _html
 import json
 import os
 import sys
+import tempfile
 
 # `steering` is the second producer's kind (see docs/bridge.md "Second
 # producer"). It is substrate, not a captain-facing zone: it never renders as a
@@ -600,12 +601,43 @@ def fold(ledger_path, folded_at):
 
 def narrow(doc, item_id):
     """The whole fold, narrowed to one item. Same document shape, so a targeted
-    consumer parses exactly what a whole-fleet consumer parses."""
+    consumer parses exactly what a whole-fleet consumer parses.
+
+    Every list of item keys is narrowed with `items`, never just `items` itself:
+    the documented traversal is `for k in doc["asks"]: doc["items"][k]`, so a
+    queue or zone still naming a dropped id hands that consumer a KeyError on
+    the very document that was supposed to be easier to read. The ledger-wide
+    counts stay ledger-wide on purpose - conservation is a claim about the
+    stream, not about the slice.
+    """
     item = doc["items"].get(item_id)
+    kept = {item_id} if item is not None else set()
+
+    def only_kept(keys):
+        return [key for key in keys if key in kept]
+
     doc = dict(doc)
     doc["query"] = {"id": item_id, "found": item is not None}
     doc["items"] = {item_id: item} if item is not None else {}
-    doc["order"] = [item_id] if item is not None else []
+    doc["order"] = sorted(kept)
+    doc["asks"] = only_kept(doc["asks"])
+    doc["cocaptain_asks"] = only_kept(doc["cocaptain_asks"])
+    doc["queues"] = {reader: only_kept(queue)
+                     for reader, queue in doc["queues"].items()}
+    zones = {}
+    for name, zone in doc["zones"].items():
+        if name == "decisions":
+            groups = []
+            for group in zone:
+                group = dict(group)
+                group["open"] = only_kept(group["open"])
+                group["resolved"] = only_kept(group["resolved"])
+                if group["open"] or group["resolved"]:
+                    groups.append(group)
+            zones[name] = groups
+        else:
+            zones[name] = only_kept(zone)
+    doc["zones"] = zones
     return doc
 
 
@@ -840,7 +872,17 @@ h3.projhead .refs {
 .local-terms { margin:0 0 .8rem; font-size:.79rem; line-height:1.5; color:var(--tn-dim); border-left:2px solid var(--tn-line); padding-left:.6rem; }
 
 /* The ask counter travels with the viewport, so an open ask cannot be
-   scrolled past no matter where the reader is on the page. */
+   scrolled past no matter where the reader is on the page.
+   That counter is opaque and owns the top of the viewport, so anything an
+   in-page link jumps to has to land BELOW it. Without scroll-padding-top the
+   asks index defeats itself: a browser scrolls an anchor target to y=0, which
+   is exactly where the counter sits, so clicking an ask hides the card it was
+   supposed to reveal - proven in a browser, the card's whole head covered.
+   --stack is the one statement of that height; the queue bar sits on it rather
+   than guessing an offset, and the JS below re-measures both after any change
+   to what is stuck up there. */
+:root { --pin-h:2.6rem; --stack:var(--pin-h); }
+html { scroll-padding-top:calc(var(--stack) + .7rem); }
 .pin-asks, .pin-clear {
   position:sticky; top:0; z-index:6; padding:.45rem 0; font-size:.85rem;
   border-bottom:1px solid var(--tn-line);
@@ -878,7 +920,7 @@ ol.asks li.aging .age { color:var(--tn-orange); }
 .allclear { color:var(--tn-green); font-size:.9rem; }
 
 #queue {
-  position:sticky; top:2.1rem; z-index:5; background:var(--tn-bg);
+  position:sticky; top:var(--pin-h); z-index:5; background:var(--tn-bg);
   border-bottom:1px solid var(--tn-line); padding:.6rem 0; display:none;
 }
 #queue.on { display:block; }
@@ -920,11 +962,26 @@ JS = """
   var picks = [];
   var box = document.getElementById('queue');
   var out = document.getElementById('queue-text');
+  // What is stuck to the top of the viewport is measured, not assumed, so an
+  // anchor jump always lands clear of it however tall the counter and the
+  // ruling composer happen to render.
+  function restack() {
+    var pin = document.getElementById('pin');
+    var pinHeight = pin ? pin.getBoundingClientRect().height : 0;
+    var stack = pinHeight;
+    if (box && box.className === 'on') { stack += box.getBoundingClientRect().height; }
+    var root = document.documentElement.style;
+    root.setProperty('--pin-h', pinHeight + 'px');
+    root.setProperty('--stack', stack + 'px');
+  }
   function redraw() {
-    if (!picks.length) { box.className = ''; out.value = ''; return; }
+    if (!picks.length) { box.className = ''; out.value = ''; restack(); return; }
     box.className = 'on';
     out.value = picks.join('\\n');
+    restack();
   }
+  restack();
+  window.addEventListener('resize', restack);
   document.addEventListener('click', function (event) {
     var button = event.target.closest ? event.target.closest('button.ans') : null;
     if (!button) { return; }
@@ -1430,7 +1487,20 @@ def render_html(doc, checked_at):
 
 
 def state_json(doc):
-    return json.dumps(doc, indent=2, sort_keys=True, ensure_ascii=False)
+    """The one serialization of folded state, shared by --state and the copy the
+    board embeds.
+
+    `<` is written as its \\u003c escape rather than raw. JSON parses the two
+    identically, so the DOCUMENT is unchanged for every consumer, while no
+    ledger text can carry a `</script` sequence into the
+    <script type="application/json"> element the board embeds this in and have
+    the browser end the element early - which turned the rest of the fold into
+    live markup. Escaping here rather than at the embed site keeps the two
+    output modes byte-identical, which is the property that proves they cannot
+    drift.
+    """
+    return json.dumps(doc, indent=2, sort_keys=True,
+                      ensure_ascii=False).replace("<", "\\u003c")
 
 
 def restamp(board_path, checked_at):
@@ -1456,10 +1526,22 @@ def restamp(board_path, checked_at):
         break
     if not hit:
         return 1
-    tmp = board_path + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as handle:
-        handle.writelines(lines)
-    os.replace(tmp, board_path)
+    # A unique temp name, like write_board's. Two ticks against one FM_HOME is
+    # the ordinary case, not a race to be hoped away: a session start and the
+    # watcher's interval tick are separate processes, and a shared temp path
+    # lets them interleave each other's bytes into the board that survives.
+    handle_fd, tmp = tempfile.mkstemp(prefix=".bridge-restamp.",
+                                      dir=os.path.dirname(board_path) or ".")
+    try:
+        with os.fdopen(handle_fd, "w", encoding="utf-8") as handle:
+            handle.writelines(lines)
+        os.replace(tmp, board_path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
     return 0
 
 

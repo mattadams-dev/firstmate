@@ -159,7 +159,7 @@ test_force_warns_but_proceeds() {
   printf '%s\n' "$TMP_ROOT/no-such-destination" > "$dir/home/config/evidence-repo"
 
   set +e
-  out=$(run_teardown "$dir" "$id" --force)
+  out=$(run_teardown "$dir" "$id" --force "test: captain approved discarding this work")
   rc=$?
   set -e
 
