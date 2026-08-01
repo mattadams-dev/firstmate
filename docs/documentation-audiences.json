@@ -353,6 +353,10 @@
       "audience": "maintainer-verification"
     },
     {
+      "path": "docs/verification/endpoint-binding-migration.md",
+      "audience": "maintainer-verification"
+    },
+    {
       "path": "docs/watcher-continuity.md",
       "audience": "operator-current"
     },
