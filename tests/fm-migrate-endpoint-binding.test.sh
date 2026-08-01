@@ -337,10 +337,10 @@ case_valid_binding_is_not_a_disposition() {
 
 # --- the one-shot guard -----------------------------------------------------
 #
-# migrated_home <name>: a home holding one already-migrated record (provenance
-# present) and one still-unbound record, so a refusal can be distinguished from
-# a run that simply had nothing to do.
-migrated_home() {
+# partial_run_home <name>: the shape an interrupted --apply leaves behind - one
+# already-migrated record (provenance present) and one record the run never
+# reached, still unbound.
+partial_run_home() {
   local h; h=$(new_home "$1")
   workspaces "$h" firstmate wB
   tabs "$h" wB "wB:t19:label=fm-alpha" "wB:t1A:label=fm-beta"
@@ -348,27 +348,59 @@ migrated_home() {
   herdr_meta "$h" alpha 1 wB wB:t19 wB:p19 "endpoint_task_id=alpha" \
     "endpoint_task_id_provenance=migrated observed_at=2026-08-01T18:01:00Z by=fm-migrate-endpoint-binding.sh source=herdr-live-tab-and-pane-list"
   herdr_meta "$h" beta 1 wB wB:t1A wB:p1A
+  cp "$h/state/alpha.meta" "$h/alpha.before"
   cp "$h/state/beta.meta" "$h/beta.before"
   printf '%s' "$h"
 }
 
+# fully_migrated_home <name>: provenance present and no unbound candidate left.
+# This is the casual-re-run case the one-shot guard exists to refuse.
+fully_migrated_home() {
+  local h; h=$(new_home "$1")
+  workspaces "$h" firstmate wB
+  tabs "$h" wB "wB:t19:label=fm-alpha"
+  panes "$h" wB "wB:p19@wB:t19"
+  herdr_meta "$h" alpha 1 wB wB:t19 wB:p19 "endpoint_task_id=alpha" \
+    "endpoint_task_id_provenance=migrated observed_at=2026-08-01T18:01:00Z by=fm-migrate-endpoint-binding.sh source=herdr-live-tab-and-pane-list"
+  cp "$h/state/alpha.meta" "$h/alpha.before"
+  printf '%s' "$h"
+}
+
 case_one_shot_refuses_second_apply() {
-  local h; h=$(migrated_home migratedapply)
+  local h; h=$(fully_migrated_home migratedapply)
 
   local err rc
   err=$(FM_HOME="$h" FM_FAKE_HERDR_FIX="$h/fix" "$MIGRATE" --apply 2>&1 >/dev/null)
   rc=$?
-  [ "$rc" -ne 0 ] || fail "--apply was allowed against an already-migrated home"
-  case "$err" in *REFUSED*already*provenance*) ;;
-    *) fail "no refusal on stderr naming the provenance already present: $err" ;; esac
-  cmp -s "$h/beta.before" "$h/state/beta.meta" \
+  [ "$rc" -ne 0 ] || fail "--apply was allowed against a fully migrated home"
+  case "$err" in *REFUSED*already*migrated*) ;;
+    *) fail "no refusal on stderr naming the home as already migrated: $err" ;; esac
+  cmp -s "$h/alpha.before" "$h/state/alpha.meta" \
     || fail "--apply wrote a record despite refusing"
+}
+
+# The regression test for a guard that gated on prior work instead of remaining
+# work: an interrupted run left provenance behind, every later --apply refused,
+# and the records it never reached stayed stranded with only the forbidden
+# hand-write left as a remedy.
+case_one_shot_allows_resume_after_partial_run() {
+  local h; h=$(partial_run_home resumepartial)
+
+  local out rc
+  out=$(run_migrate "$h" --apply)
+  rc=$?
+  [ "$rc" -eq 0 ] || fail "--apply was refused after a partial run, stranding the unbound record: $out"
+  case "$out" in *"MIGRATED"$'\t'"beta"*) ;;
+    *) fail "the record an interrupted run never reached did not migrate: $out" ;; esac
+  assert_grep 'endpoint_task_id=beta' "$h/state/beta.meta" "resumed run did not write the binding"
+  cmp -s "$h/alpha.before" "$h/state/alpha.meta" \
+    || fail "resumed run modified an already-migrated record"
 }
 
 # The guard blocks the hazard, not the looking: an investigator must still be
 # able to observe and report an already-migrated home.
 case_one_shot_allows_observe_on_migrated_home() {
-  local h; h=$(migrated_home migratedobserve)
+  local h; h=$(partial_run_home migratedobserve)
 
   local out rc
   out=$(run_migrate "$h")

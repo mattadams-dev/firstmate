@@ -843,6 +843,11 @@ families_for_changed_path() {
       printf '%s\n' real-herdr-gated
       printf '%s\n' backend-dispatch
       ;;
+    tests/fm-migrate-endpoint-binding-mutation.sh)
+      # The mutation harness drives the behavior suite it mutates, so a change
+      # here selects the same script a change to that suite would.
+      printf '%s\n' "__script__:fm-migrate-endpoint-binding.test.sh"
+      ;;
     tests/*.test.sh)
       # A single test file change selects only that script via basename family
       # resolution in the caller; emit a marker family of __script__
