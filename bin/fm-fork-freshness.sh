@@ -11,7 +11,7 @@
 # contract, the cadence, and the local configuration.
 #
 # Usage:
-#   fm-fork-freshness.sh sweep [--if-due] [--owner <login>] [--dispatch] [--verbose]
+#   fm-fork-freshness.sh sweep [--if-due] [--owner <login>] [--dispatch]
 #   fm-fork-freshness.sh check <owner/repo> [--dispatch]
 #
 # `sweep` covers every maintained fork: every fork owned by the sweep owner
@@ -40,7 +40,7 @@
 # freshness result invoke this with `|| true` and relay the lines.
 #
 # behind > 0 materialises a durable sync task, idempotently, under the
-# deterministic id fm-sync-<repo>: data/<id>/brief.md carrying the proven sync
+# deterministic id fm-sync-<owner>-<repo>: data/<id>/brief.md carrying the proven sync
 # procedure, a backlog item, a check wake, and a Bridge item. Re-running never
 # creates a second task for the same fork. --dispatch additionally launches the
 # worker through bin/fm-spawn.sh when this home has a clone of that fork and
@@ -220,8 +220,13 @@ enumerate_owned() {
 
 # --- sync task materialisation ----------------------------------------------
 
+# sync_task_id <owner/repo>: the deterministic id of that fork's sync task.
+# Owner-qualified, because two maintained forks can share a repository name under
+# different accounts: a bare fm-sync-<repo> would make the second fork's sweep
+# find the first fork's task and report "already queued", which is a silent
+# omission wearing the idempotency guard's clothes.
 sync_task_id() {
-  printf 'fm-sync-%s\n' "$(printf '%s' "${1##*/}" | LC_ALL=C tr '[:upper:]' '[:lower:]' | LC_ALL=C sed 's/[^a-z0-9]\{1,\}/-/g; s/^-//; s/-$//')"
+  printf 'fm-sync-%s\n' "$(printf '%s' "$1" | LC_ALL=C tr '[:upper:]' '[:lower:]' | LC_ALL=C sed 's/[^a-z0-9]\{1,\}/-/g; s/^-//; s/-$//')"
 }
 
 # clone_dir_for <owner/repo>: this home's clone of that fork, if it has one.
@@ -315,7 +320,7 @@ backlog_add() {
   ( cd "$FM_HOME" && tasks-axi add "$title" --id "$id" --body "$note" ) >/dev/null 2>&1
 }
 
-bridge_note() {
+bridge_ask() {
   local slug=$1 title=$2 body=$3
   [ -x "$SCRIPT_DIR/fm-bridge.sh" ] || return 0
   "$SCRIPT_DIR/fm-bridge.sh" ask --project "${slug##*/}" --title "$title" \
@@ -363,7 +368,7 @@ ensure_sync_task() {
     "Reading $taken: behind $behind, ahead $ahead - $status. Instructions: data/$id/brief.md. Sync pushes a true merge commit directly to $fork_branch, never through a PR." ||
     printf 'BACKLOG_MANUAL: add %s to the backlog by hand\n' "$id" >&2
   queue_wake "fork-freshness: $slug is behind $up by $behind (ahead $ahead) - sync task $id"
-  bridge_note "$slug" "$slug is behind $up by $behind commits" \
+  bridge_ask "$slug" "$slug is behind $up by $behind commits" \
     "Reading $taken: behind $behind, ahead $ahead - $status. Sync task $id is queued with the procedure; it pushes a merge commit straight to $fork_branch, so it waits for a go."
 
   harness=$(dispatch_harness)
@@ -483,7 +488,6 @@ is_ignored() {
 # --- commands ---------------------------------------------------------------
 
 DISPATCH=0
-VERBOSE=0
 IF_DUE=0
 OWNER_ARG=""
 IGNORE_LIST=""
@@ -530,8 +534,8 @@ cmd_sweep() {
 
   # Candidates the enumeration cannot see: a clone whose origin belongs to
   # another account, and any maintained fork with no clone and no owned copy.
-  local extra_rows="" extra
-  {
+  local extra_rows extra dir
+  extra_rows=$(
     if [ -d "$PROJECTS" ]; then
       for dir in "$PROJECTS"/*/; do
         [ -d "$dir/.git" ] || continue
@@ -542,9 +546,8 @@ cmd_sweep() {
       [ -n "$extra" ] || continue
       qualify "$extra" "$owner"
     done
-  } | sort -u > "$STATE/.fork-freshness-extra.$$" 2>/dev/null || true
-  extra_rows=$(cat "$STATE/.fork-freshness-extra.$$" 2>/dev/null || true)
-  rm -f "$STATE/.fork-freshness-extra.$$"
+  ) || true
+  extra_rows=$(printf '%s\n' "$extra_rows" | sort -u)
 
   # Every reading prints from THIS shell. Buffering the lines through a command
   # substitution would run read_fork in a subshell, and its swept/behind/unknown
@@ -641,7 +644,6 @@ while [ $# -gt 0 ]; do
   case "$1" in
     --if-due) IF_DUE=1 ;;
     --dispatch) DISPATCH=1 ;;
-    --verbose) VERBOSE=1 ;;
     --owner) shift; OWNER_ARG=${1:-} ;;
     --owner=*) OWNER_ARG=${1#--owner=} ;;
     -*) printf 'fm-fork-freshness: unknown option: %s\n' "$1" >&2; exit 2 ;;
@@ -649,7 +651,6 @@ while [ $# -gt 0 ]; do
   esac
   shift
 done
-: "$VERBOSE"
 
 mkdir -p "$STATE"
 
