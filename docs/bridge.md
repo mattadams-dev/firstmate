@@ -45,7 +45,8 @@ bin/fm-bridge-render.sh --state --id <id>       # the same document, one item
 bin/fm-bridge-render.sh --lifecycle <id>        # typed answer about one id
 ```
 
-The narrowed document is narrowed everywhere, not just in `items`: `asks`, `cocaptain_asks`, `queues`, and every `zones` list name only the retained id.
+The narrowed document is narrowed everywhere, not just in `items`: every list of item ids in the document names only the retained id, wherever it sits.
+That holds by recognition rather than by a list of field names - a list whose members are ids the whole fold carried is narrowed because of what it holds - so a field added later is narrowed without anyone having to remember it.
 The documented traversal is `for k in doc["asks"]: doc["items"][k]`, so a queue still naming a dropped id would hand a targeted consumer a `KeyError` on the document meant to be easier to read.
 The ledger-wide `counts` stay ledger-wide, because conservation is a claim about the stream rather than about the slice.
 

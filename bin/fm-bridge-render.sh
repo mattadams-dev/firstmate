@@ -865,36 +865,53 @@ def narrow(doc, item_id):
     the very document that was supposed to be easier to read. The ledger-wide
     counts stay ledger-wide on purpose - conservation is a claim about the
     stream, not about the slice.
+
+    The narrowing is by RECOGNITION, not by a list of key names: any list whose
+    every member is an id the full fold carried IS a list of item ids, wherever
+    it sits in the document. Naming the lists worked until a field added later
+    was not added to the list of names, twice - a new id-list must be narrowed
+    because of what it holds, not because someone remembered it.
     """
+    known = set(doc["items"])
     item = doc["items"].get(item_id)
     kept = {item_id} if item is not None else set()
 
-    def only_kept(keys):
-        return [key for key in keys if key in kept]
+    def is_id_list(value):
+        return (isinstance(value, list) and value
+                and all(isinstance(entry, str) and entry in known
+                        for entry in value))
 
-    doc = dict(doc)
+    def carries_ids(value):
+        if is_id_list(value):
+            return True
+        if isinstance(value, dict):
+            return any(carries_ids(inner) for inner in value.values())
+        if isinstance(value, list):
+            return any(carries_ids(entry) for entry in value)
+        return False
+
+    def narrowed(value):
+        if is_id_list(value):
+            return [key for key in value if key in kept]
+        if isinstance(value, dict):
+            return {key: narrowed(inner) for key, inner in value.items()}
+        if isinstance(value, list):
+            # A grouping that existed only to hold ids and now holds none goes
+            # with them - a project heading over an empty list is not the slice
+            # the caller asked for.
+            entries = []
+            for entry in value:
+                shrunk = narrowed(entry)
+                if carries_ids(entry) and not carries_ids(shrunk):
+                    continue
+                entries.append(shrunk)
+            return entries
+        return value
+
+    doc = {key: value if key == "items" else narrowed(value)
+           for key, value in doc.items()}
     doc["query"] = {"id": item_id, "found": item is not None}
     doc["items"] = {item_id: item} if item is not None else {}
-    doc["order"] = sorted(kept)
-    doc["asks"] = only_kept(doc["asks"])
-    doc["cocaptain_asks"] = only_kept(doc["cocaptain_asks"])
-    doc["queues"] = {reader: only_kept(queue)
-                     for reader, queue in doc["queues"].items()}
-    zones = {}
-    for name, zone in doc["zones"].items():
-        if name == "decisions":
-            groups = []
-            for group in zone:
-                group = dict(group)
-                for side in ("open", "landed", "discarded", "unknown"):
-                    group[side] = only_kept(group[side])
-                if any(group[side] for side in
-                       ("open", "landed", "discarded", "unknown")):
-                    groups.append(group)
-            zones[name] = groups
-        else:
-            zones[name] = only_kept(zone)
-    doc["zones"] = zones
     return doc
 
 

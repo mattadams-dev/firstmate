@@ -837,34 +837,64 @@ FM_HOME=$HOME19 "$BRIDGE" ask -q --id n-two --project orca --title "second ask" 
   --answer "A" >/dev/null
 FM_HOME=$HOME19 "$BRIDGE" ask -q --id n-co --project machine --title "a routed ask" \
   --answer "A" --to cocaptain >/dev/null
+# A row from before the outcome axis, so the narrowed document has to carry
+# `unobserved_outcomes` correctly too - the list that escaped the last time
+# these were narrowed by name.
+cat >> "$(ledger_of "$HOME19")" <<'EOF'
+{"v":1,"ts":"2026-07-30T09:01:00Z","id":"n-old","kind":"decision","project":"orca","state":"needs-captain","title":"a pre-axis ask","answers":["A"]}
+EOF
 
-FM_HOME=$HOME19 "$RENDER" --state --id n-one | python3 -c '
+FM_HOME=$HOME19 "$RENDER" --state > "$TMP_ROOT/narrow-whole.json"
+FM_HOME=$HOME19 "$RENDER" --state --id n-one > "$TMP_ROOT/narrow-one.json"
+python3 - "$TMP_ROOT/narrow-whole.json" "$TMP_ROOT/narrow-one.json" <<'NARROW' \
+  || fail "narrow: see the reported dangling reference"
 import json, sys
-doc = json.load(sys.stdin)
+
+whole = json.load(open(sys.argv[1]))
+doc = json.load(open(sys.argv[2]))
+known = set(whole["items"])
 keys = set(doc["items"])
 if keys != {"n-one"}:
     sys.exit("narrowing kept %s" % sorted(keys))
-def check(where, listed):
-    dangling = [key for key in listed if key not in keys]
-    if dangling:
-        sys.exit("%s still names %s, which the document does not carry" % (where, dangling))
-check("asks", doc["asks"])
-check("cocaptain_asks", doc["cocaptain_asks"])
-for reader, queue in doc["queues"].items():
-    check("queues.%s" % reader, queue)
-for name, zone in doc["zones"].items():
-    if name == "decisions":
-        for group in zone:
-            for side in ("open", "landed", "discarded", "unknown"):
-                check("zones.decisions[%s].%s" % (group["project"], side), group[side])
-    else:
-        check("zones.%s" % name, zone)
+
+# No list of field names here on purpose. A list is a list of item ids when its
+# members are ids the whole fold carried, so this walk covers every id-list in
+# the document INCLUDING ones nobody has added yet - which is the only version
+# of this guard that survives the next field.
+def walk(where, value):
+    if isinstance(value, dict):
+        for name, inner in value.items():
+            walk("%s.%s" % (where, name), inner)
+        return
+    if not isinstance(value, list):
+        return
+    if value and all(isinstance(entry, str) and entry in known for entry in value):
+        dangling = [entry for entry in value if entry not in keys]
+        if dangling:
+            sys.exit("%s still names %s, which the document does not carry"
+                     % (where, dangling))
+        return
+    for position, entry in enumerate(value):
+        walk("%s[%d]" % (where, position), entry)
+
+for name, value in doc.items():
+    if name == "items":
+        continue
+    walk(name, value)
+
+# The walk only proves something if the document still HAS id-lists to check.
+carried = [name for name, value in doc.items()
+           if name != "items" and json.dumps(value).count("\"n-one\"")]
+if len(carried) < 3:
+    sys.exit("the narrowed document carries almost no references: %r" % carried)
+
 # The documented traversal has to work on the narrowed document too.
 [doc["items"][key] for key in doc["asks"]]
+[doc["items"][key] for key in doc["unobserved_outcomes"]]
 if not doc["query"]["found"]:
     sys.exit("the narrowed document does not report the item as found")
-' || fail "narrow: see the reported dangling reference"
-pass "a narrowed document is narrowed in every list, not only in items"
+NARROW
+pass "a narrowed document is narrowed in every list of ids, named or not"
 
 FM_HOME=$HOME19 "$RENDER" --state --id never-written | python3 -c '
 import json, sys
