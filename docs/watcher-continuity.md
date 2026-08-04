@@ -3,6 +3,39 @@
 The watcher remains intentionally one-shot: one actionable reason closes one watcher cycle.
 Must-work continuity now lives above that process boundary instead of depending on the model remembering a re-arm step.
 
+## Singleton at birth
+
+Both supervision layers - `bin/fm-watch.sh` and `bin/fm-supervise-daemon.sh` - acquire their singleton lock as the first act of their runtime, before any other work.
+`bin/fm-wake-lib.sh`'s `fm_supervisor_singleton_acquire` is the single owner of that decision for both.
+
+The lock publishes its holder's role, home, supervised state directory, executable path, and process identity into the owner directory *before* the symlink that makes the lock visible.
+A peer therefore never observes a lock it cannot identify, which is what lets the gate be decided from the lock alone.
+The decision is total and has exactly three outcomes: acquired, held by a verified-live holder, or undecidable.
+An undecidable lock is reported and nothing starts; it is never resolved by inspecting or terminating the holder.
+
+No liveness beacon, mtime, or age threshold participates in that decision.
+A threshold cannot distinguish a peer that is alive and working from one that is alive and wedged, and a supervisor that guesses wrong in either direction either duplicates itself or evicts the only healthy cycle.
+Supervision *health* remains a separate question with its own owner: `bin/fm-guard.sh` raises the stale-beacon alarm, and `bin/fm-watch-arm.sh` reports `watcher: FAILED` when it cannot confirm a live watcher with a fresh beacon.
+A wedged incumbent therefore keeps its singleton quietly and is surfaced loudly one layer up.
+
+A holder that is provably not the process the lock recorded - dead, reaped, or a reused pid - is reclaimed, serialized through the same sibling steal token the dead-holder path uses and re-verified while holding it.
+That reclaim is what keeps supervision recoverable; without it a home whose watcher died could never start another.
+
+### Nothing before the gate
+
+Whatever a supervisor does before its singleton gate, it does as an unaccountable second supervisor.
+`bin/fm-watch.sh` previously ran `bin/fm-pr-check-migrate.sh` ahead of its lock, and that migration stops a live watcher to take the watcher exclusion for itself.
+A starting watcher therefore terminated the incumbent as its first act, deciding from process inspection exactly what must never be decided that way.
+The migration now runs behind the gate in `--watcher-owned <pid>` mode, which verifies the calling watcher really holds the lock and then neither stops anything nor acquires anything.
+The standalone migration path still needs its own exclusion, and its stop goes through `bin/fm-safe-kill.sh`.
+
+### An address is not an identity
+
+`FM_STATE_OVERRIDE` moves the supervised fleet without changing `FM_HOME`, so two supervisors can record an identical home while watching entirely different state directories.
+The lock used to record a home identity it was never keyed by, and nothing cross-checked it.
+Two such supervisors are not duplicates - each is the only supervisor of its own fleet - but a process-table census cannot tell them apart, which is how one home gets reported as running two.
+The lock and `state/.watch-cycle-exits.log` now both record the resolved home *and* the supervised state directory, so that question is answerable from the record rather than from a pattern scan.
+
 ## Ownership
 
 `bin/fm-watch-arm.sh` owns the harness-independent floor: on an actionable close it arms and verifies one detached successor BEFORE it delivers the wake, so a home that still needs supervision is never blind for the handling turn no matter which adapter sits above it.
@@ -64,7 +97,8 @@ A matching PID and identity lets an attached arm report the delivered reason and
 Only a cycle with no matching delivery record emits `watcher: FAILED - cycle ended without an actionable reason` and exits nonzero.
 
 The arm layer appends one tab-separated record per observed cycle to `state/.watch-cycle-exits.log`.
-Each record includes arm and watcher PIDs, start and end timestamps, exit code and signal, classified reason, beacon age, lock identity before and after close, and successor disposition.
+Each record includes arm and watcher PIDs, the resolved home and supervised state directory, start and end timestamps, exit code and signal, classified reason, beacon age, lock identity before and after close, and successor disposition.
+The home and state fields exist because their absence made a real duplication report unanswerable after the fact: the ledger could show two cycles but never say whether they belonged to one home or to two.
 The file is size-capped through `FM_WATCH_CYCLE_LOG_MAX_BYTES` and `FM_WATCH_CYCLE_LOG_KEEP_LINES`.
 `state/.watch-triage.log` remains only the watcher's bounded absorbed-wake debug log and carries no lifecycle semantics.
 

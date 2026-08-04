@@ -89,6 +89,84 @@ test_stale_watch_lock_reclaimed() {
   pass "killed watcher stale lock is reclaimed"
 }
 
+# The proven root cause of the 2026-08-04 duplication, as a regression.
+# bin/fm-watch.sh used to run the PR-check migration BEFORE its singleton gate,
+# and that migration stops a live watcher to take the exclusion for itself. A
+# newcomer therefore terminated the incumbent as its first act, before proving it
+# was entitled to replace it - a kill decided from process inspection by a
+# process that had passed no gate at all. The incumbent must survive.
+test_a_starting_watcher_never_evicts_the_incumbent() {
+  local dir state fakebin incumbent second i
+  dir=$(make_case no-prelock-eviction)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  mark_pr_check_migration_complete "$state"
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=30 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$dir/incumbent.out" 2>&1 &
+  incumbent=$!
+  i=0
+  while [ "$i" -lt 100 ] && [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" != "$incumbent" ]; do
+    sleep 0.05
+    i=$((i + 1))
+  done
+  [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" = "$incumbent" ] \
+    || { kill "$incumbent" 2>/dev/null || true; fail "incumbent never took the singleton"; }
+
+  # Put the home back into the state that arms the migration's stop path: any
+  # home lands here when a check artifact is added or an X shim is refreshed.
+  rm -f "$state/.pr-check-migration-scan-v1"
+
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=30 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$dir/second.out" 2>&1 &
+  second=$!
+  i=0
+  while [ "$i" -lt 60 ] && is_live_non_zombie "$second"; do
+    sleep 0.05
+    i=$((i + 1))
+  done
+  is_live_non_zombie "$incumbent" \
+    || fail "a starting watcher terminated the incumbent before passing its own singleton gate"
+  [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" = "$incumbent" ] \
+    || fail "the incumbent lost the singleton to a watcher that had not yet acquired it"
+  kill "$incumbent" "$second" 2>/dev/null || true
+  wait "$incumbent" 2>/dev/null || true
+  wait "$second" 2>/dev/null || true
+  pass "a starting watcher never evicts the incumbent before its own singleton gate"
+}
+
+# The lock must recognize its own holder. The identity is published from inside a
+# command substitution's caller, never from the substitution: a subshell shares
+# the holder's command line but not its start time, so a self-computed identity
+# differs by one clock tick and matches only when the fork lands inside the same
+# tick. A lock that intermittently fails to recognize its holder is a duplication
+# generator that reproduces roughly never in testing.
+test_lock_publishes_its_real_holder_identity() {
+  local dir state fakebin watcher published actual i
+  dir=$(make_case identity-at-birth)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  mark_pr_check_migration_complete "$state"
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=30 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$dir/w.out" 2>&1 &
+  watcher=$!
+  i=0
+  while [ "$i" -lt 100 ] && [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" != "$watcher" ]; do
+    sleep 0.05
+    i=$((i + 1))
+  done
+  [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" = "$watcher" ] \
+    || { kill "$watcher" 2>/dev/null || true; fail "watcher never took the singleton"; }
+  published=$(cat "$state/.watch.lock/pid-identity" 2>/dev/null || true)
+  actual=$(FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$watcher")
+  [ -n "$published" ] || fail "the lock published no holder identity"
+  [ "$published" = "$actual" ] \
+    || fail "the lock published an identity that is not its holder's (published '$published' vs actual '$actual')"
+  [ "$(cat "$state/.watch.lock/role" 2>/dev/null || true)" = watcher \
+    ] || fail "the lock did not publish its role"
+  [ "$(cat "$state/.watch.lock/state" 2>/dev/null || true)" = "$state" ] \
+    || fail "the lock did not publish the state directory it supervises"
+  kill "$watcher" 2>/dev/null || true
+  wait "$watcher" 2>/dev/null || true
+  pass "a supervision lock publishes its real holder identity, role, and supervised state directory"
+}
+
 # A lock held by a live process that publishes NO identity cannot be judged
 # either way from its own contents. That is genuinely unknown - not "probably a
 # peer" and not "probably stale" - so the watcher refuses loudly and starts
@@ -1302,6 +1380,8 @@ test_pid_identity_is_locale_invariant
 test_proc_pid_identity_ignores_wall_clock_and_detects_pid_reuse
 test_msys_pid_identity_uses_proc
 test_stale_watch_lock_reclaimed
+test_a_starting_watcher_never_evicts_the_incumbent
+test_lock_publishes_its_real_holder_identity
 test_unidentifiable_live_lock_refuses_loudly
 test_wedged_incumbent_is_loud_from_the_arm_layer
 test_guard_warnings
