@@ -114,26 +114,39 @@ BOARD_KINDS = ("critical", "decision", "event", "task")
 # unrecorded, so out-of-order arrival cannot walk a message backwards.
 LIFECYCLE_STAGES = ("sent", "delivered", "consumed")
 
-# The phase a forced cleanup records (bin/fm-teardown.sh). It is a phase and not
-# a disposition on purpose: the work was thrown away, which is not one of the
-# four things a disposition can say about who owes what.
-DISCARD_PHASE = "discarded"
+# TWO AXES, AND NO RANKING BETWEEN THEM.
+#
+# `state` answers WHO OWES THIS. `outcome` answers HOW IT ENDED. They are
+# independent questions with independent answers: work can end with nobody
+# owing it (merged, then cleaned up), and a ruling can still be owed on work
+# that no longer exists (discarded mid-review). Collapsing them into one value
+# is how a merged task came to read as thrown away and a discarded one came to
+# read as a live ask - the same fact wearing two hats, with a reader picking
+# which hat wins.
+#
+# So nothing here ranks them. Where a definition needs both, it says so as a
+# CONJUNCTION of independently necessary conditions - an ask is "someone owes a
+# decision" AND "the work is still live", and either condition alone can
+# disqualify without overriding the other.
+KNOWN_OUTCOMES = ("in-flight", "landed", "discarded", "unknown")
+OUTCOME_WHEN_UNSTATED = "in-flight"
+# The endings. `unknown` is one of them: it means the work ended and nobody
+# could tell how, which is a different claim from "still going".
+ENDED_OUTCOMES = ("landed", "discarded", "unknown")
 
 
-def disposition(item):
-    """What the item is TO A READER, which is not always what `state` says.
-
-    The ledger keeps the disposition the item earned - a PR that reached
-    `needs-captain` really did, and that record stays exactly as written for
-    audit. But once the work is discarded nobody owes an answer about it, and a
-    board that still lists it as an ask is asking the captain to rule on a merge
-    of a branch that no longer exists. Classification is therefore derived here,
-    ONCE, and every queue, tally, and zone reads it - a second place that
-    reasons about `state` directly is how the two came apart in the first place.
-    """
-    if item.get("discarded"):
-        return DISCARD_PHASE
+def owed_by(item):
+    """The state axis alone: who owes something on this, whatever became of it."""
     return item["state"]
+
+
+def ended(item):
+    """The outcome axis alone: has the work stopped, however it stopped?
+
+    An outcome nobody recognizes is not read as `in-flight`: the fold cannot
+    claim work is still live on the strength of a value it does not understand.
+    """
+    return item["outcome"] != OUTCOME_WHEN_UNSTATED
 # `needs-cocaptain` is a ROUTING target, not a second flavour of "open". An
 # item addressed to the co-captain (the dotfiles session, which reads this
 # ledger directly) never joins the captain's ask list, because the cost being
@@ -151,7 +164,7 @@ READER_STATE = {"captain": "needs-captain", "cocaptain": "needs-cocaptain",
 # Fields this fold understands. Anything else survives under "extra" - an
 # unrecognized field is never a reason to drop or ignore a record.
 KNOWN_FIELDS = frozenset((
-    "v", "ts", "id", "kind", "project", "state", "severity", "owner",
+    "v", "ts", "id", "kind", "project", "state", "outcome", "severity", "owner",
     "title", "body", "pointer", "check", "note", "phase", "answers",
     "truncated",
 ))
@@ -161,8 +174,8 @@ KNOWN_FIELDS = frozenset((
 ID_ALIASES = ("id", "key", "item_id", "itemId")
 
 # Merge-able scalar fields: a later record's present value replaces the earlier.
-SCALARS = ("kind", "project", "state", "severity", "owner", "title", "body",
-           "pointer", "check", "note", "phase")
+SCALARS = ("kind", "project", "state", "outcome", "severity", "owner", "title",
+           "body", "pointer", "check", "note", "phase")
 
 MAX_MALFORMED_SHOWN = 25
 MAX_RAW_ECHO = 240
@@ -298,7 +311,8 @@ def fold(ledger_path, folded_at):
                 if item is None:
                     item = {
                         "id": key,
-                        "kind": "", "project": "", "state": "", "severity": "",
+                        "kind": "", "project": "", "state": "", "outcome": "",
+                        "severity": "",
                         "owner": "", "title": "", "body": "", "pointer": "",
                         "check": "", "note": "", "phase": "",
                         "answers": [],
@@ -376,31 +390,33 @@ def fold(ledger_path, folded_at):
         item["recognized"] = {
             "kind": item["kind"] in KNOWN_KINDS,
             "state": item["state"] in KNOWN_STATES,
+            "outcome": item["outcome"] in KNOWN_OUTCOMES,
             "severity": item["severity"] in KNOWN_SEVERITIES,
         }
-        # A record that says the work was DISCARDED is a fact the ledger
-        # carries, not a disposition the reader may invent one from. It matters
-        # here because the two are easy to confuse: a discarded item is not
-        # resolved, and the cleanup that discarded it skipped the very test that
-        # could have supported the word resolved.
-        item["discarded"] = DISCARD_PHASE in item["phases_seen"]
+        if not item["outcome"]:
+            # Silence on the outcome axis means the work has not been observed
+            # to end. That is a default over ABSENCE, never over a value the
+            # ledger carried, and it is the one reading that claims nothing: a
+            # cleanup states how the work ended, and until one does, nothing
+            # has.
+            item["outcome"] = OUTCOME_WHEN_UNSTATED
+            item["recognized"]["outcome"] = True
+            item["defaulted_outcome"] = True
         if not item["kind"]:
-            # A discard is always about work, so a kind-less discard record
-            # folds to a task rather than to the generic event default - it
-            # belongs on the fleet strip, where a reader looks for what happened
-            # to a task.
-            item["kind"] = "task" if item["discarded"] else "event"
+            # An outcome is only ever recorded about work, so a kind-less record
+            # that carries one folds to a task rather than to the generic event
+            # default - it belongs on the fleet strip, where a reader looks for
+            # what happened to a task.
+            item["kind"] = "task" if ended(item) else "event"
             item["recognized"]["kind"] = True
             item["defaulted_kind"] = True
-        if not item["state"] and item["discarded"]:
-            # DELIBERATELY NO DEFAULT. Every value in the disposition set would
-            # be a claim: resolved says an outcome landed, fm-handling says
-            # someone is carrying it, and the ask states say a reader owes an
-            # answer. A discard with no prior record supports none of them, so
-            # the fold reports the disposition as unstated rather than picking
-            # the one that reads best. The item stays visibly a discard through
-            # `discarded`, and it is tallied under its own heading rather than
-            # inflating resolved.
+        if not item["state"] and ended(item):
+            # DELIBERATELY NO DEFAULT. Every value in the state set would be a
+            # claim about who owes something, and work that ended without any
+            # record of who owed it supports none of them. The fold reports the
+            # state axis as unstated rather than picking the one that reads
+            # best; the outcome axis still says how the work ended, which is the
+            # question a reader of a finished item is actually asking.
             item["recognized"]["state"] = False
         elif not item["state"]:
             # Mirrors fm_bridge_default_state in bin/fm-bridge-lib.sh. Firstmate's
@@ -469,17 +485,29 @@ def fold(ledger_path, folded_at):
 
     def triage(key):
         item = items[key]
-        return (STATE_RANK.get(disposition(item), 3),
+        return (STATE_RANK.get(owed_by(item), 3),
                 SEVERITY_RANK.get(item["severity"], 4),
                 -index[key])
 
+    # Every zone that means "still here" is the outcome axis saying the work has
+    # not ended; every zone that means "over" is the outcome axis saying how it
+    # ended. No key mixes two endings, because a reader auditing `landed` must
+    # never find thrown-away work under it - and the state axis stays visible on
+    # each row rather than being folded into which list the row sits in.
+    def by_outcome(kind, outcome):
+        return sorted([k for k in order if items[k]["kind"] == kind
+                       and items[k]["outcome"] == outcome],
+                      key=recency, reverse=True)
+
     criticals = [k for k in order if items[k]["kind"] == "critical"
-                 and disposition(items[k]) not in ("resolved", DISCARD_PHASE)]
+                 and not ended(items[k])]
     criticals.sort(key=triage)
-    criticals_resolved = sorted(
-        [k for k in order if items[k]["kind"] == "critical"
-         and disposition(items[k]) in ("resolved", DISCARD_PHASE)],
-        key=recency, reverse=True)
+    criticals_landed = by_outcome("critical", "landed")
+    criticals_discarded = by_outcome("critical", "discarded")
+    criticals_unknown = [k for k in order if items[k]["kind"] == "critical"
+                         and ended(items[k])
+                         and items[k]["outcome"] not in ("landed", "discarded")]
+    criticals_unknown.sort(key=recency, reverse=True)
 
     decisions = []
     for project in projects:
@@ -488,17 +516,21 @@ def fold(ledger_path, folded_at):
                 if items[k]["kind"] == "decision" and items[k]["project"] == slug]
         if not keys:
             continue
-        open_keys = sorted([k for k in keys
-                            if disposition(items[k]) not in ("resolved", DISCARD_PHASE)],
-                           key=triage)
-        done_keys = sorted([k for k in keys
-                            if disposition(items[k]) in ("resolved", DISCARD_PHASE)],
-                           key=recency, reverse=True)
+        open_keys = sorted([k for k in keys if not ended(items[k])], key=triage)
+        landed_keys = sorted([k for k in keys if items[k]["outcome"] == "landed"],
+                             key=recency, reverse=True)
+        discarded_keys = sorted([k for k in keys if items[k]["outcome"] == "discarded"],
+                                key=recency, reverse=True)
+        unknown_keys = sorted([k for k in keys if ended(items[k])
+                               and items[k]["outcome"] not in ("landed", "discarded")],
+                              key=recency, reverse=True)
         decisions.append({
             "project": slug,
             "prefix": project["prefix"],
             "open": open_keys,
-            "resolved": done_keys,
+            "landed": landed_keys,
+            "discarded": discarded_keys,
+            "unknown": unknown_keys,
         })
 
     events = sorted([k for k in order if items[k]["kind"] == "event"],
@@ -509,14 +541,14 @@ def fold(ledger_path, folded_at):
     # forced discard cannot grow into a permanent wall of rows on the surface
     # the captain reads first.
     fleet_open = sorted([k for k in order if items[k]["kind"] == "task"
-                         and disposition(items[k]) not in ("resolved", DISCARD_PHASE)],
+                         and not ended(items[k])],
                         key=triage)
-    fleet_done = sorted([k for k in order if items[k]["kind"] == "task"
-                         and disposition(items[k]) == "resolved"],
-                        key=recency, reverse=True)
-    fleet_discarded = sorted([k for k in order if items[k]["kind"] == "task"
-                              and disposition(items[k]) == DISCARD_PHASE],
-                             key=recency, reverse=True)
+    fleet_landed = by_outcome("task", "landed")
+    fleet_discarded = by_outcome("task", "discarded")
+    fleet_unknown = sorted([k for k in order if items[k]["kind"] == "task"
+                            and ended(items[k])
+                            and items[k]["outcome"] not in ("landed", "discarded")],
+                           key=recency, reverse=True)
     terms = [k for k in order if items[k]["kind"] == "term"]
     steering = [k for k in order if items[k]["kind"] == "steering"]
     unzoned = [k for k in order if not items[k]["recognized"]["kind"]]
@@ -546,17 +578,27 @@ def fold(ledger_path, folded_at):
         item["age_seconds"] = _age_seconds(item.get("state_since") or item["first_ts"],
                                            now_epoch)
         item["age_label"] = _age_label(item["age_seconds"])
-        item["aging"] = (disposition(item) in ("needs-captain", "needs-cocaptain")
+        # Aging is about asks, so it is the ask conjunction with a clock on it:
+        # someone owes it, AND the work is still live, AND it has been that way
+        # too long. Work that ended cannot age - there is nothing left to do.
+        item["aging"] = (owed_by(item) in ("needs-captain", "needs-cocaptain")
+                         and not ended(item)
                          and item["age_seconds"] is not None
                          and item["age_seconds"] >= AGING_SECONDS)
 
     # Every open ask, across every project and kind, oldest first. Oldest first
     # is deliberate: the forgotten ones rise to the top instead of sinking under
     # whatever arrived most recently.
+    # AN ASK IS A CONJUNCTION, NOT A RANKING. Someone owes a decision AND the
+    # work is still live. Both conditions are necessary and neither overrides
+    # the other: a discarded item is not an ask because there is nothing left to
+    # decide, and a merged item is not an ask because nobody owes it. Two
+    # independent reasons, either sufficient to disqualify on its own.
     def _queue(state):
         queue = [k for k in order
                  if items[k]["kind"] in BOARD_KINDS
-                 and disposition(items[k]) == state]
+                 and owed_by(items[k]) == state
+                 and not ended(items[k])]
         queue.sort(key=lambda k: (SEVERITY_RANK.get(items[k]["severity"], 4),
                                   -(items[k]["age_seconds"] or 0),
                                   index[k]))
@@ -573,20 +615,33 @@ def fold(ledger_path, folded_at):
     # kinds they read. Substrate is reported separately rather than folded in,
     # because a machinery record inflating "resolved" would quietly change what
     # the tallies mean.
+    # ONE TALLY PER AXIS. `summary` counts who owes what; `outcomes` counts how
+    # work ended. Neither is derived from the other, and neither is a rollup of
+    # both - a single blended tally is exactly the collapse that let a merged
+    # task be counted as thrown away.
+    #
+    # The ask states count ASKS, which is the same conjunction the queues use:
+    # owed AND still live. That is not the outcome axis overriding the state
+    # axis - `summary` and the queues answer the same question and must answer
+    # it the same way, or the board disagrees with its own index.
     summary = {"needs-captain": 0, "needs-cocaptain": 0, "fm-handling": 0,
-               "resolved": 0, "discarded": 0, "unrecognized": 0}
+               "resolved": 0, "unrecognized": 0}
+    outcomes = {outcome: 0 for outcome in KNOWN_OUTCOMES}
+    outcomes["unrecognized"] = 0
     for item in items.values():
         if item["kind"] not in BOARD_KINDS:
             continue
-        # Counted as what it is to a reader. Thrown-away work is never folded
-        # into resolved, and never left in the ask tallies either: the captain
-        # triages against these numbers, so an ask that no longer exists costs
-        # exactly the attention this surface was built to protect.
-        bucket = disposition(item)
-        if bucket in summary:
-            summary[bucket] += 1
-        else:
+        state = owed_by(item)
+        if state not in summary:
             summary["unrecognized"] += 1
+        elif state in ("needs-captain", "needs-cocaptain") and ended(item):
+            pass
+        else:
+            summary[state] += 1
+        if item["recognized"]["outcome"]:
+            outcomes[item["outcome"]] += 1
+        else:
+            outcomes["unrecognized"] += 1
 
     lifecycle_counts = {stage: 0 for stage in LIFECYCLE_STAGES}
     for key in steering:
@@ -628,23 +683,26 @@ def fold(ledger_path, folded_at):
         "items": {k: items[k] for k in order},
         "zones": {
             "criticals": criticals,
-            "criticals_resolved": criticals_resolved,
+            "criticals_landed": criticals_landed,
+            "criticals_discarded": criticals_discarded,
+            "criticals_unknown": criticals_unknown,
             "decisions": decisions,
             "events": events,
             "fleet_open": fleet_open,
-            "fleet_resolved": fleet_done,
+            "fleet_landed": fleet_landed,
             "fleet_discarded": fleet_discarded,
+            "fleet_unknown": fleet_unknown,
             "unzoned": unzoned,
             "substrate": steering,
         },
         "glossary": glossary,
         "summary": summary,
+        "outcomes": outcomes,
         "substrate": substrate,
         "caps": {
             "events": CAP_EVENTS,
-            "resolved_decisions": CAP_RESOLVED_DECISIONS,
-            "fleet_resolved": CAP_FLEET_RESOLVED,
-            "fleet_discarded": CAP_FLEET_DISCARDED,
+            "closed_decisions": CAP_RESOLVED_DECISIONS,
+            "fleet_closed": CAP_FLEET_RESOLVED,
         },
         "checks": {
             "folded state": "bin/fm-bridge-render.sh --state",
@@ -692,9 +750,10 @@ def narrow(doc, item_id):
             groups = []
             for group in zone:
                 group = dict(group)
-                group["open"] = only_kept(group["open"])
-                group["resolved"] = only_kept(group["resolved"])
-                if group["open"] or group["resolved"]:
+                for side in ("open", "landed", "discarded", "unknown"):
+                    group[side] = only_kept(group[side])
+                if any(group[side] for side in
+                       ("open", "landed", "discarded", "unknown")):
                     groups.append(group)
             zones[name] = groups
         else:
@@ -741,6 +800,7 @@ def lifecycle(doc, item_id):
                             for stage, info in sorted(item["phases_seen"].items())}
         answer["kind"] = item["kind"]
         answer["state"] = item["state"]
+        answer["outcome"] = item["outcome"]
 
     if not answer["fully_readable"]:
         answer["reason"] = (
@@ -872,7 +932,12 @@ h2 {
 .chip.fm-handling   { color:var(--tn-blue); }
 .chip.resolved      { color:var(--tn-green); }
 .chip.odd           { color:var(--tn-orange); }
+/* The outcome axis. Green for work that landed matches the resolved accent's
+   meaning of a good ending; orange keeps its single meaning of something to
+   look at, which covers both a discard and an ending nobody could determine. */
+.chip.landed        { color:var(--tn-green); }
 .chip.discarded     { color:var(--tn-orange); }
+.chip.unknown       { color:var(--tn-orange); }
 .chip.sev           { color:var(--tn-dim); }
 .meta { color:var(--tn-dim); font-size:.76rem; margin-top:.3rem; }
 .meta .sep { color:var(--tn-line); margin:0 .35rem; }
@@ -1139,28 +1204,31 @@ def link(href, label=None, external=None):
 
 
 def state_class(item):
-    if disposition(item) == DISCARD_PHASE:
-        return "discarded"
     if not item.get("recognized", {}).get("state", True):
         return "odd"
-    return item["state"]
+    return item["state"] or "odd"
 
 
 def chip(item):
+    """The state axis: who owes this. Never the outcome - see outcome_chip."""
     cls = state_class(item)
-    if cls == "discarded":
-        # Not one of the four dispositions, and it does not pretend to be one.
-        # A blank chip here would read as a rendering fault and a `?` would read
-        # as a record nobody could parse; this was thrown away, and says so.
-        # Whatever disposition it had earned before that is shown beside it
-        # rather than instead of it: the ledger keeps that value for audit, and
-        # a red NEEDS-CAPTAIN chip on work nobody can act on is the exact
-        # confusion the state field exists to prevent.
-        was = ('<span class="chip was">was %s</span>' % esc(item["state"])
-               if item["state"] not in ("", "resolved") else "")
-        return '<span class="chip discarded">discarded</span>%s' % was
+    if not item["state"]:
+        # The ledger never said who owed it, and the fold will not invent one.
+        return '<span class="chip odd">owner unstated</span>'
     label = item["state"] if cls != "odd" else item["state"] + " ?"
     return '<span class="chip %s">%s</span>' % (cls, esc(label))
+
+
+def outcome_chip(item):
+    """The outcome axis: how it ended. Rendered BESIDE the state chip, never
+    instead of it, because a row that shows one axis makes the reader guess the
+    other - and every guess so far has been wrong in an expensive direction."""
+    outcome = item["outcome"]
+    if outcome == OUTCOME_WHEN_UNSTATED:
+        return ""
+    if not item.get("recognized", {}).get("outcome", True):
+        return '<span class="chip odd">%s ?</span>' % esc(outcome)
+    return '<span class="chip %s">%s</span>' % (esc(outcome), esc(outcome))
 
 
 def sev_chip(item):
@@ -1185,7 +1253,7 @@ def meta_line(item):
 
 def pointer_line(item):
     if not item["pointer"]:
-        if disposition(item) == "resolved" and item["kind"] in ("decision", "critical"):
+        if item["outcome"] == "landed" and item["kind"] in ("decision", "critical"):
             return ('<div class="pointer"><span class="lbl">outcome</span>'
                     '<span style="color:var(--tn-orange)">resolved with no pointer '
                     '- see record hygiene</span></div>')
@@ -1200,7 +1268,10 @@ def pointer_line(item):
 
 def answer_forms(item):
     """The mandatory answer forms. Clicking queues a ready-to-paste ruling."""
-    if disposition(item) in ("resolved", DISCARD_PHASE) or not item["answers"]:
+    # The same conjunction the ask queues use, for the same reason: a form is
+    # offered when someone owes a decision AND the work is still live. Nobody
+    # can rule on work that ended, and nobody needs to rule on what is settled.
+    if owed_by(item) == "resolved" or ended(item) or not item["answers"]:
         return ""
     label = item["ref"] or item["id"]
     buttons = []
@@ -1230,7 +1301,8 @@ def card(item, pinned=False):
     parts = [
         '<div class="%s" id="item-%s">' % (" ".join(classes), esc(item["id"])),
         '<div class="head">%s<span class="title">%s</span>%s%s%s</div>'
-        % (ref, esc(item["title"] or item["id"]), chip(item), sev_chip(item), aged),
+        % (ref, esc(item["title"] or item["id"]), chip(item) + outcome_chip(item),
+           sev_chip(item), aged),
         meta_line(item),
     ]
     if item["body"]:
@@ -1262,6 +1334,7 @@ def render_html(doc, checked_at):
     caps = doc["caps"]
     counts = doc["counts"]
     summary = doc["summary"]
+    outcomes = doc["outcomes"]
     out = []
     add = out.append
 
@@ -1314,19 +1387,32 @@ def render_html(doc, checked_at):
             % summary["needs-cocaptain"])
     add('<div class="tally fm"><b>%d</b>firstmate has</div>' % summary.get("fm-handling", 0))
     add('<div class="tally ok"><b>%d</b>resolved</div>' % summary.get("resolved", 0))
-    if summary.get("discarded", 0):
-        add('<div class="tally warn"><b>%d</b>discarded</div>' % summary["discarded"])
     if summary.get("unrecognized", 0):
         add('<div class="tally warn"><b>%d</b>unrecognized state</div>'
             % summary["unrecognized"])
+    # The second axis gets its own tiles rather than being blended into the
+    # first: who owes what and how work ended are different questions, and one
+    # number answering both is what made merged work read as thrown away.
+    if outcomes.get("landed", 0):
+        add('<div class="tally ok"><b>%d</b>landed</div>' % outcomes["landed"])
+    if outcomes.get("discarded", 0):
+        add('<div class="tally warn"><b>%d</b>discarded</div>' % outcomes["discarded"])
+    if outcomes.get("unknown", 0):
+        add('<div class="tally warn"><b>%d</b>ended, how unknown</div>'
+            % outcomes["unknown"])
+    if outcomes.get("unrecognized", 0):
+        add('<div class="tally warn"><b>%d</b>unrecognized outcome</div>'
+            % outcomes["unrecognized"])
     add('<div class="tally"><b>%d</b>records folded</div>' % counts["records"])
     add("</div>")
+    add('<p class="zone-note">Two things about every row, kept apart: who owes it, '
+        "and how it ended. Neither answers the other.</p>")
     add('<div class="legend">'
         '<span class="l-red">needs you</span>'
         '<span class="l-purple">needs the co-captain</span>'
         '<span class="l-blue">firstmate has it</span>'
-        '<span class="l-green">resolved</span>'
-        '<span class="l-orange">discarded, aging, or otherwise off</span>'
+        '<span class="l-green">resolved, or landed</span>'
+        '<span class="l-orange">discarded, ended unknown, aging, or otherwise off</span>'
         '<span class="l-cyan">pointer or command</span>'
         "</div>")
     add("</div></header>")
@@ -1435,8 +1521,22 @@ def render_html(doc, checked_at):
             add(card(items[key], pinned=True))
     else:
         add('<p class="empty">Nothing pinned.</p>')
-    for key in zones["criticals_resolved"][:caps["resolved_decisions"]]:
-        add(card(items[key]))
+    # Closed criticals, kept apart by how they ended. A reader scanning for what
+    # landed must never have to check whether a row under it was thrown away.
+    for group, label in (("criticals_landed", "landed"),
+                         ("criticals_discarded", "discarded"),
+                         ("criticals_unknown", "ended, how unknown")):
+        shown = zones[group][:caps["closed_decisions"]]
+        if not shown:
+            continue
+        add('<p class="zone-note">%s</p>' % esc(label))
+        for key in shown:
+            add(card(items[key]))
+        hidden = len(zones[group]) - len(shown)
+        if hidden > 0:
+            add('<div class="overflow">+%d more %s - the record has them: '
+                '<code>%s</code></div>'
+                % (hidden, esc(label), esc(doc["checks"]["raw stream"])))
     add("</section>")
 
     # Zone 2 - decisions, grouped by project, with per-project refs.
@@ -1459,18 +1559,21 @@ def render_html(doc, checked_at):
                              if sub["project"] == group["project"])
                 bits.append("<b>%s</b> here means %s" % (esc(entry["term"]), esc(means)))
             add('<p class="local-terms">%s</p>' % "; ".join(bits))
-        if not group["open"] and not group["resolved"]:
+        closed = [side for side in ("landed", "discarded", "unknown") if group[side]]
+        if not group["open"] and not closed:
             add('<p class="empty">Nothing open.</p>')
         for key in group["open"]:
             add(card(items[key]))
-        shown = group["resolved"][:caps["resolved_decisions"]]
-        for key in shown:
-            add(card(items[key]))
-        hidden = len(group["resolved"]) - len(shown)
-        if hidden > 0:
-            add('<div class="overflow">+%d more resolved in %s - the record has them: '
-                '<code>%s</code></div>'
-                % (hidden, esc(group["project"]), esc(doc["checks"]["raw stream"])))
+        for side in ("landed", "discarded", "unknown"):
+            shown = group[side][:caps["closed_decisions"]]
+            for key in shown:
+                add(card(items[key]))
+            hidden = len(group[side]) - len(shown)
+            if hidden > 0:
+                add('<div class="overflow">+%d more %s in %s - the record has them: '
+                    '<code>%s</code></div>'
+                    % (hidden, esc(side), esc(group["project"]),
+                       esc(doc["checks"]["raw stream"])))
     add("</section>")
 
     # Zone 3 - notable events, capped, overflowing to the record.
@@ -1498,14 +1601,15 @@ def render_html(doc, checked_at):
             # authorized it has to be readable where the captain reads, not
             # only in the record behind the page.
             why = ('<div class="why%s">%s</div>'
-                   % (" override" if item.get("discarded") else "", esc(item["note"]))
+                   % (" override" if item["outcome"] in ("discarded", "unknown")
+                      else "", esc(item["note"]))
                    if item["note"] else "")
             add('<li><span class="when">%s</span>'
                 '<span class="what">%s%s %s%s</span></li>'
                 % (esc((item["ts"] or "")[:16].replace("T", " ")),
                    esc(item["title"] or item["id"]),
                    trail,
-                   chip(item) if disposition(item) != "resolved" else "",
+                   chip(item) if owed_by(item) != "resolved" else "",
                    why))
         add("</ul>")
     else:
@@ -1521,16 +1625,19 @@ def render_html(doc, checked_at):
     add("<section><h2>Fleet</h2>")
     add('<p class="zone-note">Every task firstmate is carrying. Red rows are '
         "waiting on you.</p>")
-    # Open work first and uncapped, then the recent tail of what was thrown
-    # away, then the recent tail of what landed. Both tails are capped and both
-    # say how much they are not showing.
-    discarded_shown = zones["fleet_discarded"][:caps["fleet_discarded"]]
-    resolved_shown = zones["fleet_resolved"][:caps["fleet_resolved"]]
-    rows = zones["fleet_open"] + discarded_shown + resolved_shown
+    # Live work first and uncapped, then the recent tail of each way work can
+    # end, each capped and each saying how much it is not showing. The tails
+    # never share a list: how a task ended is the one thing a reader of a closed
+    # row is asking, so landed and discarded cannot sit under one heading.
+    closed_shown = {}
+    for group in ("fleet_landed", "fleet_discarded", "fleet_unknown"):
+        closed_shown[group] = zones[group][:caps["fleet_closed"]]
+    rows = (zones["fleet_open"] + closed_shown["fleet_landed"]
+            + closed_shown["fleet_discarded"] + closed_shown["fleet_unknown"])
     if rows:
         add('<div class="stripwrap"><table class="strip">')
-        add("<tr><th>task</th><th>project</th><th>phase</th><th>state</th>"
-            "<th>where it is</th></tr>")
+        add("<tr><th>task</th><th>project</th><th>phase</th>"
+            "<th>who owes it</th><th>how it ended</th><th>where it is</th></tr>")
         for key in rows:
             item = items[key]
             target = item["pointer"]
@@ -1555,23 +1662,26 @@ def render_html(doc, checked_at):
             # away, and the judgement someone gave for skipping it - rather than
             # only in the record behind the board.
             why = ('<div class="why override">%s</div>' % esc(item["note"])
-                   if item.get("discarded") and item["note"] else "")
+                   if item["outcome"] in ("discarded", "unknown") and item["note"]
+                   else "")
+            ending = outcome_chip(item) or (
+                '<span style="color:var(--tn-muted)">still going</span>')
             add('<tr id="item-%s"><td><b>%s</b>%s</td><td>%s</td><td>%s</td>'
-                '<td class="st">%s%s</td><td>%s%s</td></tr>'
+                '<td class="st">%s%s</td><td class="st">%s</td><td>%s%s</td></tr>'
                 % (esc(item["id"]), esc(item["title"] or item["id"]), why,
                    esc(item["project"]), esc(item["phase"] or "-"),
-                   chip(item), aged, where, forms))
+                   chip(item), aged, ending, where, forms))
         add("</table></div>")
     else:
         add('<p class="empty">No tasks on the board.</p>')
-    hidden_discarded = len(zones["fleet_discarded"]) - len(discarded_shown)
-    if hidden_discarded > 0:
-        add('<div class="overflow">+%d older discarded tasks in the record. '
-            "They are capped here, not dropped - <code>%s</code> has every one."
-            "</div>" % (hidden_discarded, esc(doc["checks"]["raw stream"])))
-    hidden = len(zones["fleet_resolved"]) - len(resolved_shown)
-    if hidden > 0:
-        add('<div class="overflow">+%d older landed tasks in the record.</div>' % hidden)
+    for group, label in (("fleet_landed", "landed"),
+                         ("fleet_discarded", "discarded"),
+                         ("fleet_unknown", "ended, how unknown")):
+        hidden = len(zones[group]) - len(closed_shown[group])
+        if hidden > 0:
+            add('<div class="overflow">+%d older %s tasks in the record. '
+                "They are capped here, not dropped - <code>%s</code> has every "
+                "one.</div>" % (hidden, esc(label), esc(doc["checks"]["raw stream"])))
     add("</section>")
 
     if zones["unzoned"]:

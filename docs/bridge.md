@@ -69,7 +69,8 @@ Only `ts` and `id` are required on every record.
 | `id` | string | the fold key; `[a-z0-9._-]` |
 | `kind` | string | `critical`, `decision`, `event`, `task`, `term`, `steering` |
 | `project` | string | grouping key; defaults to `fleet` |
-| `state` | string | `needs-captain`, `needs-cocaptain`, `fm-handling`, `resolved` |
+| `state` | string | WHO OWES THIS: `needs-captain`, `needs-cocaptain`, `fm-handling`, `resolved` |
+| `outcome` | string | HOW IT ENDED: `in-flight` (the default when absent), `landed`, `discarded`, `unknown` |
 | `severity` | string | `critical`, `high`, `normal`, `low` |
 | `owner` | string | the reader it is addressed to: `captain`, `cocaptain`, `firstmate`, or a worker id |
 | `title` | string | one line, the thing itself |
@@ -78,13 +79,44 @@ Only `ts` and `id` are required on every record.
 | `answers` | array | the answer forms; a bare string is tolerated and coerced |
 | `check` | string | a command that verifies this item |
 | `note` | string | free text |
-| `phase` | string | lifecycle position, e.g. `dispatched`, `pr-open`, `merged`, `discarded`, or `sent`/`delivered`/`consumed` |
+| `phase` | string | WHERE IT GOT TO mechanically, e.g. `dispatched`, `pr-open`, `merged`, `cleaned`, `force-cleaned`, or `sent`/`delivered`/`consumed`; not a disposition |
 | `truncated` | bool | the writer had to shorten this record |
 
 **The state field is load-bearing.**
 It exists so the captain never mistakes an fm-handled item for an open ask, and so an item that is not theirs to answer never reaches their queue at all.
-`needs-captain` items are captain asks and nothing else is; `fm-handling` is visible so it is not forgotten but is not an ask; `resolved` carries a pointer to where the outcome lives.
+`needs-captain` items are captain asks and nothing else is; `fm-handling` is visible so it is not forgotten but is not an ask; `resolved` means nobody owes anything further.
 Disposition, not just existence, is the product.
+
+## Two axes, and no precedence between them
+
+`state` answers **who owes this**.
+`outcome` answers **how it ended**.
+`phase` answers **where it got to mechanically**, and is not a disposition at all.
+
+They are independent questions with independent answers, and nothing in the fold, the board, or the linter ranks one against the other.
+The reason is a defect this surface actually shipped: a single blended value meant a merged task that was later force-cleaned read as thrown away, because one fact overwrote the other at classification time.
+Work can end with nobody owing it - merged, then cleaned up - and a ruling can still be owed on work that no longer exists.
+Both facts are recordable, neither overwrites the other, and no consumer decides which one wins.
+
+`outcome` has four values, and `unknown` is not decoration.
+
+| Value | Means |
+| --- | --- |
+| `in-flight` | the default when no record has said otherwise: the work has not been observed to end |
+| `landed` | it ended by being carried through, and the outcome exists |
+| `discarded` | it ended by being thrown away, and nothing was kept |
+| `unknown` | it ended and nobody could tell how |
+
+A cleanup that could not run the landed-work test records `unknown` rather than guessing, because a guess recorded as `discarded` invents a loss and a guess recorded as `landed` invents an outcome.
+
+Where a definition needs both axes it is a **conjunction of independently necessary conditions**, never a tiebreak.
+An ask is "someone owes a decision" AND "the work is still live": a discarded item is not an ask because there is nothing left to decide, and a merged item is not an ask because nobody owes it.
+Those are two separate reasons, either sufficient on its own, and neither is a ranking of one axis over the other.
+
+Because the axes are independent, so are the published keys.
+Every zone that means "over" is keyed on the outcome axis alone, and no key mixes two endings: `zones.fleet_landed`, `zones.fleet_discarded` and `zones.fleet_unknown` are separate lists, as are `zones.criticals_landed`, `zones.criticals_discarded` and `zones.criticals_unknown`, and each project's decision group carries `open`, `landed`, `discarded` and `unknown`.
+An auditor reading `landed` never has to check whether a row under it was actually thrown away.
+`summary` tallies the state axis and `outcomes` tallies the outcome axis; neither is a rollup of both.
 
 `needs-cocaptain` is a **routing** target, not a fourth flavour of "open".
 Machine and repo-infrastructure work is addressed to the co-captain - the dotfiles session, which reads this ledger directly - and never joins the captain's ask list.
@@ -142,22 +174,19 @@ Omit `--id` and one is derived from kind, project, and title, so re-appending th
 Most fleet-strip rows are never written by hand at all: `fm-spawn.sh`, `fm-pr-check.sh`, `fm-pr-merge.sh`, and `fm-teardown.sh` append at the moment they cause the event.
 Those appends are best-effort and can never fail their caller.
 A persistent secondmate is not a work item, so neither spawn nor teardown ever gives one a row.
-An ordinary cleanup records `state=resolved`, which only its landed-work test can support; a `--force <reason>` cleanup skipped that test, so it records `phase=discarded` with the reason that authorized the override and leaves the row's last honest state alone.
+A cleanup records both axes, and takes the outcome from the landed-work determination itself rather than from whether `--force` was used.
+`--force` means the checks were SKIPPED; it does not mean the work was THROWN AWAY, and for work that already merged a forced cleanup discards nothing - it reclaims a working copy.
+So a forced cleanup still evaluates that determination without refusing on it: the test would have passed means `outcome=landed`, would have failed means `outcome=discarded`, and could not reach a verdict means `outcome=unknown`.
+An ordinary cleanup runs only after the test passed, so it records `outcome=landed` and `state=resolved`; a forced one records the verdict, records `phase=force-cleaned` with the reason that authorized the override, and leaves the state axis exactly as the row had earned it, because skipping the checks says nothing about who owes what.
 A forced retirement of a persistent secondmate records the same provenance as a `kind=event` note against `fleet`, because a secondmate is not a work item and must never become a strip row.
 The events zone renders that note on the board, so the most destructive override in the fleet is not the one whose reason is hardest to read.
 
-**`phase=discarded` is a fact, and never a disposition.**
-The fold reads it as one: an item carrying it reports `discarded: true`, and when the ledger never stated a disposition for that item the fold refuses to invent one rather than falling through to `resolved`.
-Every value in the set would be a claim - `resolved` says an outcome landed, `fm-handling` says someone is carrying it, the ask states say a reader owes an answer - and a cleanup that skipped the landed-work test observed none of them.
-Such an item folds as a `task` with an empty `state`, is tallied under `summary.discarded` rather than `summary.resolved`, sits on the fleet strip and on nobody's queue, and renders with a `discarded` chip plus the reason on the row itself.
-
-**Discarded is a classification, not an edit to the record.**
-Once an item carries the discard phase it is discarded for every captain-facing purpose, whatever disposition it had earned first.
-It is absent from `asks`, `cocaptain_asks`, `queues`, the `needs-captain` and `needs-cocaptain` tallies, the tab-title count, the rail badge, and the aging flag, and its answer forms are withdrawn - nobody can rule on work that no longer exists.
-The earned state stays in the ledger and in `--state` for audit, and the board shows it beside the `discarded` chip as `was needs-captain` rather than instead of it.
-Discarded tasks sit in their own capped tail of the fleet strip, `zones.fleet_discarded` under `caps.fleet_discarded` (default 6, `FM_BRIDGE_CAP_FLEET_DISCARDED`), with the same visible overflow pointer to the record that landed work uses - a rare override must not grow into a permanent wall of rows.
-Every zone predicate reads that one classification rather than `state`, so a discarded critical leaves the pinned criticals and a discarded decision leaves its project's open list, both joining the closed group instead of contradicting the zone note above them.
-`bin/fm-bridge.sh lint` reads it too, so it never asks for an answer form on work the board has already withdrawn one from.
+**Work that ended is still shown, and still shows both axes.**
+An item whose outcome is `landed`, `discarded` or `unknown` leaves the ask queues, the `needs-captain` and `needs-cocaptain` tallies, the tab-title count, the rail badge and the aging flag, and its answer forms are withdrawn - nobody can rule on work that has ended.
+That is the ask conjunction doing its job, not the outcome axis overruling the state axis: the state it earned stays in the ledger and in `--state` for audit, and the board renders it as its own chip beside the outcome chip so a reader sees both answers rather than guessing the second from the first.
+When work ended and the ledger never said who owed it, the fold declines to invent a state rather than defaulting one - every value would be a claim nothing observed.
+Each closed group is capped with a visible overflow pointer to the record (`caps.fleet_closed`, default 6, `FM_BRIDGE_CAP_FLEET_DISCARDED`; `caps.closed_decisions` for decisions and criticals), because a rare override must not grow into a permanent wall of rows, and a cap that hides rows silently would be its own lie.
+`bin/fm-bridge.sh lint` reads the same two axes, so it never asks for an answer form on work that has ended.
 
 ### Why append-only, and why records are bounded
 
@@ -264,7 +293,7 @@ External link text is the full URL because that is the most useful label for a p
 
 The board reuses the tokyonight-storm token block from the canonical scaffold in `~/code/personal/dotfiles/docs/labs/`, with one deliberate departure: the scaffold's DaisyUI and Tailwind CDN layer is not used.
 The board is regenerated from disk every few minutes and must render identically with no network, so its styling is inlined.
-Accents keep one meaning each: red needs the captain, purple needs the co-captain, blue firstmate has it, green resolved, orange discarded or otherwise off, cyan pointer or command.
+Accents keep one meaning each: red needs the captain, purple needs the co-captain, blue firstmate has it, green resolved or landed, orange discarded, ended-unknown, aging or otherwise off, cyan pointer or command.
 Ordinary secondary text, including a record's `note`, is dim rather than accented - `--note` is a general field on every write command, so accenting it would make a routine event read as a problem and give orange a second meaning.
 
 ## Cadence and cost

@@ -29,9 +29,17 @@
 # dotfiles session through the ledger, so it never spends captain attention.
 # Default is the captain for an ask or a critical.
 #
+# TWO AXES, NEVER ONE. --state says WHO OWES THIS (needs-captain,
+# needs-cocaptain, fm-handling, resolved). --outcome says HOW IT ENDED
+# (in-flight, landed, discarded, unknown). --phase says where it got to
+# mechanically and is not a disposition. Nothing ranks them: work can end with
+# nobody owing it, and something can still be owed on work that no longer
+# exists.
+#
 # Common options: --id, --severity (critical|high|normal|low), --owner, --check,
-# --state, --quiet. Omit --id and one is derived from kind+project+title, so
-# re-appending the same fact updates that item instead of duplicating it.
+# --state, --outcome, --quiet. Omit --id and one is derived from
+# kind+project+title, so re-appending the same fact updates that item instead of
+# duplicating it.
 #
 # Every write is one bounded append to an append-only JSONL file. See
 # docs/bridge.md for the published schema and bin/fm-bridge-lib.sh for the
@@ -44,7 +52,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 RENDER="$SCRIPT_DIR/fm-bridge-render.sh"
 
-usage() { sed -n '2,38p' "$0" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,45p' "$0" | sed 's/^# \{0,1\}//'; }
 die() { printf 'fm-bridge: %s\n' "$1" >&2; exit 2; }
 
 [ $# -gt 0 ] || { usage; exit 2; }
@@ -71,6 +79,7 @@ parse_common() {
       --severity) [ $# -gt 1 ] || die "--severity needs a value"; add_field severity "$2"; shift 2 ;;
       --owner)    [ $# -gt 1 ] || die "--owner needs a value"; add_field owner "$2"; shift 2 ;;
       --state)    [ $# -gt 1 ] || die "--state needs a value"; add_field state "$2"; shift 2 ;;
+      --outcome)  [ $# -gt 1 ] || die "--outcome needs a value"; add_field outcome "$2"; shift 2 ;;
       --phase)    [ $# -gt 1 ] || die "--phase needs a value"; add_field phase "$2"; shift 2 ;;
       --check)    [ $# -gt 1 ] || die "--check needs a value"; add_field check "$2"; shift 2 ;;
       --answer)   [ $# -gt 1 ] || die "--answer needs a value"; add_field answer "$2"; shift 2 ;;
@@ -155,7 +164,10 @@ case "$COMMAND" in
     # A resolved item that does not say where the outcome lives sends the
     # captain hunting for it, which is the whole thing the pointer prevents.
     has_field pointer || die "resolve needs --pointer (where the outcome lives)"
+    # Two facts, two axes: nobody owes it any more, and it ended by being
+    # carried through. Neither implies the other, so both are stated.
     add_field state resolved
+    has_field outcome || add_field outcome landed
     emit
     ;;
   task)
@@ -248,26 +260,33 @@ for bad in doc["malformed"]:
 for key, item in sorted(doc["items"].items()):
     label = item["ref"] or key
     recognized = item.get("recognized", {})
-    # A discarded item with no disposition is the fold declining to invent one,
-    # which is the honest reading and not a record to clean up.
-    discard_only = bool(item.get("discarded")) and not item["state"]
-    # The same classification the fold and the board use, so the linter cannot
-    # ask for an answer form on work the board has already withdrawn one from.
-    disposition = "discarded" if item.get("discarded") else item["state"]
-    for field in ("kind", "state", "severity"):
+    # The two axes, read the way the fold reads them: who owes it, and how it
+    # ended. Nothing here ranks one against the other.
+    ended = item["outcome"] != "in-flight"
+    # An item that ended without any record of who owed it is the fold
+    # declining to invent one, which is the honest reading and not a record to
+    # clean up.
+    unstated_owner = ended and not item["state"]
+    for field in ("kind", "state", "outcome", "severity"):
         if not recognized.get(field, True):
-            if field == "state" and discard_only:
+            if field == "state" and unstated_owner:
                 continue
             problems.append("%s: unrecognized %s %r (kept verbatim, shown as odd)"
                             % (label, field, item[field]))
-    if disposition == "resolved" and not item["pointer"] \
-            and item["kind"] in ("decision", "critical"):
+    # Either axis can say the item is finished, and each says it independently:
+    # nobody owes it any more, or the work ended by landing. Whichever says so,
+    # a reader needs to be able to find what came of it.
+    if (item["state"] == "resolved" or item["outcome"] == "landed") \
+            and not item["pointer"] and item["kind"] in ("decision", "critical"):
         problems.append("%s: resolved with no pointer to the outcome" % label)
-    if item["kind"] in ("decision", "critical") and disposition == "needs-captain" \
-            and not item["answers"]:
+    # An ask is owed AND still live, so a missing answer form is only a problem
+    # while both hold - the same conjunction the board uses to decide whether to
+    # offer one.
+    if item["kind"] in ("decision", "critical") and item["state"] == "needs-captain" \
+            and not ended and not item["answers"]:
         problems.append("%s: is an ask with no answer form" % label)
     if item["kind"] in ("decision", "critical", "task") and not item["title"] \
-            and not discard_only:
+            and not unstated_owner:
         problems.append("%s: has no title" % label)
     if item["truncated"]:
         problems.append("%s: record was truncated at write time" % label)

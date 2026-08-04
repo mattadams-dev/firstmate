@@ -1282,9 +1282,16 @@ test_forced_teardown_records_discarded_not_resolved() {
 
   records=$(bridge_records "$case_dir")
   [ -n "$records" ] || fail "force-discard-record: teardown wrote nothing to the Bridge"
+  # GENUINELY UNLANDED WORK ENDS AS DISCARDED, and nothing softer. The commits
+  # exist nowhere else, so removing the worktree threw them away - that is what
+  # the landed-work determination found, and what has to be recorded.
   case "$records" in
-    *'"phase":"discarded"'*) : ;;
-    *) fail "force-discard-record: a discarded cleanup did not record phase=discarded: $records" ;;
+    *'"outcome":"discarded"'*) : ;;
+    *) fail "force-discard-record: unlanded work did not end as discarded: $records" ;;
+  esac
+  case "$records" in
+    *'"phase":"force-cleaned"'*) : ;;
+    *) fail "force-discard-record: the mechanical phase was not recorded: $records" ;;
   esac
   # What the RECORD says is only half of it. This teardown ran with an empty
   # ledger - the ordinary case for anything in flight when the Bridge arrives,
@@ -1299,18 +1306,70 @@ doc = json.load(sys.stdin)
 item = doc["items"].get("task-x1")
 if item is None:
     sys.exit("the discarded task is not in folded state at all")
+if item["outcome"] != "discarded":
+    sys.exit("folded state reports the ending as %r, not discarded" % item["outcome"])
 if item["state"] == "resolved":
-    sys.exit("a forced discard folds to resolved, which the skipped check never supported")
-if not item.get("discarded"):
-    sys.exit("folded state does not report the task as discarded")
+    sys.exit("a forced cleanup claimed resolved, which the skipped checks never supported")
 if doc["summary"]["resolved"]:
     sys.exit("a forced discard was counted in the resolved tally")
+if doc["outcomes"]["discarded"] != 1:
+    sys.exit("the discard was not counted as an ending: %r" % doc["outcomes"])
 ' || fail "force-discard-record: $(printf '%s' "$folded" | head -c 400)"
   case "$records" in
     *'"state":"resolved"'*)
       fail "force-discard-record: a forced cleanup claimed resolved, which the skipped landed-work test never supported: $records" ;;
   esac
-  pass "a forced cleanup records phase=discarded and never claims resolved"
+  pass "a forced cleanup of unlanded work ends as discarded and never claims resolved"
+}
+
+# THE OTHER DIRECTION, and the one this design exists for: --force means the
+# CHECKS were skipped, not that the work was thrown away. A forced cleanup of
+# work that already landed reclaims a working copy and discards nothing, so it
+# must not record a discard - and proving that by making everything look landed
+# would break the test above, which is why both directions are pinned
+# separately.
+test_forced_teardown_of_landed_work_records_landed() {
+  local case_dir rc records
+  case_dir=$(make_case force-landed-record)
+  write_meta "$case_dir" local-only ship
+  wt_commit "$case_dir" "work that landed"
+  add_fork_with_pushed_branch "$case_dir"
+
+  set +e
+  run_teardown "$case_dir" --force "evidence gate was broken, cleaning up by hand" \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 0 "$rc" "force-landed-record: forced teardown failed"
+
+  records=$(bridge_records "$case_dir")
+  case "$records" in
+    *'"outcome":"discarded"'*)
+      fail "force-landed-record: work that landed was recorded as thrown away: $records" ;;
+  esac
+  case "$records" in
+    *'"outcome":"landed"'*) : ;;
+    *) fail "force-landed-record: a forced cleanup of landed work did not record it: $records" ;;
+  esac
+  # The reason still travels with the override - skipping the checks is still
+  # something a later reader has to be able to see the judgement for.
+  case "$records" in
+    *"evidence gate was broken"*) : ;;
+    *) fail "force-landed-record: the override lost its provenance: $records" ;;
+  esac
+  FM_HOME="$case_dir" FM_DATA_OVERRIDE="$case_dir/data" \
+    "$ROOT/bin/fm-bridge-render.sh" --state --id task-x1 | python3 -c '
+import json, sys
+doc = json.load(sys.stdin)
+item = doc["items"]["task-x1"]
+if item["outcome"] != "landed":
+    sys.exit("folded state reports the ending as %r, not landed" % item["outcome"])
+if "task-x1" in doc["zones"]["fleet_discarded"]:
+    sys.exit("landed work is filed under discarded")
+if doc["zones"]["fleet_landed"] != ["task-x1"]:
+    sys.exit("landed work is not in the landed group: %r" % doc["zones"]["fleet_landed"])
+' || fail "force-landed-record: the board files landed work as thrown away"
+  pass "a forced cleanup of work that already landed records landed, not discarded"
 }
 
 test_forced_teardown_records_the_reason_it_was_authorized() {
@@ -1329,8 +1388,8 @@ test_forced_teardown_records_the_reason_it_was_authorized() {
     *) fail "force-provenance: the reason that authorized the override was not recorded: $records" ;;
   esac
   case "$records" in
-    *"landed-work check skipped"*) : ;;
-    *) fail "force-provenance: the row does not say the check was skipped: $records" ;;
+    *"checks skipped"*) : ;;
+    *) fail "force-provenance: the row does not say the checks were skipped: $records" ;;
   esac
   pass "a forced cleanup records the human judgement that authorized it"
 }
@@ -1384,8 +1443,8 @@ import json, sys
 item = json.load(sys.stdin)["items"].get("task-x1")
 if item is None or item["state"] != "resolved":
     sys.exit("a landed cleanup no longer folds to resolved: %r" % (item and item["state"]))
-if item.get("discarded"):
-    sys.exit("a landed cleanup folded as discarded")
+if item["outcome"] != "landed":
+    sys.exit("a landed cleanup ended as %r" % item["outcome"])
 ' || fail "ordinary-resolved-record: the landed cleanup does not read as resolved"
   pass "an ordinary cleanup still records the row resolved"
 }
@@ -1981,6 +2040,7 @@ test_no_mistakes_origin_remote_allows
 test_no_mistakes_truly_unpushed_refuses
 test_local_only_force_overrides_unpushed
 test_forced_teardown_records_discarded_not_resolved
+test_forced_teardown_of_landed_work_records_landed
 test_forced_teardown_records_the_reason_it_was_authorized
 test_force_without_a_reason_refuses_before_removing_anything
 test_ordinary_teardown_still_records_resolved

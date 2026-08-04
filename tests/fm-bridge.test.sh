@@ -855,8 +855,8 @@ for reader, queue in doc["queues"].items():
 for name, zone in doc["zones"].items():
     if name == "decisions":
         for group in zone:
-            check("zones.decisions[%s].open" % group["project"], group["open"])
-            check("zones.decisions[%s].resolved" % group["project"], group["resolved"])
+            for side in ("open", "landed", "discarded", "unknown"):
+                check("zones.decisions[%s].%s" % (group["project"], side), group[side])
     else:
         check("zones.%s" % name, zone)
 # The documented traversal has to work on the narrowed document too.
@@ -1015,156 +1015,117 @@ case "$(cat "$TMP_ROOT/links.html")" in
 esac
 pass "the ask counter travels with the viewport from inside that column"
 
-# --- 22. a discarded task never reads as resolved --------------------------
+# --- 22. two axes: who owes it, and how it ended ---------------------------
 #
-# A forced cleanup skips the landed-work test, so the board must not claim more
-# than was observed. The trap is the fold's own backstop: a record that opens no
-# item still needs a disposition, and every value in the set is a claim.
+# These are different questions and the fold answers them separately. Blending
+# them into one value is what let a merged task read as thrown away and a
+# thrown-away one read as a live ask: whichever fact was written last won, and
+# the reader could not see the other.
 
 HOME22=$(new_home)
-# Exactly what a forced teardown writes when nothing ever opened the item.
-FM_HOME=$HOME22 "$BRIDGE" append -q id=t-orphan phase=discarded \
-  note="forced teardown: landed-work check skipped, work discarded - captain said drop the spike" \
+# A task that merged and was then force-cleaned. Nobody owes it (state) AND it
+# ended by landing (outcome) - a later cleanup of the working copy cannot
+# un-land the work.
+FM_HOME=$HOME22 "$BRIDGE" task -q --id t-merged --project orca --phase merged \
+  --state resolved --outcome landed --pointer "https://example.invalid/pull/9" >/dev/null
+FM_HOME=$HOME22 "$BRIDGE" append -q id=t-merged phase=force-cleaned outcome=landed \
+  note="forced teardown: checks skipped, but the work had landed - evidence gate was broken" \
   >/dev/null
-# And the same discard over a task that already earned a disposition.
-FM_HOME=$HOME22 "$BRIDGE" task -q --id t-known --project orca --phase dispatched \
+# A task nobody ruled on that was genuinely thrown away: someone still owed a
+# decision when the work ended.
+FM_HOME=$HOME22 "$BRIDGE" task -q --id t-gone --project orca --phase pr-open \
+  --state needs-captain --pointer "https://example.invalid/pull/7" \
+  --answer "merge it" >/dev/null
+FM_HOME=$HOME22 "$BRIDGE" append -q id=t-gone phase=force-cleaned outcome=discarded \
+  note="forced teardown: checks skipped, unlanded work discarded - branch was a dead end" \
+  >/dev/null
+# A cleanup that could not tell. Unknown is a value, not an absence.
+FM_HOME=$HOME22 "$BRIDGE" task -q --id t-murky --project orca --phase dispatched \
   --state fm-handling >/dev/null
-FM_HOME=$HOME22 "$BRIDGE" append -q id=t-known phase=discarded \
-  note="forced teardown: landed-work check skipped, work discarded - hardware died" >/dev/null
-# A landed cleanup, so the guard proves the fix did not just relabel everything.
-FM_HOME=$HOME22 "$BRIDGE" task -q --id t-landed --project orca --phase cleaned \
-  --state resolved >/dev/null
+FM_HOME=$HOME22 "$BRIDGE" append -q id=t-murky phase=force-cleaned outcome=unknown \
+  note="forced teardown: checks skipped and the landed-work test could not reach a verdict, so how this ended is unknown - the forge was unreachable" \
+  >/dev/null
+# And live work, so no guard below can pass by emptying the board.
+FM_HOME=$HOME22 "$BRIDGE" task -q --id t-live --project orca --phase validating >/dev/null
 
-orphan_state=$(state_query "$HOME22" 'repr(d["items"]["t-orphan"]["state"])')
-[ "$orphan_state" != "'resolved'" ] \
-  || fail "discard: a discard-only task folded to resolved, which nothing observed"
-orphan_flag=$(state_query "$HOME22" 'd["items"]["t-orphan"]["discarded"]')
-[ "$orphan_flag" = True ] || fail "discard: a discarded task does not report itself discarded"
-resolved_tally=$(state_query "$HOME22" 'd["summary"]["resolved"]')
-[ "$resolved_tally" = 1 ] \
-  || fail "discard: the resolved tally counts $resolved_tally, so a discard inflated it"
-discard_tally=$(state_query "$HOME22" 'd["summary"]["discarded"]')
-[ "$discard_tally" = 2 ] \
-  || fail "discard: expected both discards tallied as discarded, got $discard_tally"
-handling_tally=$(state_query "$HOME22" 'd["summary"]["fm-handling"]')
-[ "$handling_tally" = 0 ] \
-  || fail "discard: discarded work is still counted as work firstmate is carrying"
-kept=$(state_query "$HOME22" 'd["items"]["t-known"]["state"]')
-[ "$kept" = fm-handling ] \
-  || fail "discard: a discard overwrote the disposition the item had earned ($kept)"
-landed=$(state_query "$HOME22" 'd["items"]["t-landed"]["state"]')
-[ "$landed" = resolved ] || fail "discard: an ordinary cleanup stopped reading as resolved"
-pass "a discarded task is tallied as discarded; only a landed cleanup reads as resolved"
-
-# It is a task on the fleet strip, not an event filed somewhere quieter - in the
-# strip's own discarded group, which is capped rather than growing forever.
-zone=$(state_query "$HOME22" '"t-orphan" in d["zones"]["fleet_discarded"]')
-[ "$zone" = True ] || fail "discard: a discarded task is not on the fleet strip"
-notopen=$(state_query "$HOME22" '"t-orphan" in d["zones"]["fleet_open"]')
-[ "$notopen" = False ] \
-  || fail "discard: thrown-away work is listed as open work firstmate is carrying"
-noask=$(state_query "$HOME22" 'len(d["asks"]) + len(d["cocaptain_asks"])')
-[ "$noask" = 0 ] || fail "discard: a discarded task landed on somebody's queue"
-pass "a discarded task stays on the fleet strip and on nobody's queue"
-
-# And the board itself says all three things a reader of a discarded row needs:
-# that the check was skipped, that the work was discarded, and who judged it
-# safe. The reason is on the row, not only in the embedded state document.
-FM_HOME=$HOME22 "$RENDER" --html > "$TMP_ROOT/discard-board.html"
-python3 - "$TMP_ROOT/discard-board.html" <<'PY' || fail "discard: see the reported row"
-import re, sys
-html = open(sys.argv[1]).read()
-row = re.search(r'<tr id="item-t-orphan">.*?</tr>', html, re.S)
-if row is None:
-    sys.exit("the discarded task has no row on the fleet strip")
-row = row.group(0)
-if "resolved" in row.lower():
-    sys.exit("the discarded row reads as resolved: %s" % row)
-if "discarded" not in row:
-    sys.exit("the discarded row never says it was discarded: %s" % row)
-for fragment in ("landed-work check skipped", "captain said drop the spike"):
-    if fragment not in row:
-        sys.exit("the row does not carry %r, so the board hides why: %s" % (fragment, row))
-sys.exit(0)
-PY
-pass "a discarded row carries the skipped check, the discard, and the reason for it"
-
-case "$(cat "$TMP_ROOT/discard-board.html")" in
-  *"<b>2</b>discarded"*) : ;;
-  *) fail "discard: the board tallies no discarded count" ;;
-esac
-pass "the board tallies discarded work separately from resolved work"
-
-# Record hygiene stays clean: the fold declining to invent a disposition is the
-# honest reading, not a problem for the captain to fix.
-FM_HOME=$HOME22 "$BRIDGE" lint --strict >/dev/null 2>&1 \
-  || fail "discard: a discarded record is reported as a record-hygiene problem"
-pass "a discarded record lints clean"
-
-# Every zone reads the same classification, not raw state. A discarded critical
-# under a heading that reads "these stay pinned until resolved", or a discarded
-# decision still listed as open, is the board contradicting itself in public -
-# the same two-readers-of-one-fact shape as the incident this fold exists for.
-HOME22B=$(new_home)
-FM_HOME=$HOME22B "$BRIDGE" critical -q --id c-gone --project fleet \
-  --title "a critical that was thrown away" --answer act >/dev/null
-FM_HOME=$HOME22B "$BRIDGE" append -q id=c-gone phase=discarded \
-  note="forced teardown: landed-work check skipped, work discarded - superseded" >/dev/null
-FM_HOME=$HOME22B "$BRIDGE" ask -q --id d-gone --project orca \
-  --title "a decision that was thrown away" --answer A >/dev/null
-FM_HOME=$HOME22B "$BRIDGE" append -q id=d-gone phase=discarded \
-  note="forced teardown: landed-work check skipped, work discarded - superseded" >/dev/null
-FM_HOME=$HOME22B "$BRIDGE" critical -q --id c-live --project fleet \
-  --title "a critical that still stands" --answer act >/dev/null
-
-FM_HOME=$HOME22B "$RENDER" --state | python3 -c '
+FM_HOME=$HOME22 "$RENDER" --state | python3 -c '
 import json, sys
 doc = json.load(sys.stdin)
-if "c-gone" in doc["zones"]["criticals"]:
-    sys.exit("a discarded critical is still pinned as unresolved")
-if "c-gone" not in doc["zones"]["criticals_resolved"]:
-    sys.exit("a discarded critical vanished from the criticals zone entirely")
-if doc["zones"]["criticals"] != ["c-live"]:
-    sys.exit("the live critical is no longer pinned: %r" % doc["zones"]["criticals"])
-for group in doc["zones"]["decisions"]:
-    if "d-gone" in group["open"]:
-        sys.exit("a discarded decision is still listed as open")
-    if group["project"] == "orca" and "d-gone" not in group["resolved"]:
-        sys.exit("a discarded decision vanished from its project section")
-' || fail "zones: see the reported placement"
-# And record hygiene reads the same classification, so it does not ask for an
-# answer form the board has already withdrawn.
-FM_HOME=$HOME22B "$BRIDGE" append -q id=d-gone answer= >/dev/null 2>&1 || true
-FM_HOME=$HOME22B "$BRIDGE" lint --strict >/dev/null 2>&1 \
-  || fail "zones: a discarded decision is reported as a record-hygiene problem"
-pass "a discarded critical and decision leave the open zones the board pins"
+items = doc["items"]
+# Both facts survive on the item, neither rewritten by the other.
+if items["t-merged"]["state"] != "resolved" or items["t-merged"]["outcome"] != "landed":
+    sys.exit("the merged task lost an axis: %r" % items["t-merged"])
+if items["t-gone"]["state"] != "needs-captain" or items["t-gone"]["outcome"] != "discarded":
+    sys.exit("the discarded task lost an axis: %r" % items["t-gone"])
+if items["t-live"]["outcome"] != "in-flight":
+    sys.exit("silence on the outcome axis should read as in-flight, got %r"
+             % items["t-live"]["outcome"])
+# Each ending gets its own key. No key carries work that ended another way.
+zones = doc["zones"]
+for key, expected in (("fleet_landed", ["t-merged"]),
+                      ("fleet_discarded", ["t-gone"]),
+                      ("fleet_unknown", ["t-murky"]),
+                      ("fleet_open", ["t-live"])):
+    if zones[key] != expected:
+        sys.exit("zones.%s is %r, not %r" % (key, zones[key], expected))
+# One tally per axis, neither a rollup of the other.
+if doc["outcomes"]["landed"] != 1 or doc["outcomes"]["discarded"] != 1 \
+        or doc["outcomes"]["unknown"] != 1:
+    sys.exit("the outcome tally does not count each ending once: %r" % doc["outcomes"])
+if doc["summary"]["resolved"] != 1:
+    sys.exit("the state tally lost the resolved task: %r" % doc["summary"])
+' || fail "axes: see the reported item"
+pass "state and outcome are recorded and reported as two independent facts"
 
-# --- 23. discarded work is never an ask, whatever it was before ------------
+# MERGED WORK NEVER READS AS THROWN AWAY. This is the case the whole design
+# exists to make unrepresentable.
+FM_HOME=$HOME22 "$RENDER" --html > "$TMP_ROOT/axes.html"
+python3 - "$TMP_ROOT/axes.html" <<'PY' || fail "axes: see the reported row"
+import re, sys
+html = open(sys.argv[1]).read()
+merged = re.search(r'<tr id="item-t-merged">.*?</tr>', html, re.S)
+if merged is None:
+    sys.exit("the merged task has no row on the fleet strip")
+merged = merged.group(0)
+if "discarded" in merged:
+    sys.exit("merged work reads as discarded: %s" % merged)
+for fragment in ("landed", "resolved"):
+    if fragment not in merged:
+        sys.exit("the merged row does not say %r, so a reader must guess: %s"
+                 % (fragment, merged))
+gone = re.search(r'<tr id="item-t-gone">.*?</tr>', html, re.S).group(0)
+if "discarded" not in gone or "needs-captain" not in gone:
+    sys.exit("the discarded row hides one of its two axes: %s" % gone)
+murky = re.search(r'<tr id="item-t-murky">.*?</tr>', html, re.S).group(0)
+if "unknown" not in murky:
+    sys.exit("a cleanup that could not tell does not say so on the row: %s" % murky)
+sys.exit(0)
+PY
+pass "every row shows both axes, and merged work never reads as thrown away"
+
+# --- 23. an ask is a conjunction, and each condition disqualifies alone -----
 #
-# The dangerous case is not the discard-only record: it is a task that EARNED an
-# ask disposition first. fm-pr-check.sh marks every non-yolo PR needs-captain,
-# so a forced discard after that used to leave a live, aging request to rule on
-# merging a branch that had been thrown away - on the one surface built so the
-# captain never mistakes a non-ask for an ask.
+# Someone owes a decision AND the work is still live. Neither condition
+# overrides the other: a discarded item is not an ask because there is nothing
+# left to decide, and a merged item is not an ask because nobody owes it.
 
 HOME23=$(new_home)
-# Exactly the sequence the producers write: spawn, then pr-check, then a forced
-# teardown's discard.
+# The producers' real sequence: spawn, pr-check's needs-captain, then a forced
+# teardown that found the work genuinely unlanded.
 FM_HOME=$HOME23 "$BRIDGE" task -q --id task-pr --project orca --phase dispatched \
   --state fm-handling --owner task-pr --title task-pr >/dev/null
 FM_HOME=$HOME23 "$BRIDGE" task -q --id task-pr --project orca --phase pr-open \
   --state needs-captain --pointer "https://example.invalid/pull/9" --title task-pr \
   --answer "merge it" --answer "hold, I want to look first" --ts 2026-07-28T09:00:00Z >/dev/null
-FM_HOME=$HOME23 "$BRIDGE" append -q id=task-pr phase=discarded \
-  note="forced teardown: landed-work check skipped, work discarded - branch was a dead end" \
+FM_HOME=$HOME23 "$BRIDGE" append -q id=task-pr phase=force-cleaned outcome=discarded \
+  note="forced teardown: checks skipped, unlanded work discarded - branch was a dead end" \
   >/dev/null
-# A routed ask discarded the same way, because the co-captain's queue is the
-# same mechanism and must not keep it either.
+# The co-captain's queue is the same mechanism and must not keep it either.
 FM_HOME=$HOME23 "$BRIDGE" ask -q --id m-gone --project machine --title "a routed ask" \
   --answer "A" --to cocaptain >/dev/null
-FM_HOME=$HOME23 "$BRIDGE" append -q id=m-gone phase=discarded \
-  note="forced teardown: landed-work check skipped, work discarded - box was reimaged" >/dev/null
-# And one genuinely open ask, so the guard cannot pass by emptying the board.
+FM_HOME=$HOME23 "$BRIDGE" append -q id=m-gone phase=force-cleaned outcome=discarded \
+  note="forced teardown: checks skipped, unlanded work discarded - box was reimaged" >/dev/null
+# Someone owed this one and it is still live: the one real ask.
 FM_HOME=$HOME23 "$BRIDGE" ask -q --id o-live --project orca --title "a live decision" \
   --answer "A" >/dev/null
 
@@ -1173,39 +1134,53 @@ import json, sys
 doc = json.load(sys.stdin)
 for key in ("task-pr", "m-gone"):
     item = doc["items"][key]
-    if not item["discarded"]:
-        sys.exit("%s does not report itself discarded" % key)
+    if item["outcome"] != "discarded":
+        sys.exit("%s does not report how it ended" % key)
     if item["aging"]:
-        sys.exit("%s is flagged aging, so discarded work still nags" % key)
+        sys.exit("%s is flagged aging, so work that ended still nags" % key)
     for name, queue in list(doc["queues"].items()) + [("asks", doc["asks"]),
                                                       ("cocaptain_asks", doc["cocaptain_asks"])]:
         if key in queue:
-            sys.exit("%s is still on %s after being discarded" % (key, name))
-# The earned disposition stays in the record for audit; only the classification
-# changed.
+            sys.exit("%s is still on %s after the work ended" % (key, name))
+# The state each item earned is still in the record - the classification
+# changed, the ledger did not.
 if doc["items"]["task-pr"]["state"] != "needs-captain":
-    sys.exit("the discard rewrote the disposition the ledger recorded")
+    sys.exit("the cleanup rewrote the disposition the ledger recorded")
 if doc["summary"]["needs-captain"] != 1:
-    sys.exit("captain tally is %d, so discarded work is still counted as owed"
+    sys.exit("captain tally is %d, so work that ended is still counted as owed"
              % doc["summary"]["needs-captain"])
 if doc["summary"]["needs-cocaptain"]:
-    sys.exit("the co-captain tally still counts discarded work")
-if doc["summary"]["discarded"] != 2:
-    sys.exit("discarded work is not counted as discarded: %r" % doc["summary"])
+    sys.exit("the co-captain tally still counts work that ended")
 if doc["asks"] != ["o-live"]:
     sys.exit("the asks index is %r, not the one live ask" % doc["asks"])
-' || fail "discard: see the reported queue"
-pass "discarding work removes it from every queue, tally, and aging flag it had earned"
+' || fail "asks: see the reported queue"
+pass "work that ended leaves every queue, tally, and aging flag it had earned"
+
+# The OTHER half of the conjunction, tested alone: a live item that nobody owes
+# is not an ask either, for an entirely independent reason.
+HOME23B=$(new_home)
+FM_HOME=$HOME23B "$BRIDGE" task -q --id t-settled --project orca --phase merged \
+  --state resolved --pointer "https://example.invalid/pull/3" >/dev/null
+FM_HOME=$HOME23B "$RENDER" --state | python3 -c '
+import json, sys
+doc = json.load(sys.stdin)
+item = doc["items"]["t-settled"]
+if item["outcome"] != "in-flight":
+    sys.exit("this case needs live work to prove the state half alone: %r" % item["outcome"])
+if doc["asks"]:
+    sys.exit("a settled item is an ask even though nobody owes it: %r" % doc["asks"])
+' || fail "asks: see the reported queue"
+pass "an item nobody owes is not an ask even while the work is still live"
 
 FM_HOME=$HOME23 "$RENDER" --html > "$TMP_ROOT/discard-ask.html"
 askboard=$(cat "$TMP_ROOT/discard-ask.html")
 case "$askboard" in
   *"<title>Bridge - 1 need you</title>"*) : ;;
-  *) fail "discard: the tab title still counts discarded work as needing the captain" ;;
+  *) fail "asks: the tab title still counts work that ended as needing the captain" ;;
 esac
 case "$askboard" in
   *'title="1 waiting on you'*) : ;;
-  *) fail "discard: the rail badge still counts discarded work" ;;
+  *) fail "asks: the rail badge still counts work that ended" ;;
 esac
 # An override's provenance carries the accent; an ordinary note does not, so a
 # routine event never reads as a problem on a board where orange means one thing.
@@ -1218,7 +1193,7 @@ html = open(sys.argv[1]).read()
 seen_plain = False
 for match in re.finditer(r'<div class="why([^"]*)">([^<]*)</div>', html):
     accented = "override" in match.group(1)
-    provenance = "check skipped" in match.group(2)
+    provenance = "checks skipped" in match.group(2)
     if accented and not provenance:
         sys.exit("an ordinary note carries the override accent: %r" % match.group(2))
     if provenance and not accented:
@@ -1229,51 +1204,154 @@ if not seen_plain:
 sys.exit(0)
 ACCENT
 pass "only override provenance carries the alarm accent; an ordinary note reads as ordinary"
-python3 - "$TMP_ROOT/discard-ask.html" <<'PY' || fail "discard: see the reported row"
+python3 - "$TMP_ROOT/discard-ask.html" <<'PY' || fail "asks: see the reported row"
 import re, sys
 html = open(sys.argv[1]).read()
 row = re.search(r'<tr id="item-task-pr">.*?</tr>', html, re.S)
 if row is None:
-    sys.exit("the discarded task vanished from the board instead of staying visible")
+    sys.exit("the task vanished from the board instead of staying visible")
 row = row.group(0)
 if "discarded" not in row:
-    sys.exit("the row does not show the work was discarded: %s" % row)
-if "was needs-captain" not in row:
+    sys.exit("the row does not show how the work ended: %s" % row)
+if "needs-captain" not in row:
     sys.exit("the row hides the disposition it had earned: %s" % row)
 if "branch was a dead end" not in row:
     sys.exit("the row does not carry the reason it was discarded: %s" % row)
 if "button class=\"ans\"" in row:
-    sys.exit("the row still offers a ruling on work that no longer exists: %s" % row)
+    sys.exit("the row still offers a ruling on work that ended: %s" % row)
 index = re.search(r'<section id="waiting">.*?</section>', html, re.S).group(0)
 if "item-task-pr" in index:
-    sys.exit("discarded work is still listed in the asks index")
+    sys.exit("work that ended is still listed in the asks index")
 sys.exit(0)
 PY
-pass "a discarded row stays visible with its reason, offers no ruling, and leaves the index"
+pass "a row that ended stays visible with both axes and its reason, and offers no ruling"
 
-# --- 24. discarded rows are capped, and say what they are not showing ------
+# --- 24. neither axis is derived from the other ----------------------------
+#
+# The property under guard is the ABSENCE of a precedence rule. A ranking
+# cannot survive both halves: which closed key an item lands in must depend on
+# the outcome axis alone, and what the ledger stores on either axis must not
+# depend on the other at all.
 
 HOME24=$(new_home)
+for state in needs-captain needs-cocaptain fm-handling resolved; do
+  for outcome in landed discarded unknown; do
+    FM_HOME=$HOME24 "$BRIDGE" task -q --id "t-$state-$outcome" --project orca \
+      --phase force-cleaned --state "$state" --outcome "$outcome" >/dev/null
+  done
+done
+FM_HOME=$HOME24 "$RENDER" --state | python3 -c '
+import json, sys
+doc = json.load(sys.stdin)
+states = ("needs-captain", "needs-cocaptain", "fm-handling", "resolved")
+outcomes = ("landed", "discarded", "unknown")
+zone_of = {"landed": "fleet_landed", "discarded": "fleet_discarded",
+           "unknown": "fleet_unknown"}
+# Hold the outcome fixed and vary the state: the closed key must not move.
+for outcome in outcomes:
+    for state in states:
+        key = "t-%s-%s" % (state, outcome)
+        if key not in doc["zones"][zone_of[outcome]]:
+            sys.exit("%s is not in zones.%s, so the state axis moved an ending"
+                     % (key, zone_of[outcome]))
+        for other in outcomes:
+            if other != outcome and key in doc["zones"][zone_of[other]]:
+                sys.exit("%s also appears in zones.%s" % (key, zone_of[other]))
+# Hold the state fixed and vary the outcome: what the ledger stores on each
+# axis must be exactly what was written, with neither rewritten by the other.
+for state in states:
+    for outcome in outcomes:
+        item = doc["items"]["t-%s-%s" % (state, outcome)]
+        if item["state"] != state:
+            sys.exit("outcome %s rewrote state %s to %r" % (outcome, state, item["state"]))
+        if item["outcome"] != outcome:
+            sys.exit("state %s rewrote outcome %s to %r" % (state, outcome, item["outcome"]))
+# And no item that ended is on a queue, whatever it was owed - the conjunction,
+# applied uniformly rather than as a tiebreak.
+if doc["asks"] or doc["cocaptain_asks"]:
+    sys.exit("work that ended is queued: %r %r" % (doc["asks"], doc["cocaptain_asks"]))
+# The state tally reads the state axis. A consumer that re-derived it by
+# ranking - counting an ending as though it were a disposition - would move
+# these counts, which is what a blended value did before there were two axes.
+expected = {"needs-captain": 0, "needs-cocaptain": 0, "fm-handling": 3,
+            "resolved": 3, "unrecognized": 0}
+got = {key: doc["summary"][key] for key in expected}
+if got != expected:
+    sys.exit("the state tally is %r, not %r - something is ranking the axes"
+             % (got, expected))
+# The outcome tally reads the outcome axis, with four items per ending.
+for outcome in outcomes:
+    if doc["outcomes"][outcome] != 4:
+        sys.exit("the outcome tally counts %s %d times, not 4 - something is "
+                 "ranking the axes" % (outcome, doc["outcomes"][outcome]))
+' || fail "axes: see the reported independence failure"
+pass "the closed key depends on the outcome axis alone, and neither axis rewrites the other"
+
+# --- 25. closed rows are capped, and say what they are not showing ---------
+
+HOME25=$(new_home)
 i=1
 while [ "$i" -le 9 ]; do
-  FM_HOME=$HOME24 "$BRIDGE" task -q --id "gone-$i" --project orca --phase cleaned \
-    --state fm-handling --ts "2026-07-31T10:0$i:00Z" >/dev/null
-  FM_HOME=$HOME24 "$BRIDGE" append -q id="gone-$i" phase=discarded \
-    note="forced teardown: landed-work check skipped, work discarded - reason $i" \
-    ts="2026-07-31T10:0$i:30Z" >/dev/null
+  FM_HOME=$HOME25 "$BRIDGE" task -q --id "gone-$i" --project orca --phase force-cleaned \
+    --state fm-handling --outcome discarded --ts "2026-07-31T10:0$i:00Z" >/dev/null
   i=$((i + 1))
 done
-capped=$(FM_HOME=$HOME24 "$RENDER" --html)
+capped=$(FM_HOME=$HOME25 "$RENDER" --html)
 shown=$(printf '%s' "$capped" | grep -c 'class="chip discarded"' || true)
-[ "$shown" = 6 ] || fail "discard cap: expected 6 discarded rows shown, got $shown"
+[ "$shown" = 6 ] || fail "closed cap: expected 6 discarded rows shown, got $shown"
 case "$capped" in
   *"older discarded tasks in the record"*) : ;;
-  *) fail "discard cap: rows were dropped with no overflow pointer to the record" ;;
+  *) fail "closed cap: rows were dropped with no overflow pointer to the record" ;;
 esac
 case "$capped" in
   *"+3 older discarded tasks"*) : ;;
-  *) fail "discard cap: the overflow does not say how many are not shown" ;;
+  *) fail "closed cap: the overflow does not say how many are not shown" ;;
 esac
-pass "discarded rows are capped with a visible pointer to the full record"
+pass "closed rows are capped with a visible pointer to the full record"
+
+# Record hygiene reads the same two axes: a cleanup that ended the work is not
+# a record to clean up, and no answer form is demanded for work that ended.
+FM_HOME=$HOME25 "$BRIDGE" lint --strict >/dev/null 2>&1 \
+  || fail "closed: a record of ended work is reported as a hygiene problem"
+pass "a record of ended work lints clean"
+
+# Every zone keys its closed groups on the outcome axis, so a critical that was
+# thrown away never sits under a heading that says these stay pinned until
+# resolved, and a discarded decision never sits in its project's landed list.
+HOME25B=$(new_home)
+FM_HOME=$HOME25B "$BRIDGE" critical -q --id c-gone --project fleet \
+  --title "a critical that was thrown away" --answer act >/dev/null
+FM_HOME=$HOME25B "$BRIDGE" append -q id=c-gone phase=force-cleaned outcome=discarded \
+  note="forced teardown: checks skipped, unlanded work discarded - superseded" >/dev/null
+FM_HOME=$HOME25B "$BRIDGE" ask -q --id d-gone --project orca \
+  --title "a decision that was thrown away" --answer A >/dev/null
+FM_HOME=$HOME25B "$BRIDGE" append -q id=d-gone phase=force-cleaned outcome=discarded \
+  note="forced teardown: checks skipped, unlanded work discarded - superseded" >/dev/null
+FM_HOME=$HOME25B "$BRIDGE" critical -q --id c-live --project fleet \
+  --title "a critical that still stands" --answer act >/dev/null
+
+FM_HOME=$HOME25B "$RENDER" --state | python3 -c '
+import json, sys
+doc = json.load(sys.stdin)
+zones = doc["zones"]
+if "c-gone" in zones["criticals"]:
+    sys.exit("a critical that was thrown away is still pinned")
+if zones["criticals_discarded"] != ["c-gone"]:
+    sys.exit("a discarded critical is not in its own group: %r" % zones["criticals_discarded"])
+if zones["criticals_landed"]:
+    sys.exit("a discarded critical was filed under landed: %r" % zones["criticals_landed"])
+if zones["criticals"] != ["c-live"]:
+    sys.exit("the live critical is no longer pinned: %r" % zones["criticals"])
+for group in zones["decisions"]:
+    if group["project"] != "orca":
+        continue
+    if "d-gone" in group["open"]:
+        sys.exit("a decision that was thrown away is still listed as open")
+    if group["discarded"] != ["d-gone"]:
+        sys.exit("a discarded decision is not in its own group: %r" % group["discarded"])
+    if group["landed"]:
+        sys.exit("a discarded decision was filed under landed: %r" % group["landed"])
+' || fail "zones: see the reported placement"
+pass "a critical or decision that ended is grouped by how it ended, never under landed"
 
 echo "all bridge ledger and fold tests passed"

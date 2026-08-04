@@ -74,8 +74,27 @@ FM_BRIDGE_KINDS='critical decision event task term steering'
 #                     one reader away, and the queue it sits on is what
 #                     determines whether that happens again.
 #   fm-handling     - firstmate has it; visible so it is not forgotten, not an ask
-#   resolved        - done, and carries a pointer to where the outcome lives
+#   resolved        - nobody owes anything further, and a pointer says where the
+#                     outcome lives
 FM_BRIDGE_STATES='needs-captain needs-cocaptain fm-handling resolved'
+
+# THE SECOND AXIS: how the work ENDED, which is a different question from who
+# owes it. `state` answers WHO OWES THIS. `outcome` answers HOW IT ENDED.
+# `phase` answers WHERE IT GOT TO mechanically (dispatched, pr-open, merged,
+# cleaned, force-cleaned) and is not a disposition at all.
+#   in-flight - the default when no record has said otherwise: the work has not
+#               been observed to end
+#   landed    - it ended by being carried through; the outcome exists
+#   discarded - it ended by being thrown away; nothing was kept
+#   unknown   - it ended and NOBODY COULD TELL HOW. This value is not
+#               decoration: a cleanup that could not run the landed-work test
+#               must say so rather than guess in either direction, because a
+#               guess here is the same false certainty the state field exists
+#               to prevent.
+# The two axes never stand in for one another, and no reader ranks them: work
+# can end with nobody owing it (landed after a merge) or with someone still
+# owing a ruling that no longer has anything to decide (discarded mid-review).
+FM_BRIDGE_OUTCOMES='in-flight landed discarded unknown'
 
 # Who an item is addressed to, as a routing target. fm_bridge_state_for_reader
 # turns it into the disposition that puts the item on that reader's queue.
@@ -284,6 +303,7 @@ fm_bridge_record_json() {
   [ -n "$kind" ]     && json="$json,\"kind\":$(fm_bridge_json_str "$kind")"
   [ -n "$project" ]  && json="$json,\"project\":$(fm_bridge_json_str "$project")"
   [ -n "$state" ]    && json="$json,\"state\":$(fm_bridge_json_str "$state")"
+  [ -n "$outcome" ]  && json="$json,\"outcome\":$(fm_bridge_json_str "$outcome")"
   [ -n "$severity" ] && json="$json,\"severity\":$(fm_bridge_json_str "$severity")"
   [ -n "$owner" ]    && json="$json,\"owner\":$(fm_bridge_json_str "$owner")"
   [ -n "$title" ]    && json="$json,\"title\":$(fm_bridge_json_str "$title")"
@@ -328,7 +348,7 @@ fm_bridge_shorten_one() {  # <bytes-to-drop>
 fm_bridge_append() {  # <name=value> ...
   local arg name value ledger json='' n_answers=0
   local id='' kind='' project='' state='' severity='' owner='' title='' body=''
-  local pointer='' check='' note='' phase='' ts=''
+  local pointer='' check='' note='' phase='' ts='' outcome=''
   local answer_values=()
 
   for arg in "$@"; do
@@ -341,6 +361,7 @@ fm_bridge_append() {  # <name=value> ...
       kind) kind=$value ;;
       project) project=$value ;;
       state) state=$value ;;
+      outcome) outcome=$value ;;
       severity) severity=$value ;;
       owner) owner=$value ;;
       title) title=$value ;;
@@ -370,6 +391,9 @@ fm_bridge_append() {  # <name=value> ...
   fi
   if [ -n "$severity" ] && ! fm_bridge_in_set "$severity" "$FM_BRIDGE_SEVERITIES"; then
     printf 'fm-bridge: severity must be one of: %s\n' "$FM_BRIDGE_SEVERITIES" >&2; return 2
+  fi
+  if [ -n "$outcome" ] && ! fm_bridge_in_set "$outcome" "$FM_BRIDGE_OUTCOMES"; then
+    printf 'fm-bridge: outcome must be one of: %s\n' "$FM_BRIDGE_OUTCOMES" >&2; return 2
   fi
 
   # WRITERS NORMALIZE. A record that OPENS an item (one that names its kind)

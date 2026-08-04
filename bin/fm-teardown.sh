@@ -66,10 +66,16 @@
 #   safe. A force with no reason refuses before anything is removed. Overrides
 #   carry provenance: a later reader has to see not just that the check was
 #   skipped but the human judgement that authorized skipping it, and an optional
-#   field decays to an empty one. The reason is recorded on the Bridge row
-#   alongside phase=discarded, and a forced cleanup never records the work as
-#   resolved - the landed-work test it skipped is the only thing that could have
-#   supported that claim.
+#   field decays to an empty one.
+#   --force skips the checks; it does not decide what happened. The landed-work
+#   determination is still EVALUATED under --force - it just cannot refuse - and
+#   its verdict is what the Bridge row records as the outcome: landed when the
+#   test would have passed (a forced cleanup of merged work reclaims a working
+#   copy and discards nothing), discarded when it would have failed, and unknown
+#   when it could not reach a verdict, because guessing either way invents a
+#   fact. The reason is recorded alongside it with phase=force-cleaned, and a
+#   forced cleanup never touches the state axis - skipping the checks says
+#   nothing about who owes what.
 #
 # Transient / stale worktree git lock recovery (teardown-lock-race): a crew process
 # killed mid-git-operation can leave a .git/worktrees/<wt>/index.lock (or, for a
@@ -502,8 +508,16 @@ pr_is_merged() {
 # unrelated commits the default branch gained past the merge-base do not count as
 # "added". Returns non-zero when inconclusive (no default ref, or a merge conflict),
 # so the caller refuses rather than guesses.
+# Set by content_in_default: 1 when the comparison actually ran, 0 when the
+# default branch could not be resolved or fetched. A caller deciding a REFUSAL
+# can ignore it and fail safe; a caller RECORDING what happened cannot, because
+# "the content is not in the default branch" and "I could not look" are
+# different facts and only one of them means the work was thrown away.
+CONTENT_IN_DEFAULT_CONCLUSIVE=0
+
 content_in_default() {
   local name ref default_tree merged_tree
+  CONTENT_IN_DEFAULT_CONCLUSIVE=0
   name=$(default_branch) || return 1
   if git -C "$WT" remote get-url origin >/dev/null 2>&1; then
     git -C "$WT" fetch --quiet origin "+refs/heads/$name:refs/remotes/origin/$name" >/dev/null 2>&1 || return 1
@@ -517,7 +531,73 @@ content_in_default() {
   [ -n "$default_tree" ] || return 1
   merged_tree=$(git -C "$WT" merge-tree --write-tree "$ref" HEAD 2>/dev/null) || return 1
   merged_tree=$(printf '%s\n' "$merged_tree" | head -1)
+  CONTENT_IN_DEFAULT_CONCLUSIVE=1
   [ "$merged_tree" = "$default_tree" ]
+}
+
+# The landed-work determination, asked as a QUESTION rather than as a gate.
+#
+# `--force` means the checks were SKIPPED. It does not mean the work was THROWN
+# AWAY: for work that already merged, a forced cleanup discards nothing - it
+# reclaims a working copy. So the same determination the safety check makes is
+# available here without refusing anything, and what it returns is what gets
+# recorded.
+#
+#   landed    - the test would have passed
+#   discarded - the test would have failed, on evidence that could be checked
+#   unknown   - the test could not run, or could not reach a verdict
+#
+# Never guess in either direction: an unknown recorded as `discarded` invents a
+# loss, and an unknown recorded as `landed` invents an outcome.
+landed_work_verdict() {  # -> landed | discarded | unknown
+  local dirty_raw dirty unpushed_raw unpushed DEFAULT unmerged_raw unmerged branch
+  [ -d "$WT" ] || { printf 'unknown'; return 0; }
+  case "$KIND" in
+    secondmate|scout) printf 'unknown'; return 0 ;;
+  esac
+  dirty_raw=$(git -C "$WT" status --porcelain 2>/dev/null) \
+    || { printf 'unknown'; return 0; }
+  dirty=$(printf '%s\n' "$dirty_raw" | grep -vE '^\?\? (\.claude/|\.fm-(grok|kimi)-turnend$)' | head -1 || true)
+  unpushed_raw=$(git -C "$WT" log --oneline HEAD --not --remotes -- 2>/dev/null) \
+    || { printf 'unknown'; return 0; }
+  unpushed=$(printf '%s\n' "$unpushed_raw" | head -5)
+
+  if [ -n "$unpushed" ] && [ "$MODE" = local-only ]; then
+    DEFAULT=$(default_branch) || { printf 'unknown'; return 0; }
+    unmerged_raw=$(git -C "$WT" log --oneline HEAD --not "$DEFAULT" -- 2>/dev/null) \
+      || { printf 'unknown'; return 0; }
+    unmerged=$(printf '%s\n' "$unmerged_raw" | head -5)
+    if [ -n "$dirty" ] || [ -n "$unmerged" ]; then
+      printf 'discarded'
+    else
+      printf 'landed'
+    fi
+    return 0
+  fi
+
+  if [ -z "$unpushed" ]; then
+    printf 'landed'
+    return 0
+  fi
+  branch=${TEARDOWN_WORKTREE_BRANCH_FOR_SAFETY:-}
+  if [ -z "$branch" ]; then
+    branch=$(git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)
+  fi
+  if pr_is_merged "$branch"; then
+    printf 'landed'
+    return 0
+  fi
+  if content_in_default; then
+    printf 'landed'
+    return 0
+  fi
+  # Both said no. Only the content comparison can tell "no" from "could not
+  # look", so it decides whether this is a discard or an open question.
+  if [ "$CONTENT_IN_DEFAULT_CONCLUSIVE" -eq 1 ]; then
+    printf 'discarded'
+  else
+    printf 'unknown'
+  fi
 }
 
 # Has the worktree's committed work actually LANDED, though its commits are not
@@ -1423,6 +1503,16 @@ if [ "$BACKEND" = orca ] && [ "$KIND" != scout ] && [ "$KIND" != secondmate ] &&
   ORCA_PATH_MATCH_VERIFIED=1
 fi
 
+# Asked here, while the worktree still exists: every answer below this point is
+# about a copy that is about to be removed. A non-forced teardown only proceeds
+# past the check below when the landed-work test passed, so it records `landed`;
+# a forced one records whatever the same determination actually found.
+if [ "$FORCE" = "--force" ]; then
+  TEARDOWN_OUTCOME=$(landed_work_verdict)
+else
+  TEARDOWN_OUTCOME=landed
+fi
+
 if [ -d "$WT" ] && [ "$FORCE" != "--force" ]; then
   if validate_worktree_teardown_safety; then
     :
@@ -1583,17 +1673,19 @@ if [ "$KIND" != scout ] && [ "$KIND" != secondmate ] && [ "$MODE" != local-only 
 fi
 echo "teardown $ID complete (window $T, worktree $WT)"
 
-# Bridge: cleanup is what closes the strip row. An ordinary cleanup only ever
-# runs after the landed-work test passed, so that is the one path where
-# "resolved" is a claim the record can actually support. A FORCED cleanup
-# skipped that test and discarded the work, so it records what actually
-# happened - phase=discarded, with the reason that authorized the override -
-# and leaves the row's last honest state alone rather than promoting it to
-# resolved. A scout's outcome lives in its report; every other task's lives at
-# whatever pointer earlier records already set, which these partial updates
-# deliberately leave alone. A persistent secondmate is not a work item, so - as
-# in fm-spawn.sh - it never becomes a strip row; a forced retirement still
-# records its provenance, as an event rather than as a row. Best-effort append.
+# Bridge: cleanup is what closes the strip row, and it records TWO facts on two
+# axes. `outcome` is how the work ended, taken from the landed-work
+# determination itself rather than from whether --force was used: merged work
+# that a forced cleanup reclaimed ended `landed`, unlanded work it removed ended
+# `discarded`, and a determination that could not run ends `unknown`. `state` is
+# who owes anything further, and only an ordinary cleanup - which ran every
+# check - may say `resolved`; a forced one leaves whatever the row had honestly
+# earned, because skipping the checks tells you nothing about who owes what.
+# A scout's outcome lives in its report; every other task's lives at whatever
+# pointer earlier records already set, which these partial updates deliberately
+# leave alone. A persistent secondmate is not a work item, so - as in
+# fm-spawn.sh - it never becomes a strip row; a forced retirement still records
+# its provenance, as an event rather than as a row. Best-effort append.
 if [ "$KIND" != secondmate ]; then
   # Only point at the report when the report is there: --force skips the
   # missing-report refusal, and a pointer to a file nobody wrote sends the
@@ -1604,17 +1696,25 @@ if [ "$KIND" != secondmate ]; then
   fi
   if [ "$FORCE" = "--force" ]; then
     # A raw append with NO kind, which the writer treats as a partial update:
-    # it sets the phase and the provenance and touches nothing else, so the
-    # row keeps whatever disposition it had honestly earned. Passing kind=task
-    # here would make the writer fill in a disposition of its own, which is the
-    # overclaim this whole branch exists to avoid.
-    BRIDGE_ARGS=(id="$ID" phase=discarded
-      note="forced teardown: landed-work check skipped, work discarded - $FORCE_REASON")
+    # it states the outcome, the mechanical phase, and the provenance, and
+    # touches the state axis not at all. Passing kind=task here would make the
+    # writer fill in a disposition of its own, which is the overclaim this
+    # branch exists to avoid.
+    case "$TEARDOWN_OUTCOME" in
+      landed)
+        BRIDGE_NOTE="forced teardown: checks skipped, but the work had landed - $FORCE_REASON" ;;
+      discarded)
+        BRIDGE_NOTE="forced teardown: checks skipped, unlanded work discarded - $FORCE_REASON" ;;
+      *)
+        BRIDGE_NOTE="forced teardown: checks skipped and the landed-work test could not reach a verdict, so how this ended is unknown - $FORCE_REASON" ;;
+    esac
+    BRIDGE_ARGS=(id="$ID" phase=force-cleaned outcome="$TEARDOWN_OUTCOME"
+      note="$BRIDGE_NOTE")
     [ "$BRIDGE_REPORT" -eq 1 ] && BRIDGE_ARGS+=(pointer="data/$ID/report.md")
     FM_HOME="$FM_HOME" "$FM_ROOT/bin/fm-bridge.sh" append --quiet \
       "${BRIDGE_ARGS[@]}" >/dev/null 2>&1 || true
   else
-    BRIDGE_ARGS=(--id "$ID" --phase cleaned --state resolved)
+    BRIDGE_ARGS=(--id "$ID" --phase cleaned --state resolved --outcome "$TEARDOWN_OUTCOME")
     [ "$BRIDGE_REPORT" -eq 1 ] && BRIDGE_ARGS+=(--pointer "data/$ID/report.md")
     FM_HOME="$FM_HOME" "$FM_ROOT/bin/fm-bridge.sh" task --quiet \
       "${BRIDGE_ARGS[@]}" >/dev/null 2>&1 || true
@@ -1627,7 +1727,8 @@ elif [ "$FORCE" = "--force" ]; then
   # against the fleet rather than as a task row that would invent a work item
   # out of a retirement.
   FM_HOME="$FM_HOME" "$FM_ROOT/bin/fm-bridge.sh" note --quiet \
-    --id "secondmate-retired-$ID" --project fleet --phase discarded \
+    --id "secondmate-retired-$ID" --project fleet --phase force-cleaned \
+    --outcome discarded \
     --title "secondmate $ID retired under --force" \
     --body "Its home and any in-flight child work were discarded without the checks a normal retirement runs." \
     --note "forced teardown: in-flight-work check skipped, secondmate home and child work discarded - $FORCE_REASON" \
