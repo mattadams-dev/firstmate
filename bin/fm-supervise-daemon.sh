@@ -641,13 +641,19 @@ escalate_add() {  # <state> <distilled-item>
 # supervisor pane. Returns 0 on successful inject (or empty buffer), non-zero on
 # inject failure (buffer preserved for retry / catch-up).
 escalate_flush() {  # <state>
-  local state=$1 buf n msg
+  local state=$1 buf n kinds msg
   buf="$state/.subsuper-escalations"
   [ -s "$buf" ] || return 0
-  # Non-blank items, the same unit wedge_summary_line counts, so a delivered
-  # record and a wedged one can never disagree on how many items a buffer held.
-  n=$(grep -c . "$buf" 2>/dev/null || true)
-  [ -n "$n" ] || n=0
+  # Counted off the one buffer-to-kind reading, in the same non-blank-item unit
+  # wedge_summary_line reports, so a delivered record and a wedged one can never
+  # disagree about what the buffer held. A buffer this never got to read reports
+  # `unknown` rather than a confident zero: a batch is being delivered either
+  # way, and naming it "0 event(s)" would be a count nothing observed.
+  if kinds=$(wedge_buffer_kinds "$buf"); then
+    n=$(fm_kind_count "$kinds")
+  else
+    n=unknown
+  fi
   # Join buffered items with the literal " | " separator into one digest line.
   msg=$(awk 'NR>1{printf " | "} {printf "%s",$0} END{print ""}' "$buf" 2>/dev/null)
   # Single-line wrapper: no embedded newlines (inject_msg also collapses as a
@@ -656,11 +662,10 @@ escalate_flush() {  # <state>
   if inject_msg "$msg" "$state"; then
     # Name WHAT was delivered, not only that something was: the same count and
     # kind vocabulary the wedge summary uses, so a delivered batch and a wedged
-    # one are directly comparable in the record. Derived only here, on the
-    # confirmed-submit path: the wedged path retries this flush every batch
-    # window against a buffer that only grows, and a reading it discards is
-    # work no retry should pay for.
-    log "escalation flush delivered: $n item(s), kinds=$(fm_kind_list "$(wedge_buffer_kinds "$buf")")"
+    # one are directly comparable in the record. Rendered from the reading the
+    # digest was already built from, so the retry path a wedge drives never pays
+    # for a second scan of a buffer that only grows.
+    log "escalation flush delivered: $n item(s), kinds=$(fm_kind_list "$kinds")"
     : > "$buf"; rm -f "${buf}.since" "$state/.subsuper-inject-wedged"; return 0
   fi
   return 1
@@ -696,8 +701,9 @@ escalate_flush() {  # <state>
 # captain explicitly disables it.
 
 # Strip leading and trailing whitespace. The single owner of that normalisation
-# for wedge-alarm config, so a directive is read the same way wherever it is
-# split out - the config LINE and the `command:` BODY it carries alike.
+# for wedge-alarm config, so a directive is read the same way at every point it
+# is split out - the config file's LINE, the FM_WEDGE_ALARM_CHANNEL override, and
+# the `command:` BODY any of them carries.
 fm_trim_ws() {  # <text> -> text
   local s=$1
   s="${s#"${s%%[![:space:]]*}"}"
@@ -710,7 +716,16 @@ fm_trim_ws() {  # <text> -> text
 wedge_alarm_configured_channels() {
   local cfg line found=
   if [ -n "${FM_WEDGE_ALARM_CHANNEL:-}" ]; then
-    printf '%s\n' "$FM_WEDGE_ALARM_CHANNEL"
+    while IFS= read -r line || [ -n "$line" ]; do
+      line=$(fm_trim_ws "$line")
+      [ -n "$line" ] || continue
+      printf '%s\n' "$line"
+      found=1
+    done <<< "$FM_WEDGE_ALARM_CHANNEL"
+    # An override that is nothing but whitespace names no channel, but it is
+    # still a deliberate setting: pass it through so it reaches the
+    # unrecognized-directive log rather than disabling the alert in silence.
+    [ -n "$found" ] || printf '%s\n' "$FM_WEDGE_ALARM_CHANNEL"
     return 0
   fi
   cfg="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}/wedge-alarm"
@@ -996,11 +1011,14 @@ wedge_escalation_kind() {  # <buffered-item> -> kind slug
 # single owner of the buffer-to-kind read: the delivered record and the wedge
 # summary both derive their kinds (and the summary its count and severity) from
 # this one stream, so the two readings cannot drift apart on what a buffer holds.
-# An absent or unreadable buffer emits nothing, which the callers read as
-# "not observed" rather than as "empty".
-wedge_buffer_kinds() {  # <buffer-path> -> one kind slug per line
+# An absent or unreadable buffer emits nothing AND returns non-zero, so a caller
+# can tell "observed, holds nothing" from "never observed" instead of collapsing
+# the second into the first. The read is byte-wise and never classifies its input
+# as binary: buffered items are crewmate-authored status text the daemon does not
+# sanitise, and a stray NUL or non-UTF-8 byte must not change what a count says.
+wedge_buffer_kinds() {  # <buffer-path> -> one kind slug per line; non-zero when unread
   local buf=$1 item
-  [ -r "$buf" ] || return 0
+  [ -r "$buf" ] || return 1
   while IFS= read -r item || [ -n "$item" ]; do
     [ -n "$item" ] || continue
     wedge_escalation_kind "$item"
@@ -1017,6 +1035,18 @@ fm_kind_list() {  # <newline-separated kinds> -> a,b,c
   printf '%s' "${out%,}"
 }
 
+# Count the items a kind stream represents. Counting the STREAM rather than the
+# buffer a second time is what keeps a record's count and its kinds from ever
+# describing different readings of the same buffer.
+fm_kind_count() {  # <newline-separated kinds> -> n
+  local kind n=0
+  while IFS= read -r kind; do
+    [ -n "$kind" ] || continue
+    n=$((n + 1))
+  done <<< "$1"
+  printf '%s' "$n"
+}
+
 wedge_kind_severity() {  # <kind> -> LOW|MEDIUM|HIGH
   case "$1" in
     pause-recheck|stale-idle) printf 'LOW' ;;
@@ -1031,12 +1061,12 @@ wedge_kind_severity() {  # <kind> -> LOW|MEDIUM|HIGH
 # observe what it holds, and saying LOW there would be fabrication.
 wedge_summary_line() {  # <state> <age-seconds> <marker>
   local state=$1 age=$2 marker=$3 buf kind sev
-  local count=0 max='' kinds='' kind_list
+  local count max='' kinds='' kind_list
   buf="$state/.subsuper-escalations"
-  kinds=$(wedge_buffer_kinds "$buf")
+  kinds=$(wedge_buffer_kinds "$buf") || kinds=''
+  count=$(fm_kind_count "$kinds")
   while IFS= read -r kind; do
     [ -n "$kind" ] || continue
-    count=$((count + 1))
     sev=$(wedge_kind_severity "$kind")
     case "${max:-LOW}:$sev" in
       LOW:MEDIUM|LOW:HIGH|MEDIUM:HIGH) max=$sev ;;
