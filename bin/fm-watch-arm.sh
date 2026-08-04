@@ -542,11 +542,27 @@ if [ "$mode" = restart ]; then
   lock_pid=$(cat "$WATCH_LOCK/pid" 2>/dev/null || true)
   if fm_pid_alive "$lock_pid"; then
     if fm_watcher_lock_matches_pid "$STATE" "$WATCH" "$lock_pid" "$FM_HOME"; then
-      if ! "$SCRIPT_DIR/fm-safe-kill.sh" --pid "$lock_pid" --role watcher --signal TERM --wait 5 \
-        --reason "operator-requested watcher restart" >/dev/null; then
-        echo "watcher: FAILED - this home's watcher could not be stopped for a restart" >&2
-        exit 1
-      fi
+      restart_stop_rc=0
+      "$SCRIPT_DIR/fm-safe-kill.sh" --pid "$lock_pid" --role watcher --signal TERM --wait 5 \
+        --reason "operator-requested watcher restart" >/dev/null || restart_stop_rc=$?
+      case "$restart_stop_rc" in
+        0) ;;
+        5)
+          # Signalled, still running at the deadline - a watcher inside a bounded
+          # check cannot process its trap until that check returns. This is not a
+          # refusal and must not become one: the invariant that matters is that
+          # exactly one watcher survives, and the path below preserves it either
+          # way by attaching to a verified-healthy peer instead of starting a
+          # second one. Say what was observed and continue.
+          echo "watcher: restart signal sent to pid $lock_pid, which had not exited yet; following the singleton instead of starting a second watcher" >&2
+          ;;
+        *)
+          # Refused or undecidable: the stop was never authorized, so a restart
+          # must not proceed as if it had been.
+          echo "watcher: FAILED - this home's watcher could not be stopped for a restart" >&2
+          exit 1
+          ;;
+      esac
     else
       clear_stale_recorded_watcher_lock
     fi
