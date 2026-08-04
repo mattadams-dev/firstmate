@@ -42,7 +42,7 @@ Each fork produces one line naming both directions, because "behind 20, ahead 6,
 diverged" is actionable where a single number is not:
 
 ```
-FORK_FRESHNESS: acme/widget status=diverged behind=20 ahead=6 upstream=up/widget compare=main...main action=task fm-sync-widget queued
+FORK_FRESHNESS: acme/widget status=diverged behind=20 ahead=6 upstream=up/widget compare=main...main action=task fm-sync-acme-widget queued
 ```
 
 A reading that could not be taken says so and carries no counts at all:
@@ -61,7 +61,9 @@ behind, 3 when something is behind, 4 when something is unknown, 5 for both.
 ## What happens when a fork is behind
 
 The sweep creates the work rather than describing it. On `behind > 0` it
-materialises, idempotently, under the deterministic task id `fm-sync-<repo>`:
+materialises, idempotently, under the deterministic task id
+`fm-sync-<owner>-<repo>` (owner-qualified so two forks sharing a repository name
+under different accounts cannot collide into one task):
 
 - `data/<id>/brief.md`, carrying the proven sync procedure and the reading that
   opened the task,
@@ -106,8 +108,10 @@ cannot be bypassed:
   mutating sweep. It is bounded by `FM_FORK_SWEEP_BOOTSTRAP_TIMEOUT` (default 45
   seconds), and a timeout is reported as unknown coverage rather than silence.
 
-The completion stamp is written only when coverage was fully determined, so an
-outage cannot buy a week of silence: an incomplete sweep stays due, held back
+The cadence stamps live at `state/.fork-freshness-last` (last fully determined
+sweep) and `state/.fork-freshness-attempt` (last attempt). The completion stamp
+is written only when coverage was fully determined, so an outage cannot buy a
+week of silence: an incomplete sweep stays due, held back
 only by a short retry floor (`FM_FORK_SWEEP_RETRY_MINUTES`, default 60) so a
 persistently broken credential reports once an hour rather than once a session.
 
