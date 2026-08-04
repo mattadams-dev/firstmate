@@ -82,6 +82,10 @@ mkdir -p "$STATE"
 . "$SCRIPT_DIR/fm-pending-reply-lib.sh"
 # shellcheck source=bin/fm-busy-lib.sh
 . "$SCRIPT_DIR/fm-busy-lib.sh"
+# Wedge-alarm reset evidence. Separate owner from busy state on purpose: this
+# answers "did anything move?", not "is a turn in progress?".
+# shellcheck source=bin/fm-health-evidence-lib.sh
+. "$SCRIPT_DIR/fm-health-evidence-lib.sh"
 
 WATCH_LOCK="$STATE/.watch.lock"
 WATCH_PATH="$SCRIPT_DIR/fm-watch.sh"
@@ -287,8 +291,46 @@ FM_WEDGE_DEMAND_INSPECT_COUNT=${FM_WEDGE_DEMAND_INSPECT_COUNT:-3}
 # both places a hash can be absorbed this way: the plain non-terminal path,
 # and the stale_is_terminal-overridden path (a captain-relevant status-log
 # line that an active run/busy pane outranked).
-wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-file>
-  local win=$1 since_file=$2 label=$3 escalation_file=$4 since age n reason
+# Evidence of health resets the wedge ratchet. Called on every poll that would
+# otherwise advance an escalation, BEFORE the timer is consulted, so a lane that
+# is demonstrably working never accumulates a count it can only ratchet upward.
+#
+# The reset is caused by an observed CHANGE between two samples - rendered
+# output, process-tree CPU, or live descendants - and never by elapsed time. A
+# time-based amnesty would pardon the slow wedge this machinery exists to catch.
+# bin/fm-health-evidence-lib.sh owns which signals count and why.
+#
+# An unknown comparison leaves the alarm exactly as it was: absence of evidence
+# is not evidence of health, and it must not accelerate the alarm either.
+health_evidence_reset() {  # <window> <rendered-hash> <since-file> <escalation-count-file>
+  local win=$1 rendered=$2 since_file=$3 escalation_file=$4
+  local key sample_file prev cur n verdict
+  key=$(printf '%s' "$win" | tr ':/.' '___')
+  sample_file="$STATE/.health-sample-$key"
+  cur=$(fm_health_sample "$(window_backend "$win")" "$win" "$rendered")
+  prev=$(cat "$sample_file" 2>/dev/null || true)
+  printf '%s\n' "$cur" > "$sample_file" 2>/dev/null || true
+  fm_health_compare "$prev" "$cur"
+  verdict=$?
+  [ "$verdict" -eq 0 ] || return 1
+  n=$(cat "$escalation_file" 2>/dev/null || echo 0)
+  case "$n" in ''|*[!0-9]*) n=0 ;; esac
+  rm -f "$since_file" "$escalation_file"
+  # Logged as a transition, not merely dropped, so the alarm history stays
+  # reconstructable: a count that silently vanishes is indistinguishable from
+  # one that was never raised.
+  triage_log "wedge escalation reset by proven health: $win (escalation $n -> 0, advanced: ${FM_HEALTH_ADVANCED:-none})"
+  return 0
+}
+
+wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-file> <rendered-hash>
+  local win=$1 since_file=$2 label=$3 escalation_file=$4 rendered=${5:-} since age n reason
+  # Health first. A lane that has demonstrably moved since the last look starts
+  # the timer over instead of advancing a count it could never work back down.
+  if health_evidence_reset "$win" "$rendered" "$since_file" "$escalation_file"; then
+    date +%s > "$since_file"
+    return 0
+  fi
   since=$(cat "$since_file" 2>/dev/null || true)
   case "$since" in
     ''|*[!0-9]*)
@@ -344,7 +386,7 @@ handle_paused_stale() {  # <window> <task> <hash>
   key=$(printf '%s' "$win" | tr ':/.' '___')
   printf '%s' "$h" > "$STATE/.stale-$key"
   : > "$STATE/.paused-$key"
-  rm -f "$STATE/.stale-since-$key" "$STATE/.wedge-escalations-$key"
+  rm -f "$STATE/.stale-since-$key" "$STATE/.wedge-escalations-$key" "$STATE/.health-sample-$key"
   statusf="$STATE/$task.status"
   mtime=$(stat_mtime "$statusf")
   case "$mtime" in ''|*[!0-9]*) mtime=$(date +%s) ;; esac
@@ -414,7 +456,7 @@ clear_pause_tracking() {  # <window>
   key=${key//\//_}
   key=${key//./_}
   clear_pause_state "$win"
-  rm -f "$STATE/.stale-$key" "$STATE/.stale-since-$key" "$STATE/.wedge-escalations-$key"
+  rm -f "$STATE/.stale-$key" "$STATE/.stale-since-$key" "$STATE/.wedge-escalations-$key" "$STATE/.health-sample-$key"
 }
 
 # Reconcile a declared pause or captain-held status with authoritative crew state.
@@ -1092,7 +1134,7 @@ EOF
             # wedge timer is running for it) - keep treating it that way
             # without re-reading the crew state every poll, and without
             # letting the still-captain-relevant log line re-surface it.
-            wedge_timer_check "$w" "$ssf" "stale (overridden terminal status)" "$ewf"
+            wedge_timer_check "$w" "$ssf" "stale (overridden terminal status)" "$ewf" "$h"
           fi
           # else: already surfaced as genuinely terminal on a prior poll of
           # this same hash - nothing left to do (matches the original,
@@ -1135,12 +1177,12 @@ EOF
                 paused)  handle_paused_stale "$w" "$task" "$h" ;;
                 working) clear_pause_state "$w"
                          printf '%s' "$h" > "$sf"
-                         wedge_timer_check "$w" "$ssf" "non-terminal stale (provably working after a declared pause)" "$ewf"
+                         wedge_timer_check "$w" "$ssf" "non-terminal stale (provably working after a declared pause)" "$ewf" "$h"
                          triage_log "absorbed non-terminal stale (provably working): $w" ;;
                 *)       handle_paused_stale "$w" "$task" "$h" ;;
               esac
             else
-              wedge_timer_check "$w" "$ssf" "non-terminal stale" "$ewf"
+              wedge_timer_check "$w" "$ssf" "non-terminal stale" "$ewf" "$h"
             fi
           fi
         fi
@@ -1149,7 +1191,7 @@ EOF
         # unless a genuinely busy pane has gone too long with no completed turn -
         # then route it through the same wedge timer instead of erasing it.
         if [ "$busy_now" -eq 0 ] && busy_turn_over_age "$task"; then
-          wedge_timer_check "$w" "$ssf" "busy (no completed turn)" "$ewf"
+          wedge_timer_check "$w" "$ssf" "busy (no completed turn)" "$ewf" "$h"
         else
           rm -f "$ssf" "$ewf"
         fi
@@ -1161,7 +1203,7 @@ EOF
       printf '%s' "$h" > "$hf"
       echo 0 > "$cf"
       if [ "$busy_now" -eq 0 ] && busy_turn_over_age "$task"; then
-        wedge_timer_check "$w" "$ssf" "busy (no completed turn)" "$ewf"
+        wedge_timer_check "$w" "$ssf" "busy (no completed turn)" "$ewf" "$h"
       else
         rm -f "$ssf" "$ewf"
       fi

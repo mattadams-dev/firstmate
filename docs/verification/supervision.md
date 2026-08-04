@@ -432,6 +432,8 @@ Both directions are covered deliberately: a guard that refuses everything is the
 | The kill helper can never complete a stop | refuses too much | `test_authorized_supervisor_stop_succeeds`, `test_daemon_role_stop_succeeds`, `test_every_outcome_is_recorded` | 9 clean |
 | The policy stops classifying terminations | permits too much | matrix `K01` (`kill -TERM 17907`) | 158 clean |
 | The policy denies signal-0 probes and job specs too | refuses too much | matrix `L01` (`kill -0 17907`) | 172 clean |
+| Elapsed time alone resets the wedge alarm | permits too much | `test_a_frozen_lane_is_never_pardoned`, then `test_a_receding_counter_is_not_health` | see below |
+| Nothing resets the wedge alarm | refuses too much | `test_each_signal_alone_proves_health` | 2 clean |
 
 Four of the eight are the mirror-image direction on purpose.
 A supervisor that can never arm and a helper that can never terminate anything are the same failure as their opposites, one mirror over, and they fail silently rather than loudly.
@@ -444,6 +446,10 @@ The identity mutation is the one this work found in its own first implementation
 `test_lock_publishes_its_real_holder_identity` fails it with the difference visible: `linux-starttime=34502521` published against `34502518` actual, three clock ticks apart on an identical command line.
 A fork landing inside the same tick would have matched, so the defect reproduces roughly never under test and is invisible to every assertion that does not compare the two values directly.
 
+The last two rows are the wedge-alarm ratchet, and they are exact mirrors.
+Letting time alone reset the alarm pardons a lane frozen on every signal, which is what a real slow wedge looks like; letting nothing reset it restores the ratchet that put a healthy lane under permanent deep inspection.
+Both mutants also kill the receding-counter case, because a shrinking process tree and a still one are the two things a time-based pardon stops distinguishing.
+
 The session-lock refusal is shared by two cases because the durable-record case uses that refusal to produce a recorded refusal; both guard it from their own direction.
 The kill-helper success path is shared by three for the same reason.
 
@@ -453,6 +459,7 @@ Deterministic entry points for this contract:
 tests/fm-watcher-lock.test.sh
 tests/fm-safe-kill.test.sh
 tests/fm-arm-pretool-check.test.sh
+tests/fm-health-evidence.test.sh
 tests/fixtures/supervisor-singleton/h1-lock-path-identity.sh .
 tests/fixtures/supervisor-singleton/h2-release-by-path.sh .
 tests/fixtures/supervisor-singleton/h3-prelock-evicts.sh .

@@ -36,6 +36,26 @@ The lock used to record a home identity it was never keyed by, and nothing cross
 Two such supervisors are not duplicates - each is the only supervisor of its own fleet - but a process-table census cannot tell them apart, which is how one home gets reported as running two.
 The lock and `state/.watch-cycle-exits.log` now both record the resolved home *and* the supervised state directory, so that question is answerable from the record rather than from a pattern scan.
 
+## Wedge alarms count back down
+
+A wedge escalation used to ratchet 1 -> 2 -> 3 -> 4 with nothing counting it back.
+Past the demand-deep-inspection threshold every wake insists the lane must not be waved through on a cheap read, which is right in isolation but had no counterpart: proven health never cleared it.
+A test-heavy lane is static for minutes at a time in the ordinary course of working, so it reached the threshold just by doing its job and then stayed under deep inspection permanently.
+Measured on the live fleet: four deep inspections of one healthy lane inside twenty minutes, all four confirming health, a fifth already queued.
+
+Evidence of health now resets the alarm, and `bin/fm-health-evidence-lib.sh` is the single owner of what counts as evidence.
+Three signals, each seeing through a blind spot of the others: rendered pane output changing, the pane process tree consuming CPU, and live descendants under its foreground command.
+Any one advancing between two samples is a healthy worker; frozen on all three is what a wedge looks like.
+The reset clears both the escalation count and the wedge timer, and logs the transition with the count it cleared, so the alarm history stays reconstructable.
+
+Elapsed time is never a signal, and must not become one.
+A time-based amnesty would pardon exactly the slow wedge the alarm exists to catch, silently.
+An unreadable sample is `unknown`, which neither resets the alarm nor accelerates it.
+
+This is deliberately a different question from busy state, and does not cross that boundary: `bin/fm-busy-lib.sh` still owns the semantic turn lifecycle and still excludes CPU and child processes as state signals.
+Busy state answers whether a turn is in progress; this answers whether anything moved.
+A lane can be outside a model turn and still be genuinely computing, which is the case that breaks a pane read.
+
 ## Ownership
 
 `bin/fm-watch-arm.sh` owns the harness-independent floor: on an actionable close it arms and verifies one detached successor BEFORE it delivers the wake, so a home that still needs supervision is never blind for the handling turn no matter which adapter sits above it.
