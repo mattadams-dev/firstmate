@@ -707,16 +707,19 @@ unit_stop_confirms_daemon_exit() {
   daemon_pid=$!
   printf '%s' "$daemon_pid" > "$st/state/.supervise-daemon.lock/pid"
   ( . "$ROOT/bin/fm-wake-lib.sh"; fm_pid_identity "$daemon_pid" > "$st/state/.supervise-daemon.lock/pid-identity" )
-  if FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" bash -c '
+  # The seam is now the termination owner, not the shell builtin: this stub
+  # reports a delivered signal AND releases the lock, which is exactly the
+  # combination that must not be read as "the daemon exited".
+  cat > "$st/fake-safe-kill.sh" <<STUB
+#!/usr/bin/env bash
+rm -rf "$st/state/.supervise-daemon.lock"
+exit 5
+STUB
+  chmod +x "$st/fake-safe-kill.sh"
+  if FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" FM_AFK_SAFE_KILL="$st/fake-safe-kill.sh" bash -c '
     . "$1"
     seq() { printf "1\n"; }
     sleep() { :; }
-    kill() {
-      command kill "$@"
-      if [ "$1" = -TERM ]; then
-        rm -rf "$FM_AFK_LAUNCH_STATE/.supervise-daemon.lock"
-      fi
-    }
     ! fm_afk_launch_stop
   ' _ "$LAUNCH" && kill -0 "$daemon_pid" 2>/dev/null \
     && [ ! -e "$st/state/.supervise-daemon.lock" ] \
