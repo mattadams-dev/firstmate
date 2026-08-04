@@ -1502,7 +1502,33 @@ SH
   [ "$(cat "$out_argv" 2>/dev/null)" = "FMWEDGE/1 severity=LOW count=9 kinds=pause-recheck" ] \
     || fail "a bare-script directive did not receive the summary on \$1, got '$(cat "$out_argv" 2>/dev/null)'"
   grep -Fq 'severity=LOW' "$out_stdin" || fail "a bare-script directive did not receive the summary on stdin"
-  pass "command channel: a directive naming a bare script path receives the summary on \$1 and on stdin"
+
+  # docs/examples/wedge-alarm ships the SPACED form, so that is the spelling a
+  # captain copies. It must reach the same branch: an untrimmed leading space
+  # made the path read as multi-word and fell back to the empty-argv `sh -c`
+  # invocation, i.e. the content-free alert this whole fix exists to end.
+  rm -f "$out_argv" "$out_stdin"
+  FM_WEDGE_ALARM_EXEC='' FM_WEDGE_ALARM_CHANNEL="command:  $script  " \
+    wedge_alarm_notify "FMWEDGE/1 severity=HIGH count=2 kinds=blocked" "/s/.marker"
+  [ "$(cat "$out_argv" 2>/dev/null)" = "FMWEDGE/1 severity=HIGH count=2 kinds=blocked" ] \
+    || fail "the shipped 'command: <path>' spacing did not receive the summary on \$1, got '$(cat "$out_argv" 2>/dev/null)'"
+  grep -Fq 'severity=HIGH' "$out_stdin" \
+    || fail "the shipped 'command: <path>' spacing did not receive the summary on stdin"
+  pass "command channel: a directive naming a bare script path receives the summary on \$1 and on stdin, spaced or not"
+}
+
+# A directive that is nothing but whitespace still has no command to run: the
+# guard must say so rather than handing an empty string to a shell.
+test_wedge_alarm_blank_command_directive_is_refused() {
+  local dir daemon_log rc
+  dir=$(make_wedge_case wedge-command-blank); daemon_log="$dir/daemon.log"
+  LOG="$daemon_log" FM_WEDGE_ALARM_EXEC='' FM_WEDGE_ALARM_CHANNEL='command:   ' \
+    wedge_alarm_notify "FMWEDGE/1 severity=LOW count=1 kinds=pause-recheck" "/s/.marker"
+  rc=$?
+  [ "$rc" -eq 0 ] || fail "a blank command directive made wedge_alarm_notify return non-zero ($rc)"
+  grep -Fq 'empty command: channel; nothing to run' "$daemon_log" \
+    || fail "a blank command directive did not log that there was nothing to run: $(cat "$daemon_log" 2>/dev/null)"
+  pass "command channel: a whitespace-only directive is refused and logged, never run as an empty command"
 }
 
 # Only a directive that is nothing but one executable may be invoked directly.
@@ -2088,6 +2114,7 @@ test_wedge_summary_severity_tracks_the_strongest_item
 test_wedge_summary_reports_unknown_when_the_buffer_cannot_be_read
 test_wedge_marker_first_line_is_the_channel_summary
 test_wedge_alarm_command_channel_reaches_a_bare_script_directive
+test_wedge_alarm_blank_command_directive_is_refused
 test_wedge_alarm_command_bare_program_detection_is_narrow
 test_wedge_alarm_command_failure_hides_configured_command
 test_wedge_alarm_unknown_channel_hides_configured_directive
