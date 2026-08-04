@@ -168,6 +168,13 @@ An artifact at or below the direct-commit limit is committed whole and anything 
 A symlink is recorded in that same manifest by its target and never followed, since following one would copy the corpus it exists to reference without duplicating.
 `bin/fm-evidence.sh --help` owns the exact verbs, exit codes, and mechanics.
 
+## Bridge board and ledger (data/bridge/)
+
+The captain's board and the append-only ledger it is generated from live at `$FM_HOME/data/bridge/`, per home, gitignored.
+The supervision cycle renders the board on its own tick; nothing here needs setting for it to work.
+[docs/bridge.md](bridge.md) owns the record schema, the canonical paths, the one fold every consumer reads through, and the rendering caps.
+The `FM_BRIDGE_*` variables below tune it.
+
 ## Secondmate routes (data/secondmates.md)
 
 Persistent secondmate routes live locally in `data/secondmates.md`.
@@ -415,7 +422,8 @@ Ordinary startup, polling, cleanup, and silent read-side subcommands also produc
 A relay-enabled home with no registered commitment stops at an O(1) directory presence check, so the empty state costs no CLI call and adds no periodic scan.
 Unreconciled terminal results ride the existing 30-second relay poll rather than a new process or timer: `bin/fm-x-poll.sh` compares the pending-event signature against `surfaced` and wakes firstmate once per new result set.
 The session-start digest separately prints an "Public commitments awaiting delivery" subsection from disk when, and only when, this home is relay-active and still owes a reply, so compaction and restart are non-events.
-`bin/fm-teardown.sh` refuses to clean up a task while this home still owes a public reply for exactly that work, unless `--force` carries explicit discard approval.
+`bin/fm-teardown.sh` refuses to clean up a task while this home still owes a public reply for exactly that work, unless `--force <reason>` carries explicit discard approval.
+The reason is required: `--force` with no reason refuses before anything is removed.
 `FM_PF_RETRY_BACKOFF_SECS` (default 900) sets the next-attempt time recorded with a retryable delivery error.
 See [verification/public-followup.md](verification/public-followup.md) for the current maintainer evidence behind the restart end-to-end and the relay-disabled zero-overhead guarantee.
 
@@ -454,6 +462,15 @@ FM_HEARTBEAT=600        # base seconds between heartbeat scans; no-change heartb
 FM_HEARTBEAT_MAX=7200   # heartbeat backoff cap
 FM_CHECK_INTERVAL=300   # seconds between slow checks (authenticated merge polls, custom checks, or X-mode dispatch)
 FM_CHECK_TIMEOUT=30     # seconds allowed per slow check script
+FM_BRIDGE_INTERVAL=180  # seconds between Bridge board ticks in the watcher; an unchanged ledger only restamps freshness (docs/bridge.md)
+FM_BRIDGE_AGING_SECONDS=86400   # how long an open ask waits before the board flags it as aging
+FM_BRIDGE_LEDGER=       # absolute override of the Bridge ledger path; default is $FM_HOME/data/bridge/ledger.jsonl
+FM_BRIDGE_BOARD=        # absolute override of the generated board path; default is $FM_HOME/data/bridge/bridge.html
+FM_BRIDGE_NOW=          # fixed RFC3339 UTC clock for the Bridge, mainly for tests
+FM_BRIDGE_CAP_EVENTS=12   # notable events shown on the board before the zone overflows to the record
+FM_BRIDGE_CAP_FLEET_CLOSED=6        # rows shown per closed fleet group (landed, discarded, ended-unknown)
+FM_BRIDGE_CAP_RESOLVED_DECISIONS=3  # rows shown per closed decision or critical group
+FM_BRIDGE_MAX_RECORD_BYTES=3800   # per-record bound that keeps one ledger append atomic under O_APPEND
 FM_CODEX_WATCH_CHECKPOINT=180   # seconds per foreground watcher checkpoint in Codex primary supervision
 FM_CREW_STATE_NM_TIMEOUT=10   # seconds allowed per no-mistakes query inside fm-crew-state.sh
 FM_CREW_STATE_RUNS_LIMIT=200  # recent no-mistakes run rows scanned when axi status cannot be attributed to the current code

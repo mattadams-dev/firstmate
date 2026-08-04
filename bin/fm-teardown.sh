@@ -58,10 +58,24 @@
 # leased home releases its durable treehouse lease so the pool slot is freed,
 # never left leased forever. If the treehouse return fails, teardown leaves the
 # leased home and state in place instead of hiding a still-held lease.
-# Usage: fm-teardown.sh <task-id> [--force]
+# Usage: fm-teardown.sh <task-id> [--force <reason>]
 #   --force skips ordinary-task dirty and landed-work checks, skips scout report
 #   checks, and discards secondmate child work for kind=secondmate. Only use it
 #   when the captain has explicitly said to discard the work.
+#   <reason> is REQUIRED and is one line saying why skipping those checks was
+#   safe. A force with no reason refuses before anything is removed. Overrides
+#   carry provenance: a later reader has to see not just that the check was
+#   skipped but the human judgement that authorized skipping it, and an optional
+#   field decays to an empty one.
+#   --force skips the checks; it does not decide what happened. The landed-work
+#   determination is still EVALUATED under --force - it just cannot refuse - and
+#   its verdict is what the Bridge row records as the outcome: landed when the
+#   test would have passed (a forced cleanup of merged work reclaims a working
+#   copy and discards nothing), discarded when it would have failed, and unknown
+#   when it could not reach a verdict, because guessing either way invents a
+#   fact. The reason is recorded alongside it with phase=force-cleaned, and a
+#   forced cleanup never touches the state axis - skipping the checks says
+#   nothing about who owes what.
 #
 # Transient / stale worktree git lock recovery (teardown-lock-race): a crew process
 # killed mid-git-operation can leave a .git/worktrees/<wt>/index.lock (or, for a
@@ -120,9 +134,19 @@ if [ "$#" -lt 1 ] || ! fm_task_id_path_safe "$1"; then
 fi
 ID=$1
 FORCE=${2:-}
+FORCE_REASON=${3:-}
 # Fail closed before any fleet mutation: a no-mistakes gate agent must never tear
 # down a worktree (see bin/fm-gate-refuse-lib.sh).
 fm_refuse_if_gate_agent
+# An override carries provenance or it does not happen. --force skips the checks
+# that prove the work landed, so the only remaining record of why that was safe
+# is what the person running it says here - and a reason nobody had to give is a
+# field that ends up empty exactly when it matters.
+if [ "$FORCE" = "--force" ] && [ -z "${FORCE_REASON// /}" ]; then
+  echo "REFUSED: --force needs a one-line reason, and nothing has been removed." >&2
+  echo "Run: fm-teardown.sh $ID --force \"why discarding this work is safe\"" >&2
+  exit 2
+fi
 FM_LOCK_LOG_PREFIX=teardown
 
 META="$STATE/$ID.meta"
@@ -484,8 +508,16 @@ pr_is_merged() {
 # unrelated commits the default branch gained past the merge-base do not count as
 # "added". Returns non-zero when inconclusive (no default ref, or a merge conflict),
 # so the caller refuses rather than guesses.
+# Set by content_in_default: 1 when the comparison actually ran, 0 when the
+# default branch could not be resolved or fetched. A caller deciding a REFUSAL
+# can ignore it and fail safe; a caller RECORDING what happened cannot, because
+# "the content is not in the default branch" and "I could not look" are
+# different facts and only one of them means the work was thrown away.
+CONTENT_IN_DEFAULT_CONCLUSIVE=0
+
 content_in_default() {
   local name ref default_tree merged_tree
+  CONTENT_IN_DEFAULT_CONCLUSIVE=0
   name=$(default_branch) || return 1
   if git -C "$WT" remote get-url origin >/dev/null 2>&1; then
     git -C "$WT" fetch --quiet origin "+refs/heads/$name:refs/remotes/origin/$name" >/dev/null 2>&1 || return 1
@@ -499,18 +531,142 @@ content_in_default() {
   [ -n "$default_tree" ] || return 1
   merged_tree=$(git -C "$WT" merge-tree --write-tree "$ref" HEAD 2>/dev/null) || return 1
   merged_tree=$(printf '%s\n' "$merged_tree" | head -1)
+  CONTENT_IN_DEFAULT_CONCLUSIVE=1
   [ "$merged_tree" = "$default_tree" ]
 }
 
-# Has the worktree's committed work actually LANDED, though its commits are not
-# reachable from any remote-tracking branch? True when a merged PR proves the
-# current local work is contained in the PR head, OR the content is already in the
-# default branch (fallback, which also covers the no-PR and gh-error paths). False
-# only for genuinely unlanded work.
-work_is_landed() {
-  local branch=$1
-  pr_is_merged "$branch" && return 0
-  content_in_default
+# The landed-work determination, asked as a QUESTION rather than as a gate.
+#
+# `--force` means the checks were SKIPPED. It does not mean the work was THROWN
+# AWAY: for work that already merged, a forced cleanup discards nothing - it
+# reclaims a working copy. So the same determination the safety check makes is
+# available here without refusing anything, and what it returns is what gets
+# recorded.
+#
+#   landed    - the test would have passed
+#   discarded - the test would have failed, on evidence that could be checked
+#   unknown   - the test could not run, or could not reach a verdict
+#
+# Never guess in either direction: an unknown recorded as `discarded` invents a
+# loss, and an unknown recorded as `landed` invents an outcome.
+# THE ONE LANDED-WORK DETERMINATION. Both readers of it live below: the gate
+# that refuses, and the record of how the work ended. They must not be two
+# implementations of one question - that is the drift this whole design exists
+# to prevent, and it already produced a verdict of `landed` for a dirty
+# worktree the gate itself refuses as unlanded.
+#
+# This function OBSERVES and never refuses, never prints, and never waits: the
+# refusal messages and the lock probe belong to the gate, because they only make
+# sense when something is being blocked. It fills:
+#
+#   LANDED_WORK_VERDICT   landed | discarded | unknown
+#   LANDED_WORK_REASON    which condition decided it, for the gate's message
+#   LANDED_WORK_DETAIL    the evidence to print with that message
+#   LANDED_WORK_BLOCKED   what could not be inspected, for the gate's lock probe
+#
+# Uncommitted changes are unlanded work on EVERY path, not just the local-only
+# one: teardown hard-resets and removes the worktree, so those changes are gone,
+# and AGENTS.md's third hard rule says so plainly.
+LANDED_WORK_VERDICT=unknown
+LANDED_WORK_REASON=
+LANDED_WORK_DETAIL=
+LANDED_WORK_BLOCKED=
+LANDED_WORK_DIRTY=
+LANDED_WORK_DEFAULT_BRANCH=
+
+evaluate_landed_work() {
+  local dirty_raw dirty unpushed_raw unpushed DEFAULT unmerged_raw unmerged branch
+  LANDED_WORK_VERDICT=unknown
+  LANDED_WORK_REASON=
+  LANDED_WORK_DETAIL=
+  LANDED_WORK_BLOCKED=
+  LANDED_WORK_DIRTY=
+  LANDED_WORK_DEFAULT_BRANCH=
+
+  if [ ! -d "$WT" ]; then
+    LANDED_WORK_REASON="not-applicable"
+    return 0
+  fi
+  case "$KIND" in
+    secondmate|scout)
+      LANDED_WORK_REASON="not-applicable"
+      return 0 ;;
+  esac
+
+  if ! dirty_raw=$(git -C "$WT" status --porcelain 2>/dev/null); then
+    LANDED_WORK_REASON=uninspectable
+    LANDED_WORK_BLOCKED="uncommitted changes"
+    return 0
+  fi
+  dirty=$(printf '%s\n' "$dirty_raw" | grep -vE '^\?\? (\.claude/|\.fm-(grok|kimi)-turnend$)' | head -1 || true)
+
+  if ! unpushed_raw=$(git -C "$WT" log --oneline HEAD --not --remotes -- 2>/dev/null); then
+    LANDED_WORK_REASON=uninspectable
+    LANDED_WORK_BLOCKED="commits not on a remote"
+    return 0
+  fi
+  unpushed=$(printf '%s\n' "$unpushed_raw" | head -5)
+
+  if [ -n "$unpushed" ] && [ "$MODE" = local-only ]; then
+    DEFAULT=$(default_branch) || {
+      LANDED_WORK_REASON="no-default-branch"
+      return 0
+    }
+    if ! unmerged_raw=$(git -C "$WT" log --oneline HEAD --not "$DEFAULT" -- 2>/dev/null); then
+      LANDED_WORK_REASON=uninspectable
+      LANDED_WORK_BLOCKED="commits not on $DEFAULT"
+      return 0
+    fi
+    unmerged=$(printf '%s\n' "$unmerged_raw" | head -5)
+    if [ -n "$dirty" ] || [ -n "$unmerged" ]; then
+      LANDED_WORK_VERDICT=discarded
+      LANDED_WORK_REASON="local-unmerged"
+      LANDED_WORK_DETAIL=$unmerged
+      LANDED_WORK_DEFAULT_BRANCH=$DEFAULT
+      LANDED_WORK_DIRTY=$dirty
+      return 0
+    fi
+    LANDED_WORK_VERDICT=landed
+    LANDED_WORK_REASON="on-default-branch"
+    return 0
+  fi
+
+  if [ -n "$dirty" ]; then
+    LANDED_WORK_VERDICT=discarded
+    LANDED_WORK_REASON=dirty
+    return 0
+  fi
+
+  if [ -z "$unpushed" ]; then
+    LANDED_WORK_VERDICT=landed
+    LANDED_WORK_REASON="on-a-remote"
+    return 0
+  fi
+
+  branch=${TEARDOWN_WORKTREE_BRANCH_FOR_SAFETY:-}
+  if [ -z "$branch" ]; then
+    branch=$(git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)
+    TEARDOWN_WORKTREE_BRANCH_FOR_SAFETY=$branch
+  fi
+  LANDED_WORK_DETAIL=$unpushed
+  if pr_is_merged "$branch"; then
+    LANDED_WORK_VERDICT=landed
+    LANDED_WORK_REASON="pr-merged"
+    return 0
+  fi
+  if content_in_default; then
+    LANDED_WORK_VERDICT=landed
+    LANDED_WORK_REASON="content-in-default"
+    return 0
+  fi
+  # Both said no. Only the content comparison can tell "no" from "could not
+  # look", so it decides whether this is a discard or an open question.
+  if [ "$CONTENT_IN_DEFAULT_CONCLUSIVE" -eq 1 ]; then
+    LANDED_WORK_VERDICT=discarded
+    LANDED_WORK_REASON=unlanded
+  else
+    LANDED_WORK_REASON="cannot-tell"
+  fi
 }
 
 backlog_refresh_reminder() {
@@ -758,70 +914,48 @@ teardown_treehouse_return() {
   return 1
 }
 
+# The GATE. It adds refusal, messages, and the stale-lock probe on top of the
+# determination above - and recomputes nothing, so a verdict the board records
+# and a refusal the operator reads can never disagree about the same worktree.
 validate_worktree_teardown_safety() {
-  local dirty_raw dirty unpushed_raw unpushed DEFAULT unmerged_raw unmerged branch
   [ -d "$WT" ] || return 0
   [ "$FORCE" != "--force" ] || return 0
   case "$KIND" in
     secondmate|scout) return 0 ;;
   esac
 
-  if ! dirty_raw=$(git -C "$WT" status --porcelain 2>/dev/null); then
-    if worktree_safety_blocked_by_lock "uncommitted changes"; then
-      return "$TEARDOWN_WORKTREE_SAFETY_LOCK_BLOCKED"
-    fi
-    echo "REFUSED: cannot inspect worktree $WT for uncommitted changes." >&2
-    echo "Restore the git index state, or get the captain's explicit OK to discard, then --force." >&2
-    return 1
-  fi
-  dirty=$(printf '%s\n' "$dirty_raw" | grep -vE '^\?\? (\.claude/|\.fm-(grok|kimi)-turnend$)' | head -1 || true)
+  evaluate_landed_work
 
-  if ! unpushed_raw=$(git -C "$WT" log --oneline HEAD --not --remotes -- 2>/dev/null); then
-    if worktree_safety_blocked_by_lock "commits not on a remote"; then
-      return "$TEARDOWN_WORKTREE_SAFETY_LOCK_BLOCKED"
-    fi
-    echo "REFUSED: cannot inspect worktree $WT for commits not on a remote." >&2
-    echo "Restore the git index state, or get the captain's explicit OK to discard, then --force." >&2
-    return 1
-  fi
-  unpushed=$(printf '%s\n' "$unpushed_raw" | head -5)
-
-  if [ -n "$unpushed" ] && [ "$MODE" = local-only ]; then
-    DEFAULT=$(default_branch) || { echo "REFUSED: cannot determine default branch for $PROJ; expected origin/HEAD, main, or master." >&2; return 1; }
-    if ! unmerged_raw=$(git -C "$WT" log --oneline HEAD --not "$DEFAULT" -- 2>/dev/null); then
-      if worktree_safety_blocked_by_lock "commits not on $DEFAULT"; then
+  case "$LANDED_WORK_REASON" in
+    uninspectable)
+      if worktree_safety_blocked_by_lock "$LANDED_WORK_BLOCKED"; then
         return "$TEARDOWN_WORKTREE_SAFETY_LOCK_BLOCKED"
       fi
-      echo "REFUSED: cannot inspect worktree $WT for commits not on $DEFAULT." >&2
+      echo "REFUSED: cannot inspect worktree $WT for $LANDED_WORK_BLOCKED." >&2
       echo "Restore the git index state, or get the captain's explicit OK to discard, then --force." >&2
-      return 1
-    fi
-    unmerged=$(printf '%s\n' "$unmerged_raw" | head -5)
-    if [ -n "$dirty" ] || [ -n "$unmerged" ]; then
-      echo "REFUSED: local-only worktree $WT has work not yet merged into $DEFAULT and not on any remote." >&2
-      [ -n "$dirty" ] && echo "uncommitted changes present" >&2
-      [ -n "$unmerged" ] && printf 'commits not yet on %s:\n%s\n' "$DEFAULT" "$unmerged" >&2
-      echo "Merge the branch into local $DEFAULT first (bin/fm-merge-local.sh after the captain approves), or push to a fork/remote, or get the captain's explicit OK to discard, then --force." >&2
-      return 1
-    fi
-  elif [ -n "$dirty" ]; then
-    echo "REFUSED: worktree $WT has uncommitted changes." >&2
-    echo "uncommitted changes present" >&2
-    echo "Commit them (or get the captain's explicit OK to discard, then --force)." >&2
-    return 1
-  elif [ -n "$unpushed" ]; then
-    branch=${TEARDOWN_WORKTREE_BRANCH_FOR_SAFETY:-}
-    if [ -z "$branch" ]; then
-      branch=$(git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)
-      TEARDOWN_WORKTREE_BRANCH_FOR_SAFETY=$branch
-    fi
-    if ! work_is_landed "$branch"; then
+      return 1 ;;
+    no-default-branch)
+      echo "REFUSED: cannot determine default branch for $PROJ; expected origin/HEAD, main, or master." >&2
+      return 1 ;;
+    local-unmerged)
+      echo "REFUSED: local-only worktree $WT has work not yet merged into $LANDED_WORK_DEFAULT_BRANCH and not on any remote." >&2
+      [ -n "$LANDED_WORK_DIRTY" ] && echo "uncommitted changes present" >&2
+      [ -n "$LANDED_WORK_DETAIL" ] \
+        && printf 'commits not yet on %s:\n%s\n' "$LANDED_WORK_DEFAULT_BRANCH" "$LANDED_WORK_DETAIL" >&2
+      echo "Merge the branch into local $LANDED_WORK_DEFAULT_BRANCH first (bin/fm-merge-local.sh after the captain approves), or push to a fork/remote, or get the captain's explicit OK to discard, then --force." >&2
+      return 1 ;;
+    dirty)
+      echo "REFUSED: worktree $WT has uncommitted changes." >&2
+      echo "uncommitted changes present" >&2
+      echo "Commit them (or get the captain's explicit OK to discard, then --force)." >&2
+      return 1 ;;
+    unlanded|cannot-tell)
       echo "REFUSED: worktree $WT has work not on any remote and not landed." >&2
-      printf 'unpushed commits:\n%s\n' "$unpushed" >&2
+      printf 'unpushed commits:\n%s\n' "$LANDED_WORK_DETAIL" >&2
       echo "Push the branch, land its PR, or get the captain's explicit OK to discard, then --force." >&2
-      return 1
-    fi
-  fi
+      return 1 ;;
+  esac
+  return 0
 }
 
 require_orca_worktree_path_match() {
@@ -1405,6 +1539,13 @@ if [ "$BACKEND" = orca ] && [ "$KIND" != scout ] && [ "$KIND" != secondmate ] &&
   ORCA_PATH_MATCH_VERIFIED=1
 fi
 
+# Asked while the worktree still exists: every answer below this point is about
+# a copy that is about to be removed. BOTH paths record what the determination
+# actually found - a forced cleanup because it skipped only the refusal, and a
+# non-forced one because "the gate let it through" is not the same statement as
+# "the landed-work test passed". The gate returns 0 without testing anything
+# when there is no worktree and for scout and secondmate kinds, and recording
+# `landed` there would be exactly the guess `unknown` exists to forbid.
 if [ -d "$WT" ] && [ "$FORCE" != "--force" ]; then
   if validate_worktree_teardown_safety; then
     :
@@ -1417,7 +1558,10 @@ if [ -d "$WT" ] && [ "$FORCE" != "--force" ]; then
       exit 1
     fi
   fi
+else
+  evaluate_landed_work
 fi
+TEARDOWN_OUTCOME=$LANDED_WORK_VERDICT
 
 # A Herdr close may reposition shared workspace order, so the whole
 # destructive sequence below (worktree return, pane close, record removal)
@@ -1564,4 +1708,67 @@ if [ "$KIND" != scout ] && [ "$KIND" != secondmate ] && [ "$MODE" != local-only 
   "$FM_ROOT/bin/fm-fleet-sync.sh" "$PROJ" || true
 fi
 echo "teardown $ID complete (window $T, worktree $WT)"
+
+# Bridge: cleanup is what closes the strip row, and it records TWO facts on two
+# axes. `outcome` is how the work ended, taken from the landed-work
+# determination itself rather than from whether --force was used: merged work
+# that a forced cleanup reclaimed ended `landed`, unlanded work it removed ended
+# `discarded`, and a determination that could not run ends `unknown`. `state` is
+# who owes anything further, and only an ordinary cleanup - which ran every
+# check - may say `resolved`; a forced one leaves whatever the row had honestly
+# earned, because skipping the checks tells you nothing about who owes what.
+# A scout's outcome lives in its report; every other task's lives at whatever
+# pointer earlier records already set, which these partial updates deliberately
+# leave alone. A persistent secondmate is not a work item, so - as in
+# fm-spawn.sh - it never becomes a strip row; a forced retirement still records
+# its provenance, as an event rather than as a row. Best-effort append.
+if [ "$KIND" != secondmate ]; then
+  # Only point at the report when the report is there: --force skips the
+  # missing-report refusal, and a pointer to a file nobody wrote sends the
+  # captain hunting for a work product that does not exist.
+  BRIDGE_REPORT=0
+  if [ "$KIND" = scout ] && [ -f "$DATA/$ID/report.md" ]; then
+    BRIDGE_REPORT=1
+  fi
+  if [ "$FORCE" = "--force" ]; then
+    # A raw append with NO kind, which the writer treats as a partial update:
+    # it states the outcome, the mechanical phase, and the provenance, and
+    # touches the state axis not at all. Passing kind=task here would make the
+    # writer fill in a disposition of its own, which is the overclaim this
+    # branch exists to avoid.
+    case "$TEARDOWN_OUTCOME" in
+      landed)
+        BRIDGE_NOTE="forced teardown: checks skipped, but the work had landed - $FORCE_REASON" ;;
+      discarded)
+        BRIDGE_NOTE="forced teardown: checks skipped, unlanded work discarded - $FORCE_REASON" ;;
+      *)
+        BRIDGE_NOTE="forced teardown: checks skipped and the landed-work test could not reach a verdict, so how this ended is unknown - $FORCE_REASON" ;;
+    esac
+    BRIDGE_ARGS=(id="$ID" phase=force-cleaned outcome="$TEARDOWN_OUTCOME"
+      note="$BRIDGE_NOTE")
+    [ "$BRIDGE_REPORT" -eq 1 ] && BRIDGE_ARGS+=(pointer="data/$ID/report.md")
+    FM_HOME="$FM_HOME" "$FM_ROOT/bin/fm-bridge.sh" append --quiet \
+      "${BRIDGE_ARGS[@]}" >/dev/null 2>&1 || true
+  else
+    BRIDGE_ARGS=(--id "$ID" --phase cleaned --state resolved --outcome "$TEARDOWN_OUTCOME")
+    [ "$BRIDGE_REPORT" -eq 1 ] && BRIDGE_ARGS+=(--pointer "data/$ID/report.md")
+    FM_HOME="$FM_HOME" "$FM_ROOT/bin/fm-bridge.sh" task --quiet \
+      "${BRIDGE_ARGS[@]}" >/dev/null 2>&1 || true
+  fi
+elif [ "$FORCE" = "--force" ]; then
+  # A secondmate never becomes a strip row, and an override always carries
+  # provenance. Both hold here: this is the most destructive path in the script
+  # - child windows killed, child work discarded, route dropped, lease
+  # released, home removed - so the reason is recorded as an ordinary EVENT
+  # against the fleet rather than as a task row that would invent a work item
+  # out of a retirement.
+  FM_HOME="$FM_HOME" "$FM_ROOT/bin/fm-bridge.sh" note --quiet \
+    --id "secondmate-retired-$ID" --project fleet --phase force-cleaned \
+    --outcome discarded \
+    --title "secondmate $ID retired under --force" \
+    --body "Its home and any in-flight child work were discarded without the checks a normal retirement runs." \
+    --note "forced teardown: in-flight-work check skipped, secondmate home and child work discarded - $FORCE_REASON" \
+    >/dev/null 2>&1 || true
+fi
+
 backlog_refresh_reminder

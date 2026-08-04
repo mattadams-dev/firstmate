@@ -483,7 +483,7 @@ test_invalid_entrypoints_have_zero_side_effects() {
     before=$(state_snapshot "$dir/home/state")
     set +e
     FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$dir/root" FM_TEST_GUARD_LOG="$dir/guard.log" \
-      "$TEARDOWN" "$value" --force > "$dir/stdout" 2> "$dir/stderr"
+      "$TEARDOWN" "$value" --force "test: captain approved discarding this work" > "$dir/stdout" 2> "$dir/stderr"
     rc=$?
     set -e
     [ "$rc" -ne 0 ] || fail "teardown accepted invalid task ID"
@@ -585,7 +585,7 @@ SH
   chmod 0700 "$dir/fakebin/tmux"
   touch "$dir/home/state/.last-watcher-beat"
   FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" PATH="$dir/fakebin:$BASE_PATH" \
-    "$TEARDOWN" Task_A.1 --force > "$dir/teardown.out" 2> "$dir/teardown.err" \
+    "$TEARDOWN" Task_A.1 --force "test: captain approved discarding this work" > "$dir/teardown.out" 2> "$dir/teardown.err" \
     || fail "safe lifecycle-compatible task ID could not be torn down"
   [ ! -e "$dir/home/state/Task_A.1.meta" ] \
     || fail "safe lifecycle-compatible task teardown retained metadata"
@@ -613,7 +613,7 @@ SH
     mkdir "$dir/home/state/$id.check.sh"
     set +e
     FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" PATH="$dir/fakebin:$BASE_PATH" \
-      "$TEARDOWN" "$id" --force > "$dir/unsafe-teardown.out" 2> "$dir/unsafe-teardown.err"
+      "$TEARDOWN" "$id" --force "test: captain approved discarding this work" > "$dir/unsafe-teardown.out" 2> "$dir/unsafe-teardown.err"
     rc=$?
     set -e
     [ "$rc" -ne 0 ] || fail "legacy task teardown accepted an unsafe direct artifact"
@@ -632,7 +632,7 @@ SH
     fm_pr_poll_artifacts_valid "$dir/home/state" "$id" "$POLL" \
       || fail "path-safe legacy task ID did not publish an authenticated poll"
     FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" PATH="$dir/fakebin:$BASE_PATH" \
-      "$TEARDOWN" "$id" --force > "$dir/teardown.out" 2> "$dir/teardown.err" \
+      "$TEARDOWN" "$id" --force "test: captain approved discarding this work" > "$dir/teardown.out" 2> "$dir/teardown.err" \
       || fail "legacy path-safe task ID could not be torn down"
     [ ! -e "$dir/home/state/$id.meta" ] || fail "legacy task teardown retained metadata"
     [ "$(cat "$dir/home/state/.pr-check-quarantine/!noncanonical.check.evidence")" = 'reserved migration evidence' ] \
@@ -1698,7 +1698,7 @@ SH
   touch "$state/.last-watcher-beat"
   set +e
   FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" PATH="$fakebin:$BASE_PATH" \
-    "$TEARDOWN" task-a --force > "$dir/teardown.out" 2> "$dir/teardown.err"
+    "$TEARDOWN" task-a --force "test: captain approved discarding this work" > "$dir/teardown.out" 2> "$dir/teardown.err"
   rc=$?
   set -e
   [ "$rc" -ne 0 ] || fail "teardown accepted a multiply linked quarantine entry"
@@ -1853,7 +1853,7 @@ SH
   touch "$state/.last-watcher-beat"
   set +e
   FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" PATH="$dir/fakebin:$BASE_PATH" \
-    "$TEARDOWN" _noncanonical --force > "$dir/teardown.out" 2> "$dir/teardown.err"
+    "$TEARDOWN" _noncanonical --force "test: captain approved discarding this work" > "$dir/teardown.out" 2> "$dir/teardown.err"
   rc=$?
   set -e
   [ "$rc" -ne 0 ] || fail "task teardown accepted an unresolved legacy namespace collision"
@@ -1875,7 +1875,7 @@ SH
     || fail "legacy reserved retry did not migrate its quarantined evidence"
   assert_valid_migration_marker "$state/.pr-check-migration-v1"
   FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" PATH="$dir/fakebin:$BASE_PATH" \
-    "$TEARDOWN" _noncanonical --force > "$dir/teardown-2.out" 2> "$dir/teardown-2.err" \
+    "$TEARDOWN" _noncanonical --force "test: captain approved discarding this work" > "$dir/teardown-2.out" 2> "$dir/teardown-2.err" \
     || fail "task teardown did not recover after legacy namespace migration"
   [ ! -e "$state/_noncanonical.meta" ] \
     || fail "recovered task teardown retained lifecycle metadata"
@@ -2629,7 +2629,7 @@ SH
   touch "$dir/home/state/.last-watcher-beat"
 
   FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" PATH="$fakebin:$BASE_PATH" \
-    "$TEARDOWN" task-a --force > "$dir/teardown.out" 2> "$dir/teardown.err" \
+    "$TEARDOWN" task-a --force "test: captain approved discarding this work" > "$dir/teardown.out" 2> "$dir/teardown.err" \
     || fail "teardown cleanup fixture failed"
   [ ! -e "$dir/home/state/task-a.check.sh" ] || fail "teardown left the runnable check"
   [ ! -e "$dir/home/state/task-a.pr-poll" ] || fail "teardown left the sidecar"
@@ -2661,7 +2661,7 @@ SH
   chmod +x "$fakebin/tmux"
   touch "$dir/home/state/.last-watcher-beat"
   FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" PATH="$fakebin:$BASE_PATH" \
-    "$TEARDOWN" task-a --force > "$dir/teardown.out" 2> "$dir/teardown.err" \
+    "$TEARDOWN" task-a --force "test: captain approved discarding this work" > "$dir/teardown.out" 2> "$dir/teardown.err" \
     || fail "teardown could not finish a valid crash-left retirement receipt"
   assert_poll_absent "$dir/home/state" task-a
   [ ! -e "$dir/home/state/task-a.meta" ] || fail "receipt-aware teardown left task metadata"
@@ -2689,7 +2689,7 @@ SH
   touch "$dir/home/state/.last-watcher-beat"
 
   FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" PATH="$fakebin:$BASE_PATH" \
-    "$TEARDOWN" invalid --force > "$dir/teardown.out" 2> "$dir/teardown.err" \
+    "$TEARDOWN" invalid --force "test: captain approved discarding this work" > "$dir/teardown.out" 2> "$dir/teardown.err" \
     || fail "valid invalid task teardown failed"
   [ ! -e "$dir/home/state/.pr-check-quarantine/invalid.check.abc123" ] \
     || fail "teardown left the valid invalid task artifact"
@@ -2723,7 +2723,7 @@ SH
     touch "$dir/home/state/.last-watcher-beat"
     set +e
     FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" FM_FAKE_TMUX_LOG="$dir/tmux.log" \
-      PATH="$fakebin:$BASE_PATH" "$TEARDOWN" task-a --force \
+      PATH="$fakebin:$BASE_PATH" "$TEARDOWN" task-a --force "test: captain approved discarding this work" \
       > "$dir/teardown.out" 2> "$dir/teardown.err"
     rc=$?
     set -e
@@ -2762,7 +2762,7 @@ SH
     touch "$dir/home/state/.last-watcher-beat"
     set +e
     FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" PATH="$fakebin:$BASE_PATH" \
-      "$TEARDOWN" task-a --force > "$dir/teardown.out" 2> "$dir/teardown.err"
+      "$TEARDOWN" task-a --force "test: captain approved discarding this work" > "$dir/teardown.out" 2> "$dir/teardown.err"
     rc=$?
     set -e
     [ "$rc" -ne 0 ] || fail "teardown accepted a $kind-target quarantine symlink"

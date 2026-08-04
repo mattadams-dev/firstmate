@@ -39,6 +39,13 @@
 #   (p) fm-pr-check when local HEAD lags                        -> record remote PR head
 #   (q) no-mistakes + NO pr= recorded, PR discovered by branch  -> ALLOW  (yolo/no-CI merge)
 #
+# And what a cleanup is allowed to CLAIM on the Bridge, which is a disposition
+# question rather than a safety one:
+#   (z1) forced cleanup of unlanded work   -> records phase=discarded, never resolved
+#   (z2) forced cleanup                    -> records the reason that authorized it
+#   (z3) --force with no reason            -> REFUSE before anything is removed
+#   (z4) ordinary cleanup of landed work   -> still records resolved
+#
 # Also covers backlog teardown-lock-race: a git index.lock left in the worktree by a
 # killed crew process (bin/fm-teardown.sh's teardown_treehouse_return).
 #   (r) provably-stale index.lock (old mtime, no live holder) -> lock removed, ALLOW
@@ -494,8 +501,16 @@ run_teardown() {
   FM_ROOT_OVERRIDE="$ROOT" \
   FM_STATE_OVERRIDE="$case_dir/state" \
   FM_CONFIG_OVERRIDE="$case_dir/config" \
+  FM_DATA_OVERRIDE="$case_dir/data" \
   PATH="$case_dir/fakebin:$PATH" \
     "$TEARDOWN" task-x1 "$@"
+}
+
+# What teardown told the Bridge, straight from this case's own ledger. Read as
+# raw text on purpose: these tests assert what the cleanup RECORDED, and going
+# through the fold would let a reader default fill in what the writer omitted.
+bridge_records() {  # <case_dir>
+  cat "$1/data/bridge/ledger.jsonl" 2>/dev/null || true
 }
 
 test_local_only_fork_remote_allows() {
@@ -1234,13 +1249,301 @@ test_local_only_force_overrides_unpushed() {
   wt_commit "$case_dir" "unpushed work"
 
   set +e
-  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr"
+  run_teardown "$case_dir" --force "test: captain approved discarding this work" > "$case_dir/stdout" 2> "$case_dir/stderr"
   rc=$?
   set -e
 
   expect_code 0 "$rc" "force-override: --force should bypass the unpushed-work check"
   ! grep -q REFUSED "$case_dir/stderr" || fail "force-override: REFUSED printed despite --force"
   pass "local-only worktree with unpushed work is torn down under --force (escape hatch)"
+}
+
+# --- what a cleanup is allowed to CLAIM on the board ------------------------
+#
+# The Bridge's state field exists so a disposition is never overclaimed. A
+# forced cleanup skipped the landed-work test, so `resolved` is a claim nothing
+# ran to support: the row records that the work was discarded, keeps whatever
+# state it had honestly earned, and carries the reason that authorized skipping
+# the check. Three directions, because any one of them alone can be satisfied by
+# a fix that is wrong in the other two.
+
+test_forced_teardown_records_discarded_not_resolved() {
+  local case_dir rc records
+  case_dir=$(make_case force-discard-record)
+  write_meta "$case_dir" local-only ship
+  wt_commit "$case_dir" "unpushed work nobody landed"
+
+  set +e
+  run_teardown "$case_dir" --force "captain said drop the spike" \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 0 "$rc" "force-discard-record: forced teardown failed"
+
+  records=$(bridge_records "$case_dir")
+  [ -n "$records" ] || fail "force-discard-record: teardown wrote nothing to the Bridge"
+  # GENUINELY UNLANDED WORK ENDS AS DISCARDED, and nothing softer. The commits
+  # exist nowhere else, so removing the worktree threw them away - that is what
+  # the landed-work determination found, and what has to be recorded.
+  case "$records" in
+    *'"outcome":"discarded"'*) : ;;
+    *) fail "force-discard-record: unlanded work did not end as discarded: $records" ;;
+  esac
+  case "$records" in
+    *'"phase":"force-cleaned"'*) : ;;
+    *) fail "force-discard-record: the mechanical phase was not recorded: $records" ;;
+  esac
+  # What the RECORD says is only half of it. This teardown ran with an empty
+  # ledger - the ordinary case for anything in flight when the Bridge arrives,
+  # and for any task whose best-effort spawn append did not land - so the row
+  # the captain reads is built from this record alone, and it must not come out
+  # of the fold reading as resolved.
+  folded=$(FM_HOME="$case_dir" FM_DATA_OVERRIDE="$case_dir/data" \
+    "$ROOT/bin/fm-bridge-render.sh" --state --id task-x1)
+  printf '%s' "$folded" | python3 -c '
+import json, sys
+doc = json.load(sys.stdin)
+item = doc["items"].get("task-x1")
+if item is None:
+    sys.exit("the discarded task is not in folded state at all")
+if item["outcome"] != "discarded":
+    sys.exit("folded state reports the ending as %r, not discarded" % item["outcome"])
+if item["state"] == "resolved":
+    sys.exit("a forced cleanup claimed resolved, which the skipped checks never supported")
+if doc["summary"]["resolved"]:
+    sys.exit("a forced discard was counted in the resolved tally")
+if doc["outcomes"]["discarded"] != 1:
+    sys.exit("the discard was not counted as an ending: %r" % doc["outcomes"])
+' || fail "force-discard-record: $(printf '%s' "$folded" | head -c 400)"
+  case "$records" in
+    *'"state":"resolved"'*)
+      fail "force-discard-record: a forced cleanup claimed resolved, which the skipped landed-work test never supported: $records" ;;
+  esac
+  pass "a forced cleanup of unlanded work ends as discarded and never claims resolved"
+}
+
+# THE OTHER DIRECTION, and the one this design exists for: --force means the
+# CHECKS were skipped, not that the work was thrown away. A forced cleanup of
+# work that already landed reclaims a working copy and discards nothing, so it
+# must not record a discard - and proving that by making everything look landed
+# would break the test above, which is why both directions are pinned
+# separately.
+test_forced_teardown_of_landed_work_records_landed() {
+  local case_dir rc records
+  case_dir=$(make_case force-landed-record)
+  write_meta "$case_dir" local-only ship
+  wt_commit "$case_dir" "work that landed"
+  add_fork_with_pushed_branch "$case_dir"
+
+  set +e
+  run_teardown "$case_dir" --force "evidence gate was broken, cleaning up by hand" \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 0 "$rc" "force-landed-record: forced teardown failed"
+
+  records=$(bridge_records "$case_dir")
+  case "$records" in
+    *'"outcome":"discarded"'*)
+      fail "force-landed-record: work that landed was recorded as thrown away: $records" ;;
+  esac
+  case "$records" in
+    *'"outcome":"landed"'*) : ;;
+    *) fail "force-landed-record: a forced cleanup of landed work did not record it: $records" ;;
+  esac
+  # The reason still travels with the override - skipping the checks is still
+  # something a later reader has to be able to see the judgement for.
+  case "$records" in
+    *"evidence gate was broken"*) : ;;
+    *) fail "force-landed-record: the override lost its provenance: $records" ;;
+  esac
+  FM_HOME="$case_dir" FM_DATA_OVERRIDE="$case_dir/data" \
+    "$ROOT/bin/fm-bridge-render.sh" --state --id task-x1 | python3 -c '
+import json, sys
+doc = json.load(sys.stdin)
+item = doc["items"]["task-x1"]
+if item["outcome"] != "landed":
+    sys.exit("folded state reports the ending as %r, not landed" % item["outcome"])
+if "task-x1" in doc["zones"]["fleet_discarded"]:
+    sys.exit("landed work is filed under discarded")
+if doc["zones"]["fleet_landed"] != ["task-x1"]:
+    sys.exit("landed work is not in the landed group: %r" % doc["zones"]["fleet_landed"])
+' || fail "force-landed-record: the board files landed work as thrown away"
+  pass "a forced cleanup of work that already landed records landed, not discarded"
+}
+
+# Uncommitted work is unlanded work, on every path. This is the shape a dirty
+# worktree takes when its commits ARE all pushed - the branch that used to skip
+# the dirty check entirely and answer `landed` for work the cleanup then threw
+# away, while the safety gate refused that exact state as unlanded.
+test_forced_teardown_of_dirty_worktree_records_discarded() {
+  local case_dir rc records
+  case_dir=$(make_case force-dirty-record)
+  write_meta "$case_dir" local-only ship
+  wt_commit "$case_dir" "work that landed"
+  add_fork_with_pushed_branch "$case_dir"
+  printf 'scratch nobody committed\n' > "$case_dir/wt/uncommitted.txt"
+
+  set +e
+  run_teardown "$case_dir" --force "captain said drop the scratch" \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 0 "$rc" "force-dirty-record: forced teardown failed"
+
+  records=$(bridge_records "$case_dir")
+  case "$records" in
+    *'"outcome":"landed"'*)
+      fail "force-dirty-record: uncommitted work the cleanup removed was recorded as landed: $records" ;;
+  esac
+  case "$records" in
+    *'"outcome":"discarded"'*) : ;;
+    *) fail "force-dirty-record: a dirty worktree did not end as discarded: $records" ;;
+  esac
+  pass "a forced cleanup of a dirty worktree records the uncommitted work as discarded"
+}
+
+# The gate and the record read ONE determination, so what an operator is told
+# and what the board shows cannot disagree about the same worktree.
+test_gate_and_record_agree_about_the_same_worktree() {
+  local case_dir rc records
+  case_dir=$(make_case verdict-agrees-with-gate)
+  write_meta "$case_dir" local-only ship
+  wt_commit "$case_dir" "work that landed"
+  add_fork_with_pushed_branch "$case_dir"
+  printf 'scratch nobody committed\n' > "$case_dir/wt/uncommitted.txt"
+
+  # Unforced: the gate refuses this exact state as unlanded, and nothing is removed.
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "verdict-agrees-with-gate: the gate accepted a dirty worktree"
+  assert_contains "$(cat "$case_dir/stderr")" "uncommitted changes" \
+    "verdict-agrees-with-gate: the refusal does not name the uncommitted work"
+  [ -z "$(bridge_records "$case_dir")" ] \
+    || fail "verdict-agrees-with-gate: a refused teardown still recorded an outcome"
+
+  # Forced: the same determination, now recorded rather than refused.
+  run_teardown "$case_dir" --force "captain said drop the scratch" \
+    > "$case_dir/stdout2" 2> "$case_dir/stderr2" \
+    || fail "verdict-agrees-with-gate: forced teardown failed: $(cat "$case_dir/stderr2")"
+  records=$(bridge_records "$case_dir")
+  case "$records" in
+    *'"outcome":"discarded"'*) : ;;
+    *) fail "verdict-agrees-with-gate: the record disagrees with the refusal: $records" ;;
+  esac
+  pass "the refusal and the recorded outcome read one determination of the same worktree"
+}
+
+# Where no landed-work test applies, neither path may claim it passed. The gate
+# returns 0 without testing anything for a scout, and "it let me through" is not
+# the same statement as "the work landed".
+test_teardown_without_a_landed_test_records_unknown() {
+  local case_dir records
+  case_dir=$(make_case no-worktree-unknown-outcome)
+  write_meta "$case_dir" local-only ship
+  wt_commit "$case_dir" "work whose copy is already gone"
+  # The gate returns 0 without inspecting anything when the worktree is not
+  # there, so nothing observed the ending. "It let me through" is not the same
+  # statement as "the test passed".
+  rm -rf "$case_dir/wt"
+
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" \
+    || fail "no-worktree-unknown-outcome: teardown failed: $(cat "$case_dir/stderr")"
+
+  records=$(bridge_records "$case_dir")
+  case "$records" in
+    *'"outcome":"landed"'*)
+      fail "no-worktree-unknown-outcome: a cleanup that ran no landed-work test claimed landed: $records" ;;
+  esac
+  case "$records" in
+    *'"outcome":"unknown"'*) : ;;
+    *) fail "no-worktree-unknown-outcome: the untested ending was not recorded as unknown: $records" ;;
+  esac
+  # It still closes the row on the state axis - the checks that apply all ran.
+  case "$records" in
+    *'"state":"resolved"'*) : ;;
+    *) fail "no-worktree-unknown-outcome: an ordinary cleanup stopped recording resolved: $records" ;;
+  esac
+  pass "a cleanup with no landed-work test to run records unknown, never landed"
+}
+
+test_forced_teardown_records_the_reason_it_was_authorized() {
+  local case_dir records
+  case_dir=$(make_case force-provenance)
+  write_meta "$case_dir" local-only ship
+  wt_commit "$case_dir" "unpushed work nobody landed"
+
+  run_teardown "$case_dir" --force "hardware died, the branch is unrecoverable" \
+    > "$case_dir/stdout" 2> "$case_dir/stderr" \
+    || fail "force-provenance: forced teardown failed: $(cat "$case_dir/stderr")"
+
+  records=$(bridge_records "$case_dir")
+  case "$records" in
+    *"hardware died, the branch is unrecoverable"*) : ;;
+    *) fail "force-provenance: the reason that authorized the override was not recorded: $records" ;;
+  esac
+  case "$records" in
+    *"checks skipped"*) : ;;
+    *) fail "force-provenance: the row does not say the checks were skipped: $records" ;;
+  esac
+  pass "a forced cleanup records the human judgement that authorized it"
+}
+
+test_force_without_a_reason_refuses_before_removing_anything() {
+  local case_dir rc
+  case_dir=$(make_case force-no-reason)
+  write_meta "$case_dir" local-only ship
+  wt_commit "$case_dir" "unpushed work nobody landed"
+
+  set +e
+  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  [ "$rc" -ne 0 ] || fail "force-no-reason: a force with no reason was allowed to proceed"
+  assert_contains "$(cat "$case_dir/stderr")" "reason" \
+    "force-no-reason: the refusal does not say a reason is what is missing"
+  assert_contains "$(cat "$case_dir/stderr")" "--force" \
+    "force-no-reason: the refusal does not name how to supply it"
+  [ -f "$case_dir/state/task-x1.meta" ] \
+    || fail "force-no-reason: teardown removed task state despite refusing"
+  [ -d "$case_dir/wt" ] || fail "force-no-reason: teardown removed the worktree despite refusing"
+  [ -z "$(bridge_records "$case_dir")" ] \
+    || fail "force-no-reason: a refused teardown still wrote to the Bridge"
+  pass "--force with no reason refuses before anything is removed"
+}
+
+test_ordinary_teardown_still_records_resolved() {
+  local case_dir records
+  case_dir=$(make_case ordinary-resolved-record)
+  write_meta "$case_dir" local-only ship
+  wt_commit "$case_dir" "work that landed"
+  add_fork_with_pushed_branch "$case_dir"
+
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" \
+    || fail "ordinary-resolved-record: teardown of landed work failed: $(cat "$case_dir/stderr")"
+
+  records=$(bridge_records "$case_dir")
+  case "$records" in
+    *'"state":"resolved"'*) : ;;
+    *) fail "ordinary-resolved-record: a landed cleanup stopped recording resolved: $records" ;;
+  esac
+  case "$records" in
+    *'"phase":"cleaned"'*) : ;;
+    *) fail "ordinary-resolved-record: a landed cleanup did not record phase=cleaned: $records" ;;
+  esac
+  FM_HOME="$case_dir" FM_DATA_OVERRIDE="$case_dir/data" \
+    "$ROOT/bin/fm-bridge-render.sh" --state --id task-x1 | python3 -c '
+import json, sys
+item = json.load(sys.stdin)["items"].get("task-x1")
+if item is None or item["state"] != "resolved":
+    sys.exit("a landed cleanup no longer folds to resolved: %r" % (item and item["state"]))
+if item["outcome"] != "landed":
+    sys.exit("a landed cleanup ended as %r" % item["outcome"])
+' || fail "ordinary-resolved-record: the landed cleanup does not read as resolved"
+  pass "an ordinary cleanup still records the row resolved"
 }
 
 test_teardown_missing_busy_sidecar_completes() {
@@ -1252,7 +1555,7 @@ test_teardown_missing_busy_sidecar_completes() {
   rm -f "$case_dir/state/task-x1.busy-gen"
 
   set +e
-  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr"
+  run_teardown "$case_dir" --force "test: captain approved discarding this work" > "$case_dir/stdout" 2> "$case_dir/stderr"
   rc=$?
   set -e
 
@@ -1291,7 +1594,7 @@ SH
   marker="$case_dir/state/.herdr-escalated-default_wG_pQ"
   : > "$marker"
 
-  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" \
+  run_teardown "$case_dir" --force "test: captain approved discarding this work" > "$case_dir/stdout" 2> "$case_dir/stderr" \
     || fail "herdr-marker-cleanup: forced teardown failed: $(cat "$case_dir/stderr")"
   [ ! -e "$marker" ] || fail "herdr-marker-cleanup: teardown left the pane's escalation marker behind"
   pass "herdr teardown removes pane-owned escalation dedupe state"
@@ -1398,7 +1701,7 @@ SH
 
   rc=0
   FM_FAKE_HERDR_LOG="$log" FM_FAKE_HERDR_CLOSED="$closed" \
-    run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+    run_teardown "$case_dir" --force "test: captain approved discarding this work" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
   if [ "$rc" -eq 0 ]; then
     : > "$release"; wait "$holder_pid" 2>/dev/null || true
     fail "herdr-orphan-refusal: teardown reported success while the exact pane still existed under lock contention"
@@ -1425,7 +1728,7 @@ SH
   : > "$release"
   wait "$holder_pid" 2>/dev/null || true
   FM_FAKE_HERDR_LOG="$log" FM_FAKE_HERDR_CLOSED="$closed" FM_BACKEND_HERDR_IDLE_SHELL_PROOF_POLLS=1 \
-    run_teardown "$case_dir" --force > "$case_dir/stdout2" 2> "$case_dir/stderr2" \
+    run_teardown "$case_dir" --force "test: captain approved discarding this work" > "$case_dir/stdout2" 2> "$case_dir/stderr2" \
     || fail "herdr-orphan-refusal: the retry after lock release failed: $(cat "$case_dir/stderr2")"
   [ -e "$closed" ] || fail "herdr-orphan-refusal: the retry never closed the pane under the lock"
   [ -s "$thlog" ] || fail "herdr-orphan-refusal: the successful retry never returned the isolated copy"
@@ -1447,7 +1750,7 @@ test_herdr_flat_teardown_refuses_records_on_unparseable_presence() {
   rc=0
   FM_FAKE_HERDR_LOG="$log" FM_FAKE_HERDR_CLOSED="$closed" FM_FAKE_HERDR_PANE_GET_GARBAGE=1 \
     FM_BACKEND_HERDR_IDLE_SHELL_PROOF_POLLS=1 \
-    run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+    run_teardown "$case_dir" --force "test: captain approved discarding this work" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
   [ "$rc" -ne 0 ] \
     || fail "herdr-garbage-presence: teardown erased records on an unparseable pane presence"
   [ -e "$case_dir/state/task-x1.meta" ] \
@@ -1500,7 +1803,8 @@ SH
     FM_FAKE_HERDR_LOG="$log" FM_FAKE_HERDR_CLOSED="$closed" \
     FM_FAKE_HERDR_SESSION_LIST_GARBAGE="$([ "$mode" = unresolvable-lock ] && printf 1 || printf 0)" \
     PATH="$case_dir/fakebin:$PATH" \
-    "$teardown_bin" task-x1 --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+    "$teardown_bin" task-x1 --force "test: captain approved discarding this work" \
+    > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
   [ "$rc" -ne 0 ] || fail "herdr-preflight-$mode: teardown continued without its required preflight"
   assert_grep "nothing was changed" "$case_dir/stderr" \
     "herdr-preflight-$mode: the retryable pre-return refusal was not explained visibly"
@@ -1592,7 +1896,7 @@ SH
   rc=0
   FM_FAKE_HERDR_LOG="$log" FM_FAKE_HERDR_CLOSED="$closed" \
     FM_FAKE_HERDR_SESSION_LIST_GARBAGE=1 \
-    run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+    run_teardown "$case_dir" --force "test: captain approved discarding this work" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
   [ "$rc" -ne 0 ] || fail "herdr-child-preflight: teardown continued through an unresolvable child lock"
   [ -e "$case_dir/state/task-x1.meta" ] || fail "herdr-child-preflight: refusal erased the parent record"
   [ -e "$home/state/child-herdr.meta" ] || fail "herdr-child-preflight: refusal erased the child record"
@@ -1614,7 +1918,7 @@ test_forced_secondmate_herdr_child_retains_records_when_close_unconfirmed() {
   log="$case_dir/herdr.log"; closed="$case_dir/closed"; : > "$log"
   rc=0
   FM_FAKE_HERDR_LOG="$log" FM_FAKE_HERDR_CLOSED="$closed" FM_FAKE_HERDR_PRESENCE_UNKNOWN=1 \
-    run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+    run_teardown "$case_dir" --force "test: captain approved discarding this work" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
   [ "$rc" -ne 0 ] || fail "herdr-child-unconfirmed-close: teardown erased records after an ambiguous close"
   [ -e "$closed" ] || fail "herdr-child-unconfirmed-close: fixture did not attempt the child close"
   [ -e "$home/state/child-herdr.meta" ] || fail "herdr-child-unconfirmed-close: ambiguous close erased child metadata"
@@ -1686,7 +1990,7 @@ test_forced_teardown_retains_nested_secondmate_home_when_grandchild_close_unconf
   log="$case_dir/herdr.log"; closed="$case_dir/closed"; : > "$log"
   rc=0
   FM_FAKE_HERDR_LOG="$log" FM_FAKE_HERDR_CLOSED="$closed" \
-    run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+    run_teardown "$case_dir" --force "test: captain approved discarding this work" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
   [ "$rc" -ne 0 ] \
     || fail "herdr-grandchild-unconfirmed-close: teardown erased records after an ambiguous grandchild close"
   [ -e "$closed" ] \
@@ -1786,7 +2090,7 @@ test_herdr_projection_teardown_retires_journal_only_after_confirmed_close() {
   log="$case_dir/herdr.log"; closed="$case_dir/closed"; restored="$case_dir/restored"; : > "$log"
 
   FM_FAKE_HERDR_LOG="$log" FM_FAKE_HERDR_CLOSED="$closed" FM_FAKE_HERDR_RESTORED="$restored" \
-    run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" \
+    run_teardown "$case_dir" --force "test: captain approved discarding this work" > "$case_dir/stdout" 2> "$case_dir/stderr" \
     || fail "herdr-projection-confirmed-close: forced teardown failed"
   [ ! -e "$case_dir/state/task-x1.herdr-presentation" ] \
     || fail "confirmed exact-pane close did not retire the presentation journal"
@@ -1806,7 +2110,7 @@ test_herdr_projection_teardown_retains_journal_when_close_unconfirmed() {
 
   local rc=0
   FM_FAKE_HERDR_LOG="$log" FM_FAKE_HERDR_CLOSED="$closed" FM_FAKE_HERDR_RESTORED="$restored" FM_FAKE_HERDR_PRESENCE_UNKNOWN=1 \
-    run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+    run_teardown "$case_dir" --force "test: captain approved discarding this work" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
   [ "$rc" -ne 0 ] \
     || fail "herdr-projection-unconfirmed-close: teardown reported success after an unknown post-close presence read"
   [ -e "$closed" ] \
@@ -1832,6 +2136,14 @@ test_local_only_merged_to_local_main_allows
 test_no_mistakes_origin_remote_allows
 test_no_mistakes_truly_unpushed_refuses
 test_local_only_force_overrides_unpushed
+test_forced_teardown_records_discarded_not_resolved
+test_forced_teardown_of_landed_work_records_landed
+test_forced_teardown_of_dirty_worktree_records_discarded
+test_gate_and_record_agree_about_the_same_worktree
+test_teardown_without_a_landed_test_records_unknown
+test_forced_teardown_records_the_reason_it_was_authorized
+test_force_without_a_reason_refuses_before_removing_anything
+test_ordinary_teardown_still_records_resolved
 test_teardown_missing_busy_sidecar_completes
 test_herdr_teardown_clears_escalation_marker
 test_herdr_flat_teardown_refuses_orphaning_records_then_retry_completes

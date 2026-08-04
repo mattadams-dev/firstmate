@@ -81,4 +81,15 @@ if ! caller_has_merge_method "$@"; then
   merge_args=(--squash)
 fi
 
-gh-axi pr merge "$PR_NUMBER" --repo "$PR_OWNER/$PR_REPO" "${merge_args[@]+"${merge_args[@]}"}" "$@"
+gh-axi pr merge "$PR_NUMBER" --repo "$PR_OWNER/$PR_REPO" "${merge_args[@]+"${merge_args[@]}"}" "$@" || exit $?
+
+# Bridge: a merge answers both axes at once, and says so on both. Nobody owes
+# anything further (state), and the work ended by being carried through
+# (outcome) - a later cleanup of the working copy cannot un-land it, so the
+# record of how it ended is made here, where it happened. The PR URL is where
+# the outcome lives. Recorded only after gh-axi actually reported success, so
+# the board can never claim a merge that did not happen. Best-effort append: it
+# runs after the merge already landed and cannot change this script's result.
+FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-bridge.sh" task --quiet \
+  --id "$ID" --phase merged --state resolved --outcome landed --pointer "$URL" \
+  >/dev/null 2>&1 || true

@@ -107,6 +107,7 @@ POLL=${FM_POLL:-15}                   # seconds between cycles
 HEARTBEAT=${FM_HEARTBEAT:-600}        # base seconds between heartbeat scans
 HEARTBEAT_MAX=${FM_HEARTBEAT_MAX:-7200}  # heartbeat backoff cap
 CHECK_INTERVAL=${FM_CHECK_INTERVAL:-300}  # seconds between *.check.sh sweeps
+BRIDGE_INTERVAL=${FM_BRIDGE_INTERVAL:-180} # seconds between Bridge board ticks
 CHECK_TIMEOUT=${FM_CHECK_TIMEOUT:-30}     # seconds allowed per *.check.sh
 SIGNAL_GRACE=${FM_SIGNAL_GRACE:-30}   # seconds to linger after a signal so trailing
                                       # signals (a status write, then the same turn's
@@ -775,6 +776,18 @@ while :; do
   # Liveness beacon for fm-guard.sh: a fresh mtime here means a watcher is
   # alive. Supervision scripts warn when this goes stale with tasks in flight.
   touch "$STATE/.last-watcher-beat"
+
+  # Bridge board: a deterministic script, zero model involvement, owned by this
+  # cycle so board freshness IS supervision freshness. It runs BEFORE the check
+  # and signal scans because wake() exits the cycle - placed after them, a
+  # chatty fleet would starve the captain's only surface exactly when the most
+  # is happening. When the ledger has not changed the tick only restamps the
+  # freshness line, so the common case is nearly free. Never fatal: a board that
+  # cannot render must not take down supervision.
+  if [ "$(age_of "$STATE/.last-bridge")" -ge "$BRIDGE_INTERVAL" ]; then
+    FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-bridge-render.sh" --tick >/dev/null 2>&1 || true
+    touch "$STATE/.last-bridge"
+  fi
 
   # Parent-owned secondmate pending-reply reconciliation: resolve correlated
   # parent reports, observe backend busy/idle turn completion, send one recovery

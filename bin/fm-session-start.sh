@@ -42,6 +42,11 @@
 #                       every state/*.meta, a bounded state/*.status tail,
 #                       state/.afk, and a cheap per-task endpoint-liveness read:
 #                       read-only, always runs.
+#   5b. bridge        - refreshes the captain's board (fm-bridge-render.sh
+#                       --tick) so it is current the moment a session opens
+#                       instead of up to a supervision tick behind, and prints
+#                       its path. Rendering writes, so a lock-refused session
+#                       only reports the path. Never fatal (docs/bridge.md).
 #   6. closing reminder - prints the context-specific watcher next step; this
 #                       script points back to the emitted harness supervision
 #                       block and deliberately never arms the watcher itself.
@@ -411,6 +416,28 @@ if fm_pf_relay_active "$FM_HOME" \
     printf '%s/bin/fm-public-followup.sh consume, then deliver a ready one with\n' "$FM_ROOT"
     printf '%s/bin/fm-public-followup.sh deliver <id>. Load fmx-respond for the procedure.\n' "$FM_ROOT"
   fi
+fi
+
+# --- 5b. the captain's board -------------------------------------------
+# Rendered here so the board is current the moment a session opens, rather than
+# waiting up to a full supervision tick. Rendering writes, so a lock-refused
+# session only reports the path. Never fatal: a board that cannot render must
+# not stop a session from starting.
+section "BRIDGE"
+BRIDGE_BOARD=$(FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-bridge-render.sh" --path 2>/dev/null || true)
+if [ -z "$BRIDGE_BOARD" ]; then
+  printf 'The captain board could not be located; check bin/fm-bridge-render.sh.\n'
+elif [ "$READ_ONLY" -eq 1 ]; then
+  printf 'Board (not refreshed - this session is read-only): %s\n' "$BRIDGE_BOARD"
+elif FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-bridge-render.sh" --tick >/dev/null 2>&1; then
+  printf 'Board refreshed: %s\n' "$BRIDGE_BOARD"
+  printf 'It is generated from %s and is never hand-edited.\n' \
+    "$(FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-bridge-render.sh" --ledger-path 2>/dev/null || echo 'the ledger')"
+  printf 'Write captain-relevant facts there as they happen with bin/fm-bridge.sh;\n'
+  printf 'anything that reaches the captain only through this terminal is a delivery failure.\n'
+else
+  printf 'Board could not be refreshed: %s\n' "$BRIDGE_BOARD"
+  printf 'Treat it as stale until bin/fm-bridge-render.sh --tick -v explains why.\n'
 fi
 
 # --- 6. closing reminder -----------------------------------------------

@@ -1429,7 +1429,7 @@ EOF
     fail "teardown allowed a secondmate with in-flight child work"
   fi
   PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TMUX_LOG="$log" FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/force-teardown-fake/pane.txt" \
-    "$ROOT/bin/fm-teardown.sh" domain --force >/dev/null 2>/dev/null \
+    "$ROOT/bin/fm-teardown.sh" domain --force "test: captain approved discarding this work" >/dev/null 2>/dev/null \
     || fail "force teardown failed to discard child work"
   [ ! -d "$subhome" ] || fail "force teardown did not remove the retired secondmate home"
   [ ! -d "$childwt" ] || fail "force teardown did not remove child worktree"
@@ -1437,7 +1437,47 @@ EOF
   grep -F -- '- domain ' "$home/data/secondmates.md" >/dev/null && fail "force teardown did not remove secondmate registry route"
   grep -F 'kill-window -t =firstmate:=fm-child' "$log" >/dev/null || fail "force teardown did not kill child window"
   grep -F 'kill-window -t =firstmate:=fm-domain' "$log" >/dev/null || fail "force teardown did not kill parent window"
-  pass "secondmate force teardown discards child work"
+  # A persistent secondmate is not a work item. fm-spawn.sh never gives one a
+  # fleet-strip row, so retiring one must not invent a row that only ever
+  # existed because it was torn down.
+  if [ -f "$home/data/bridge/ledger.jsonl" ] \
+    && grep -F '"id":"domain"' "$home/data/bridge/ledger.jsonl" >/dev/null; then
+    fail "secondmate teardown created a Bridge fleet-strip row for a home that never had one"
+  fi
+  # It is still the most destructive override in the script, so the reason that
+  # authorized it has to land somewhere durable - as an event, which is not a
+  # work item and never becomes a row.
+  [ -f "$home/data/bridge/ledger.jsonl" ] \
+    || fail "forced secondmate retirement recorded its override nowhere"
+  grep -F '"kind":"event"' "$home/data/bridge/ledger.jsonl" >/dev/null \
+    || fail "forced secondmate retirement did not record the override as an event"
+  grep -F 'test: captain approved discarding this work' "$home/data/bridge/ledger.jsonl" >/dev/null \
+    || fail "forced secondmate retirement did not record the reason that authorized it"
+  grep -F 'domain' "$home/data/bridge/ledger.jsonl" >/dev/null \
+    || fail "forced secondmate retirement did not name the secondmate it discarded"
+  grep -F '"kind":"task"' "$home/data/bridge/ledger.jsonl" >/dev/null \
+    && fail "forced secondmate retirement wrote a task row for a persistent secondmate"
+  # Recorded is not the same as readable. This is the most destructive override
+  # in the script, so its reason has to reach the board the captain reads, not
+  # only the ledger and the state document behind it.
+  if command -v python3 >/dev/null 2>&1; then
+    FM_HOME="$home" "$ROOT/bin/fm-bridge-render.sh" --html > "$TMP_ROOT/secondmate-board.html"
+    python3 - "$TMP_ROOT/secondmate-board.html" <<'PY' \
+      || fail "forced secondmate retirement: the reason never reaches the board"
+import re, sys
+html = open(sys.argv[1]).read()
+visible = re.sub(r"<script.*?</script>", "", html, flags=re.S)
+for fragment in ("secondmate domain retired under --force",
+                 "in-flight-work check skipped",
+                 "test: captain approved discarding this work"):
+    if fragment not in visible:
+        sys.exit("the board never shows %r" % fragment)
+if re.search(r'<tr id="item-domain"', visible):
+    sys.exit("the retirement rendered as a fleet-strip row")
+sys.exit(0)
+PY
+  fi
+  pass "secondmate force teardown discards child work, shows its provenance on the board, and creates no fleet-strip row"
 }
 
 test_secondmate_force_teardown_refuses_child_quarantine_symlink() {
@@ -1482,7 +1522,7 @@ EOF
   set +e
   PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TMUX_LOG="$log" \
     FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/force-quarantine-fake/pane.txt" \
-    "$ROOT/bin/fm-teardown.sh" domain --force >/dev/null 2> "$err"
+    "$ROOT/bin/fm-teardown.sh" domain --force "test: captain approved discarding this work" >/dev/null 2> "$err"
   rc=$?
   set -e
   [ "$rc" -ne 0 ] || fail "force teardown accepted a child quarantine-directory symlink"
@@ -1571,7 +1611,7 @@ SH
   set +e
   PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TMUX_LOG="$log" FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/force-lock-child-fake/pane.txt" \
     FM_STALE_WORKTREE_LOCK_RETRY_WAIT_SECS=0 FM_STALE_WORKTREE_LOCK_AGE_SECS=1 \
-    "$ROOT/bin/fm-teardown.sh" domain --force >/dev/null 2>"$err"
+    "$ROOT/bin/fm-teardown.sh" domain --force "test: captain approved discarding this work" >/dev/null 2>"$err"
   rc=$?
   set -e
 
@@ -1610,7 +1650,7 @@ EOF
     fakebin=$(make_fake_tmux "$TMP_ROOT/symlink-inside-teardown-fake-$opdir")
     log="$TMP_ROOT/symlink-inside-teardown-fake-$opdir/tmux.log"
     PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TMUX_LOG="$log" FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/symlink-inside-teardown-fake-$opdir/pane.txt" \
-      "$ROOT/bin/fm-teardown.sh" domain --force >/dev/null 2>"$err" \
+      "$ROOT/bin/fm-teardown.sh" domain --force "test: captain approved discarding this work" >/dev/null 2>"$err" \
       || fail "force teardown refused $opdir symlinked inside the secondmate home"
     [ ! -e "$subhome" ] || fail "force teardown did not remove subhome with inside $opdir symlink"
     [ ! -e "$home/state/domain.meta" ] || fail "force teardown did not clear parent meta for inside $opdir symlink"
@@ -1643,7 +1683,7 @@ EOF
   fakebin=$(make_fake_tmux "$TMP_ROOT/symlink-state-teardown-fake")
   log="$TMP_ROOT/symlink-state-teardown-fake/tmux.log"
   if PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TMUX_LOG="$log" FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/symlink-state-teardown-fake/pane.txt" \
-    "$ROOT/bin/fm-teardown.sh" domain --force >/dev/null 2>"$err"; then
+    "$ROOT/bin/fm-teardown.sh" domain --force "test: captain approved discarding this work" >/dev/null 2>"$err"; then
     fail "force teardown accepted a symlinked secondmate state directory"
   fi
   [ -d "$subhome" ] || fail "force teardown removed subhome after symlinked state refusal"
@@ -1836,7 +1876,7 @@ EOF
   fakebin=$(make_fake_tmux "$TMP_ROOT/prevalidate-teardown-fake")
   log="$TMP_ROOT/prevalidate-teardown-fake/tmux.log"
   if PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TMUX_LOG="$log" FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/prevalidate-teardown-fake/pane.txt" \
-    "$ROOT/bin/fm-teardown.sh" domain --force >/dev/null 2>"$err"; then
+    "$ROOT/bin/fm-teardown.sh" domain --force "test: captain approved discarding this work" >/dev/null 2>"$err"; then
     fail "force teardown discarded child work before validating subhome"
   fi
   [ -d "$subhome" ] || fail "force teardown removed unmarked subhome after refusal"
@@ -1881,7 +1921,7 @@ EOF
   fakebin=$(make_fake_tmux "$TMP_ROOT/child-active-descendant-fake")
   log="$TMP_ROOT/child-active-descendant-fake/tmux.log"
   if PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TMUX_LOG="$log" FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/child-active-descendant-fake/pane.txt" \
-    "$ROOT/bin/fm-teardown.sh" domain --force >/dev/null 2>"$err"; then
+    "$ROOT/bin/fm-teardown.sh" domain --force "test: captain approved discarding this work" >/dev/null 2>"$err"; then
     fail "force teardown removed a child worktree inside active FM_HOME"
   fi
   [ -d "$home/data" ] || fail "force teardown removed active home data"
@@ -1932,7 +1972,7 @@ EOF
   fakebin=$(make_fake_tmux "$TMP_ROOT/child-repo-descendant-fake")
   log="$TMP_ROOT/child-repo-descendant-fake/tmux.log"
   if PATH="$fakebin:$PATH" FM_ROOT_OVERRIDE="$fakeroot" FM_HOME="$home" FM_FAKE_TMUX_LOG="$log" FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/child-repo-descendant-fake/pane.txt" \
-    "$ROOT/bin/fm-teardown.sh" domain --force >/dev/null 2>"$err"; then
+    "$ROOT/bin/fm-teardown.sh" domain --force "test: captain approved discarding this work" >/dev/null 2>"$err"; then
     fail "force teardown removed a child worktree inside FM_ROOT"
   fi
   [ -d "$childwt" ] || fail "force teardown removed repo descendant worktree"
@@ -1977,7 +2017,7 @@ EOF
   fakebin=$(make_fake_tmux "$TMP_ROOT/unregistered-child-fake")
   log="$TMP_ROOT/unregistered-child-fake/tmux.log"
   if PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TMUX_LOG="$log" FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/unregistered-child-fake/pane.txt" \
-    "$ROOT/bin/fm-teardown.sh" domain --force >/dev/null 2>"$err"; then
+    "$ROOT/bin/fm-teardown.sh" domain --force "test: captain approved discarding this work" >/dev/null 2>"$err"; then
     fail "force teardown removed an unregistered child worktree"
   fi
   [ -d "$childwt" ] || fail "force teardown removed unregistered child worktree"

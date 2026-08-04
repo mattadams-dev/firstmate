@@ -1728,3 +1728,14 @@ if [ "$KIND" = secondmate ]; then
 fi
 
 echo "spawned $ID harness=$HARNESS kind=$KIND mode=$MODE yolo=$YOLO window=$META_WINDOW worktree=$WT"
+
+# Bridge: the fleet strip's rows are born here, at the moment work starts, not
+# assembled later by anyone reading state files. Best-effort by design - a board
+# append must never be able to fail a spawn. A persistent secondmate is not a
+# work item, so it never becomes a strip row.
+if [ "$KIND" != secondmate ]; then
+  FM_HOME="$FM_HOME" "$FM_ROOT/bin/fm-bridge.sh" task --quiet \
+    --id "$ID" --project "$(basename "$PROJ_ABS")" \
+    --phase dispatched --state fm-handling --owner "$ID" \
+    --title "$ID" >/dev/null 2>&1 || true
+fi

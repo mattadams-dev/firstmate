@@ -179,6 +179,6 @@ Removing a leased home releases its durable treehouse lease via `treehouse retur
 A plain-clone home with no pool slot is simply removed.
 If `treehouse return` fails for a leased home, teardown stops with state intact rather than raw-removing the directory and hiding a held lease.
 
-With `--force`, teardown is the explicit discard path.
+With `--force <reason>`, teardown is the explicit discard path, and the one-line reason is required.
 It kills child windows, discards child work and state inside the secondmate home, removes the route, releases the lease, and removes the retired secondmate home.
-Never use `--force` unless the captain explicitly said to discard the work.
+Never use `--force` unless the captain explicitly said to discard the work, and pass their reason as the argument after it.
