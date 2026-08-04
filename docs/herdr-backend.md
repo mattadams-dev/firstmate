@@ -215,6 +215,7 @@ A working Pi, pending middle row, missing identity, incomplete separator pair, o
 A lone separator below the matched row normally clears that match as stale.
 The one exemption covers a rule-framed composer's own closing rule, which Claude draws directly beneath its input row, and it applies only to the bare-glyph shape when native identity reports a known non-Pi agent.
 A Pi, missing, or unreadable identity, a bordered row, or any gap between the match and the separator keeps the refusal.
+[`verification/supervision.md`](verification/supervision.md#away-mode-composer-read-on-a-live-claude-on-herdr-pane) owns the live capture behind that exemption and the non-ASCII composer padding below.
 
 ANSI capture preserves de-emphasized placeholder style.
 `bin/fm-composer-lib.sh` is the fleet-wide owner that strips dim or faint runs and dark truecolor placeholders while retaining bright typed input.

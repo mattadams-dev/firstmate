@@ -22,22 +22,6 @@ It lists channel directives, one per non-empty, non-comment line, and every list
   Whitespace around `<cmd>` is ignored, so `command: <cmd>` and `command:<cmd>` are the same directive and reach the same branch.
   A directive that is empty or nothing but whitespace runs nothing and logs that there was nothing to run.
 
-## Summary format
-
-The alarm's summary is one line, written as the marker's first line and handed verbatim to every channel:
-
-```
-FMWEDGE/1 severity=<LOW|MEDIUM|HIGH|UNKNOWN> count=<n> kinds=<a,b> age=<n>s: <prose>; see <marker>
-```
-
-Severity is assessed from the buffered escalations at the moment the alarm fires, where their content is known, and is never re-derived by a channel.
-It is the strongest buffered item: a held captain decision, a blocked lane, or a failure is `HIGH`, work ready for review is `MEDIUM`, and parked-lane rechecks and idle flags are `LOW`.
-An item the classifier cannot place counts as `MEDIUM` and appears in `kinds` as `unclassified`, so the alert never reports a calm it did not assess.
-A buffer that cannot be read reports `severity=UNKNOWN count=0`.
-
-The structured tokens lead so a consumer that keys a standing alert on the message text sees `severity` and `kinds` before any truncation.
-`count` and `age` are numeric by design: a consumer that collapses digit runs when identifying a standing event will not treat their churn as a new alert, while a change of severity or kind does surface one.
-
 An absent `config/wedge-alarm` behaves as `auto`, which is default-on on macOS.
 This is deliberate because the alarm fires only after a genuine max-defer wedge and is rate-limited to at most once per max-defer window.
 
@@ -47,6 +31,22 @@ Every invocation is process-group bounded by `FM_WEDGE_ALARM_TIMEOUT_SECS`, whic
 On timeout or daemon shutdown, the notifier process group is terminated and the next configured channel may run.
 AppleScript receives the summary as an argv item rather than interpolated source, so summary text cannot alter the script.
 See [`examples/wedge-alarm`](examples/wedge-alarm) for a copyable config.
+
+## Summary format
+
+The alarm's summary is one line, written as the marker's first line and handed verbatim to every channel:
+
+```
+FMWEDGE/1 severity=<LOW|MEDIUM|HIGH|UNKNOWN> count=<n> kinds=<a,b> age=<n>s: <prose>; see <marker>
+```
+
+Severity is assessed from the buffered escalations at the moment the alarm fires, where their content is known, and is never re-derived by a channel.
+It is the strongest buffered item: a held captain decision, a blocked lane, or a failure is `HIGH`, and parked-lane rechecks and idle flags are `LOW`.
+Every other item, including work ready for review and an item the classifier cannot place, is `MEDIUM`; an unplaceable item appears in `kinds` as `unclassified`, so the alert never reports a calm it did not assess.
+A buffer that holds no readable item reports `severity=UNKNOWN count=0 kinds=none`.
+
+The structured tokens lead so a consumer that keys a standing alert on the message text sees `severity` and `kinds` before any truncation.
+`count` and `age` are numeric by design: a consumer that collapses digit runs when identifying a standing event will not treat their churn as a new alert, while a change of severity or kind does surface one.
 
 ## Test safety
 
