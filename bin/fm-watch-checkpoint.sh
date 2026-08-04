@@ -92,7 +92,11 @@ if grep -E '^(signal:|stale:|check:|heartbeat($|:))' "$OUT" >/dev/null 2>&1; the
   exit 0
 fi
 
-if grep -E '^watcher: already running' "$OUT" "$ERR" >/dev/null 2>&1; then
+# Two shapes mean the same thing for a checkpoint: it does not own this home's
+# watcher. Either a verified-live peer holds the singleton, or the singleton
+# could not be decided at all and nothing started. Both are a failed checkpoint,
+# never a quiet success.
+if grep -E '^watcher: (already running|.*not starting a second supervisor)' "$OUT" "$ERR" >/dev/null 2>&1; then
   [ ! -s "$OUT" ] || cat "$OUT"
   [ ! -s "$ERR" ] || cat "$ERR" >&2
   echo "checkpoint: watcher is already running outside this foreground checkpoint" >&2
