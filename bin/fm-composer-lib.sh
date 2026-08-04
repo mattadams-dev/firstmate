@@ -160,6 +160,50 @@ fm_composer_strip_ghost() {
   '
 }
 
+# UNICODE BLANKS are the third half of this owner (task fm-alarm-chain-reachability):
+# a harness pads its otherwise-empty composer with a NON-ASCII blank, so the
+# ASCII-only `[[:space:]]` trims every adapter used left that padding in place and
+# the row read as real typed content. Verified live on 2026-08-04: Claude Code
+# 2.x on herdr renders its idle composer row as U+276F followed by a NO-BREAK
+# SPACE (bytes `342 235 257 302 240`), which classified `pending` and made the
+# away-mode injector defer on a healthy idle pane (docs/verification/supervision.md
+# "Away-mode composer read on a live claude-on-herdr pane").
+#
+# The set below is the Unicode space-separator category (Zs) plus the line and
+# paragraph separators (Zl/Zp), the zero-width space, and the byte-order mark -
+# characters that are whitespace or invisible BY DEFINITION, never glyphs a human
+# typed. That definitional boundary is what makes widening the trim safe in the
+# direction that matters: it can only ever collapse a composer holding nothing but
+# blanks, and appending to such a composer is harmless, while a composer holding
+# any real glyph, a dead-shell prompt, or an unreadable pane is untouched. The
+# zero-width JOINER (U+200D) and non-joiner (U+200C) are deliberately EXCLUDED:
+# they occur inside real typed text and dropping them could make real input
+# disappear, which is the direction that would type over a human.
+#
+# Deliberately an alternation of whole byte sequences, matching this file's
+# existing locale lesson (see FM_BACKEND_HERDR_BARE_PROMPT_RE's note in
+# bin/backends/herdr.sh): under LC_ALL=C a bracket expression matches individual
+# BYTES, so `[\xa0\x{2000}]` would decompose into shared UTF-8 lead bytes and
+# spuriously match unrelated glyphs. The one bracket used here, `[\x80-\x8b]`, is
+# an INTENTIONAL byte range in the third position of a fixed 3-byte prefix
+# (U+2000..U+200B) and is correct precisely because it is byte-scoped.
+FM_COMPOSER_BLANK_ALT=$'[ \t\n\r\v\f]|\xc2\xa0|\xe1\x9a\x80|\xe2\x80[\x80-\x8b]|\xe2\x80[\xa8\xa9\xaf]|\xe2\x81\x9f|\xe3\x80\x80|\xef\xbb\xbf'
+
+# fm_composer_trim_blanks: the ONE fleet-wide trim for composer content. Drops
+# leading and trailing runs of ASCII whitespace AND the Unicode blanks above,
+# across the WHOLE value including embedded newlines (RS='\0' makes awk read one
+# record, so a multi-row composer whose rows are all blank trims to the empty
+# string rather than surviving as a run of newlines). Takes the text as an
+# argument, matching fm_composer_classify_content's argument-passing style.
+fm_composer_trim_blanks() {  # <text> -> text with leading/trailing blanks removed
+  printf '%s' "$1" | LC_ALL=C awk -v RS='\0' -v b="$FM_COMPOSER_BLANK_ALT" '
+    { s = $0
+      sub("^(" b ")+", "", s)
+      sub("(" b ")+$", "", s)
+      printf "%s", s }
+  '
+}
+
 # fm_composer_classify_content: the single shared composer-content verdict.
 #   <bordered> 1 when <content> came from a genuine agent-composer container (a
 #              bordered composer box, or a structurally-identified bare AGENT
@@ -183,6 +227,12 @@ fm_composer_idle_matches() {
 fm_composer_classify_content() {  # <bordered> <content> [idle_re] [idle_case] [plain_content]
   local bordered=$1 content=$2 idle_re=${3:-} idle_case=${4:-sensitive} plain_content
   plain_content=${5:-$content}
+  # Re-trim with the Unicode-aware owner. Adapters pre-trim with ASCII-only shell
+  # patterns, which leave a harness's non-ASCII composer padding (Claude's
+  # U+00A0) attached to the prompt glyph; normalising here means every adapter
+  # gets the fix from the one owner rather than each repeating the byte list.
+  content=$(fm_composer_trim_blanks "$content")
+  plain_content=$(fm_composer_trim_blanks "$plain_content")
   if [ "$bordered" != 1 ] && [ -z "$content" ] && [ -n "$plain_content" ]; then
     case "$plain_content" in
       '❯'|'›') printf 'empty'; return 0 ;;
@@ -206,13 +256,15 @@ fm_composer_classify_content() {  # <bordered> <content> [idle_re] [idle_case] [
   if fm_composer_idle_matches "$content" "$idle_re" "$idle_case"; then
     printf 'empty'; return 0
   fi
-  # Strip a leading prompt glyph, then re-judge the remainder.
+  # Strip a leading prompt glyph, then re-judge the remainder. The single-glyph
+  # branch also covers a glyph followed by a NON-ASCII blank (Claude's
+  # "❯<U+00A0>"), because the two-character branch's literal space matches ASCII
+  # only; the Unicode-aware re-trim below removes whatever blank followed.
   case "$content" in
     '❯ '*|'› '*|'> '*|'$ '*|'% '*|'# '*) content=${content#??} ;;
     '❯'*|'›'*|'>'*|'$'*|'%'*|'#'*) content=${content#?} ;;
   esac
-  content="${content#"${content%%[![:space:]]*}"}"
-  content="${content%"${content##*[![:space:]]}"}"
+  content=$(fm_composer_trim_blanks "$content")
   [ -n "$content" ] || { printf 'empty'; return 0; }
   # Known idle placeholder (matched again after the leading glyph was stripped,
   # e.g. "❯ Type a message...").

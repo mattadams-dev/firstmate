@@ -2590,7 +2590,47 @@ EOF
        && [ "$FM_BACKEND_HERDR_PI_LAST_SEPARATOR_LINE" -gt "$generic_line" ]; then
     # A lower unmatched separator proves the generic row is stale, but does
     # not provide the complete Pi composer structure required for injection.
-    found=0
+    #
+    # EXCEPT when that separator is a RULE-FRAMED composer's OWN closing rule.
+    # Claude 2.x draws its composer as a horizontal `─` rule, the bare `❯` input
+    # row, then a second `─` rule, with no side borders. That closing rule
+    # satisfies the Pi separator shape, and when the opening rule carries a label
+    # (`── firstmate ──`, the shape the primary firstmate pane always renders) no
+    # separator PAIR completes - so this branch read a live composer's own frame
+    # as proof that the composer above it was stale scrollback. Every healthy
+    # idle Claude pane then classified `unknown` and the away-mode injector
+    # deferred forever (docs/verification/supervision.md "Away-mode composer read
+    # on a live claude-on-herdr pane"). A 20-line capture window makes that
+    # near-certain, because the composer frame is always in the last few rows.
+    #
+    # The exemption is the conjunction of three narrow conditions, so every
+    # refusal this branch was built for is preserved:
+    #   1. the separator is IMMEDIATELY below the matched row, so it frames that
+    #      row rather than opening a region below it;
+    #   2. the match is the BARE shape. A bordered box closes with corner glyphs
+    #      (`╰───╯`), never a plain rule, so a plain rule under a bordered row is
+    #      always foreign and still clears the match;
+    #   3. Herdr's native identity reports a known NON-Pi agent. Pi is the only
+    #      harness whose composer is delimited by these rules, so only a non-Pi
+    #      identity can prove the rule is a frame rather than a Pi opening. A
+    #      missing, unreadable, or Pi identity keeps the refusal.
+    # A pane with no composer row never reaches here (found is already 0), a
+    # dead-shell prompt still fails the bare-glyph structural match, and a Claude
+    # composer holding real multi-row input still clears the match - which defers
+    # exactly as `pending` would. Only the single-row EMPTY composer needs to
+    # read through, and that is the one case this restores.
+    if [ "$shape" = bare ] && [ "$FM_BACKEND_HERDR_PI_LAST_SEPARATOR_LINE" -eq "$((generic_line + 1))" ]; then
+      identity=$(fm_backend_herdr_agent_identity_raw "$session" "$pane" 2>/dev/null || true)
+      IFS=$'\t' read -r agent agent_status <<EOF
+$identity
+EOF
+      case "$agent" in
+        ''|pi) found=0 ;;
+        *) : ;;  # A known non-Pi agent owns this rule as its own composer frame.
+      esac
+    else
+      found=0
+    fi
   fi
   [ "$found" -eq 1 ] || { printf 'unknown'; return 0; }
   # Content: extract the real typed text from the raw row with the shared,
