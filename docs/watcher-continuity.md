@@ -36,6 +36,29 @@ The lock used to record a home identity it was never keyed by, and nothing cross
 Two such supervisors are not duplicates - each is the only supervisor of its own fleet - but a process-table census cannot tell them apart, which is how one home gets reported as running two.
 The lock and `state/.watch-cycle-exits.log` now both record the resolved home *and* the supervised state directory, so that question is answerable from the record rather than from a pattern scan.
 
+## Arming authorities
+
+Several things in this repo can cause a watcher cycle to start. They are, in the order they sit above the process:
+
+| Authority | Mode | Role |
+| --- | --- | --- |
+| `bin/fm-claude-stop-autoarm.sh` | normal, Claude primary | The routine tokenless re-arm; fires on every Stop, admits one home-scoped owner |
+| `.pi/extensions/fm-primary-pi-watch.ts`, `.opencode/plugins/fm-primary-watch-arm.js` | normal, Pi and OpenCode primaries | Adapter-owned re-arm after an actionable child close |
+| `bin/fm-turnend-guard.sh` | normal | Bounded backstop at turn end when no cycle and no auto-arm claim exist |
+| `bin/fm-watch-arm.sh` | normal | The shared floor every adapter goes through, and the manual repair entry point |
+| `bin/fm-watch-checkpoint.sh` | normal | Codex's bounded foreground checkpoint |
+| `bin/fm-supervise-daemon.sh` | away | Owns the cycle entirely while `state/.afk` exists |
+| `bin/fm-afk-start.sh`, `bin/fm-afk-launch.sh` | away | Start the daemon; they do not arm watchers themselves |
+| `bin/fm-bootstrap.sh`, `bin/fm-spawn.sh`, `bin/fm-pr-check-migrate.sh` | either | Touch watcher state as part of another job; none is an arming authority |
+
+Exactly one is authoritative per mode: the primary harness's own continuity adapter in normal mode, and the away-mode daemon while `state/.afk` exists.
+Every other caller defers **through the lock**, never through its own judgment about whether a peer exists - and that is now literally true rather than a convention, because `fm_supervisor_singleton_acquire` is the only way into either loop and it decides from the lock alone.
+A caller that believes it should arm therefore cannot be wrong in a way that produces a second supervisor; the worst it can do is start a process that immediately stands down.
+
+The 2026-08-04 arms are consistent with that inventory: `state/.claude-autoarm-epoch` was frozen days earlier, so the Stop auto-arm claimed the home for none of them.
+A forked session does not hold `state/.lock` - the pre-fork session still does - so its hook is inert by design, and the arms came from the manual and adapter paths instead.
+That the auto-arm refused is correct behavior, not the defect.
+
 ## Wedge alarms count back down
 
 A wedge escalation used to ratchet 1 -> 2 -> 3 -> 4 with nothing counting it back.
