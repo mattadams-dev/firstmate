@@ -1,0 +1,78 @@
+= Preserved baseline capture: supervisor duplication hypotheses, 2026-08-04 =
+
+Provenance
+  repo commit at capture : 8b8cc7d (fix(watch): keep supervision alive across delivered wakes and parked lanes)
+  captured               : 2026-08-04, before any change in this branch
+  host                   : Linux 6.18.33.2-microsoft-standard-WSL2
+  probes                 : h1-lock-path-identity.sh, h2-release-by-path.sh, h3-prelock-evicts.sh
+                           (this directory; each takes the repo root as its one argument)
+
+These three probes decide the three unproven hypotheses recorded in the incident
+record for the endogenous supervisor duplication of 2026-08-04. They are kept
+because a reproduction that exists only in a transcript cannot be re-verified by
+anyone who did not run it, and because the fix they justify must stay falsifiable
+after the fix lands: re-running them against a pre-fix tree must still reproduce
+the outputs below, and the regression suite proves the post-fix tree does not.
+
+--- H2: does a dying predecessor's release-by-path unlink a SUCCESSOR's lock? ---
+$ tests/fixtures/supervisor-singleton/h2-release-by-path.sh "$PWD"
+predecessor pid=19680 ownerdir=.probe.lock.owner.8Q8kXR link=.probe.lock.owner.8Q8kXR
+after rotation: link=.probe.lock.owner.gsQKXS holder_pid=99999
+RESULT: H2 KILLED - successor lock survived predecessor release-by-path
+
+  Verdict: KILLED. fm_lock_release resolves the symlink to the owner directory it
+  currently points at and releases only when THAT owner's pid file names the
+  releasing process. After a rotation it names the successor, so the predecessor's
+  EXIT trap returns without unlinking. Release-by-path is not the defect.
+
+--- H3: does fm-watch.sh's PRE-LOCK work evict the live incumbent? ---
+$ tests/fixtures/supervisor-singleton/h3-prelock-evicts.sh "$PWD"
+incumbent W1=26728 holds the singleton
+RESULT: H3 PROVEN - incumbent W1 was terminated by W2's PRE-LOCK migration
+  W1 output:
+  W2 output:
+  lock now held by: none (W2=26921)
+
+  Verdict: PROVEN, and stronger than the hypothesis stated. The pre-lock step is
+  not merely a widened window: bin/fm-pr-check-migrate.sh, run by bin/fm-watch.sh
+  BEFORE its singleton gate, reads the watch lock's pid, verifies its identity,
+  and SIGTERMs it. A newcomer that has passed no singleton gate therefore
+  terminates the incumbent as its first act, deciding from process inspection
+  exactly what the standing rule says must never be decided that way. The early
+  exit at "migration already complete" is the only thing that normally keeps this
+  path dormant; any state that makes the scan incomplete re-arms it.
+
+--- H1: is the singleton keyed by an ADDRESS rather than a home IDENTITY? ---
+$ tests/fixtures/supervisor-singleton/h1-lock-path-identity.sh "$PWD"
+--- B1: same physical dir, different path strings ---
+live watchers on the same physical state dir: 1 (expect 1)
+  B1: singleton HELD across differing path strings
+--- B2: one logical home, two state addresses ---
+live watchers across two state addresses: 2 (2 = address-keyed, not identity-keyed)
+  process table shows: 7 matching 'fm-watch.sh'
+  lock A holder=43802 home=/home/jamada/.treehouse/firstmate-8c3a87/4/firstmate
+  lock B holder=43804 home=/home/jamada/.treehouse/firstmate-8c3a87/4/firstmate
+
+  Verdict: PROVEN at the mechanism level, and sharper than the hypothesis stated.
+  B1 kills the easy half: a symlinked or dot-segmented address for the SAME
+  physical state directory still resolves to the same lock file, so ordinary path
+  variation does not split the singleton.
+  B2 proves the real defect. Two watchers whose state directories differ each
+  take their own lock and both survive - and both locks record the SAME
+  fm-home. The lock RECORDS a home identity it is never KEYED by, and nothing
+  cross-checks it, so one home can host two processes that each correctly believe
+  they are its only supervisor. An address is not an identity.
+  The third line is the other half of the same defect: a process-table pattern
+  scan counted seven matches for two watchers, because the probe harness and its
+  arguments carry the pattern too. Counting supervisors by matching text is
+  biased toward exactly the processes working on the problem.
+
+--- What stays unknown ---
+Which of these fired during the original 2026-08-04 incident is NOT decided by
+these probes and is not decided by any durable record that existed at the time.
+state/.watch-cycle-exits.log records arm and watcher pids and lock identity, but
+never the resolved home or state address of the cycle, so the record cannot
+distinguish "two cycles in one home" from "one cycle each in two homes". That
+gap is treated as a defect in the instrument, not as evidence in either
+direction: the fix records the resolved home identity per cycle so the same
+question is answerable from the record next time.
