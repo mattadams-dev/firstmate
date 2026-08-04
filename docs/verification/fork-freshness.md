@@ -49,21 +49,28 @@ $ gh api repos/kunchenguid/no-mistakes/compare/kunchenguid:main...mattadams-dev:
 would have missed it entirely - the concrete case behind the enumeration rule
 above.
 
-## First run of the instrument, against the live forge
+## The instrument's own run, against the live forge
 
-Run in an isolated home so the tasks it created were disposable.
+Run in a disposable home so the tasks it created were throwaway. Captured
+verbatim at 23:20 UTC, about four and a half hours after the hand readings above.
 
 ```
 $ FM_HOME=<disposable> bin/fm-fork-freshness.sh sweep --owner mattadams-dev
-FORK_FRESHNESS: mattadams-dev/firstmate status=diverged behind=20 ahead=6 upstream=kunchenguid/firstmate compare=main...main action=task fm-sync-mattadams-dev-firstmate queued
+FORK_FRESHNESS: mattadams-dev/firstmate status=diverged behind=21 ahead=6 upstream=kunchenguid/firstmate compare=main...main action=task fm-sync-mattadams-dev-firstmate queued
 FORK_FRESHNESS: mattadams-dev/gnhf status=ahead behind=0 ahead=2 upstream=kunchenguid/gnhf compare=main...main action=none
-FORK_FRESHNESS: mattadams-dev/no-mistakes status=behind behind=28 ahead=0 upstream=kunchenguid/no-mistakes compare=main...main action=task fm-sync-mattadams-dev-no-mistakes queued
+FORK_FRESHNESS: mattadams-dev/no-mistakes status=behind behind=29 ahead=0 upstream=kunchenguid/no-mistakes compare=main...main action=task fm-sync-mattadams-dev-no-mistakes queued
 FORK_FRESHNESS_COVERAGE: owner=mattadams-dev repos=8 forks=3 swept=3 behind=2 unknown=0 ignored=0
 exit 3
 ```
 
-The second run of the same command reports `already queued` for both and creates
-no second task.
+The counts differ from the hand readings above - firstmate 20 to 21, no-mistakes
+28 to 29 - because upstream moved between the two measurements. Both sets are
+recorded as taken rather than reconciled, which is the same reason the generated
+sync instructions tell their worker to re-take the reading before acting.
+
+An earlier run of the same command in a separate disposable home reported
+`already queued` for both forks on its second invocation and created no second
+task; `test_repeat_sweep_creates_no_duplicate_task` holds that behavior.
 
 ## Mutation evidence
 
