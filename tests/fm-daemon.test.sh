@@ -583,6 +583,41 @@ test_housekeeping_orca_persistent_stale_resolves_terminal() {
   pass "persistent Orca stale resolves the terminal from metadata"
 }
 
+# Delivery observability (task fm-alarm-chain-reachability). Every path that
+# DECLINES to inject already logged why, but a confirmed submit returned
+# silently, so a delivered escalation and one that was never attempted left the
+# same record - and the honest reading of that silence was `unknown`, not "never
+# delivered". A delivered flush must now be positively identifiable in the log.
+test_successful_injection_is_distinguishable_from_never_attempted() {
+  local dir state fakebin sent capture daemon_log
+  dir=$(make_supercase delivery-record)
+  state="$dir/state"; fakebin="$dir/fakebin"
+  sent="$dir/sent.log"; : > "$sent"
+  capture="$dir/pane.txt"; : > "$capture"
+  daemon_log="$dir/daemon.log"; : > "$daemon_log"
+
+  # A never-attempted flush: nothing buffered, so nothing is delivered.
+  LOG="$daemon_log" FM_STATE_OVERRIDE="$state" escalate_flush "$state" \
+    || fail "an empty escalate_flush should succeed"
+  grep -Fq 'inject delivered' "$daemon_log" \
+    && fail "a flush that never injected must not record a delivery: $(cat "$daemon_log")"
+
+  # A delivered flush of the same shape as the captain's worked example.
+  escalate_add "$state" "paused 3600s (awaiting external, recheck whether the wait still holds): fm-lane-1"
+  escalate_add "$state" "fm-lane-2.status: blocked: credential expired (catch-all scan)"
+  afk_enter "$state"
+  LOG="$daemon_log" PATH="$fakebin:$PATH" FM_FAKE_TMUX_PANE_ALIVE=1 FM_FAKE_TMUX_SENT="$sent" \
+    FM_FAKE_TMUX_CAPTURE="$capture" FM_ESCALATE_BATCH_SECS=0 escalate_flush "$state" \
+    || fail "escalate_flush failed"
+  grep -Fq 'inject delivered' "$daemon_log" \
+    || fail "a confirmed submit left no delivery record: $(cat "$daemon_log")"
+  grep -Fq 'escalation flush delivered: 2 item(s)' "$daemon_log" \
+    || fail "the delivery record did not name how many items were delivered: $(cat "$daemon_log")"
+  grep -Fq 'kinds=blocked,pause-recheck' "$daemon_log" \
+    || fail "the delivery record did not name the delivered kinds: $(cat "$daemon_log")"
+  pass "escalate_flush: a delivered escalation is positively recorded, so silence no longer looks the same as delivery"
+}
+
 test_escalate_batches_into_one_digest() {
   local dir state fakebin sent capture n
   dir=$(make_supercase batch)
@@ -2004,6 +2039,7 @@ test_housekeeping_herdr_persistent_stale_resolves_meta
 test_housekeeping_herdr_idle_busy_record_clears_stale
 test_housekeeping_herdr_resumed_stale_cleared
 test_housekeeping_orca_persistent_stale_resolves_terminal
+test_successful_injection_is_distinguishable_from_never_attempted
 test_escalate_batches_into_one_digest
 test_escalate_batch_age_uses_first_append
 test_heartbeat_scan_dedup
