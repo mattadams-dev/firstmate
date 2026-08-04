@@ -309,6 +309,22 @@ The trimming in the herdr adapter and in `fm_composer_classify_content` used ASC
 
 Both causes are structural and independent: fixing either alone still leaves one live pane shape misclassified.
 
+### Guard-class mutation coverage
+
+Run 2026-08-04 against the two guard tests in `tests/fm-backend-herdr.test.sh` and the two in `tests/fm-composer-lib.test.sh`, each executed in isolation because `fail` aborts a suite at its first failure.
+All four pass unmutated.
+
+| Mutation | Direction | Failing tests |
+| --- | --- | --- |
+| Delete the closing-rule exemption | restores always-`unknown` | rule-framed content read |
+| Drop the exemption's shape and identity gate | makes more panes look deliverable | exemption-stays-narrow |
+| Drop the Unicode blanks from the trim | restores always-`pending` | Unicode-padding read, plus the two below |
+| Treat every non-ASCII byte as trimmable | makes more panes look deliverable | Unicode-padding-never-hides-real-content |
+
+Both mutations in the dangerous direction - the ones that would let a non-empty or unreadable composer read as `empty` and so type into a live composer - break exactly one test each.
+Removing the Unicode blanks additionally breaks the rule-framed content read and the padding-safety test.
+That is genuine coupling rather than weak isolation: the trim is load-bearing for three separate guarantees, because the live composer shape needs both fixes to read `empty`, and a dead-shell prompt must lose its padding before the bare-glyph rule recognises it.
+
 ## Wedge-alarm command-channel argv
 
 Captured 2026-08-04 on Linux/WSL2 with `sh` as dash.
