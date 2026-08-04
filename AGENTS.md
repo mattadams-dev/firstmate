@@ -386,7 +386,8 @@ When X-linked work reaches a milestone or terminal state, load `fmx-respond`; be
 
 A secondmate's idle endpoint is healthy, and parent supervision relies on its routed status rather than treating a quiet pane as stale.
 Waiting on a healthy supervision cycle is silent; empty polls, elapsed time, and no-change updates are not captain-facing progress.
-Never broadly kill watchers, especially never `pkill -f bin/fm-watch.sh`, because that can kill sibling firstmate homes.
+Never select a process to terminate by matching text: in this fleet a worker's instructions travel on its command line, so a pattern that names a supervisor matches the workers assigned to fix it and the shell running the search.
+Route every termination through `bin/fm-safe-kill.sh`, which takes its authority from the lock naming the target; its refusal is a stop-and-escalate result, never an obstacle to work around.
 A forced repair must use the home-scoped owner path emitted by supervision instructions.
 
 Guard warnings do not replace the contract.
