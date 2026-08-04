@@ -104,6 +104,12 @@ That keeps a tmux pane nested inside herdr on the tmux transport, matching the r
 Target detection uses `FM_SUPERVISOR_TARGET`, then `$TMUX_PANE`, then `"${HERDR_SESSION:-default}:${HERDR_PANE_ID}"` under herdr, then the legacy `firstmate:0` tmux fallback with a warning.
 Selecting any other supervisor backend, including `zellij`, `orca`, or `cmux`, refuses at daemon startup instead of trying tmux injection primitives against a non-tmux pane.
 
+## Fork freshness sweep (config/fork-sweep-*, config/maintained-forks, config/fork-sync-harness)
+
+`bin/fm-fork-freshness.sh` reads every maintained fork against its upstream and turns `behind > 0` into a tracked sync task.
+Its local configuration files are all optional, all gitignored, and all one value per line: `fork-sweep-owner`, `maintained-forks`, `fork-sweep-ignore`, `fork-sweep-interval-days`, and `fork-sync-harness`.
+See [`fork-freshness.md`](fork-freshness.md) for what each one selects, the two triggers that fire the sweep, and how an unreadable fork is reported, and [`verification/fork-freshness.md`](verification/fork-freshness.md) for active evidence.
+
 ## Away-mode wedge alarm channels (config/wedge-alarm)
 
 When away-mode injection wedges past `FM_MAX_DEFER_SECS`, the sub-supervisor raises a loud, rate-limited alarm.
