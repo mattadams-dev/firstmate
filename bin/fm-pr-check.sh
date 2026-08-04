@@ -144,3 +144,16 @@ FM_HOME="$FM_HOME" "$FM_ROOT/bin/fm-bridge.sh" task --quiet \
   --id "$ID" --project "$(basename "${BRIDGE_PROJECT:-fleet}")" \
   --phase pr-open --state "$BRIDGE_STATE" --pointer "$URL" --title "$ID" \
   ${BRIDGE_ANSWERS[@]+"${BRIDGE_ANSWERS[@]}"} >/dev/null 2>&1 || true
+
+# Fork freshness, taken here because this is the one point every fork PR
+# provably passes through: bin/fm-pr-merge.sh refuses a task whose metadata
+# carries no pr= line, and this script is that line's only writer. A fork that
+# is behind its upstream makes this PR misreport its own diff and blocks its own
+# merge, so the reading is machine-taken at PR-ready rather than remembered.
+# bin/fm-fork-freshness.sh is silent when the repository is determinately not a
+# fork and loud when that could not be read; it never merges or pushes anything.
+# Best-effort in one direction only: it can never fail arming the merge watch,
+# but it is never allowed to be silent about a reading it could not take.
+if [ "$PROVIDER" = github ] && [ -x "$FM_ROOT/bin/fm-fork-freshness.sh" ]; then
+  FM_HOME="$FM_HOME" "$FM_ROOT/bin/fm-fork-freshness.sh" check "$PROJECT_PATH" || true
+fi
