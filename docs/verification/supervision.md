@@ -383,7 +383,9 @@ argv_count=1 argv1=[THE SUMMARY]
 
 A directive naming a bare script path therefore received empty argv, while a directive whose body is an inline snippet received the summary on `$1`.
 Only the inline shape was covered by an automated test, so the suite could not distinguish a channel that receives the summary from one that never does, and a directive of the bare-script shape logged its own fallback text on every alarm.
-The `command:` channel now passes the summary as an explicit argument to the directive as well as on stdin, so both directive shapes receive it, and the regression test covers both shapes.
+The `command:` channel now runs a directive that is a single resolvable executable with no arguments and no shell syntax directly, so the summary lands in that program's own argv, while every other directive keeps its exact `sh -c` invocation with the summary on `$1`; every shape still receives the summary on stdin.
+Narrowing it that way is what keeps a directive that already carries its own arguments from being handed an extra one, which the existing hung-notifier test rejected.
+[`wedge-alarm.md`](../wedge-alarm.md) owns that dispatch contract, and the regression test covers both directive shapes.
 
 ## Wedge-alarm channels
 
