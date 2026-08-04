@@ -1351,6 +1351,151 @@ test_wedge_alarm_herdr_channel_selected() {
   pass "herdr channel routes through the notifier seam with the summary (never a real notification)"
 }
 
+# --- structured wedge summary (task fm-alarm-chain-reachability) -------------
+#
+# The summary handed to the alert channels used to carry only an age and a marker
+# path, so 935 consecutive alarms were indistinguishable from one another and
+# from each other's urgency. Severity is assessed HERE, from the buffer, and the
+# marker's first line and the channel summary are the same bytes.
+
+# Write <n> escalation buffer lines of <kind-shape> into <dir>/state.
+seed_escalations() {  # <dir> <shape> <n>
+  local dir=$1 shape=$2 n=$3 i
+  for i in $(seq 1 "$n"); do
+    case "$shape" in
+      pause) printf 'paused 3600s (awaiting external, recheck whether the wait still holds): fm-lane-%s\n' "$i" ;;
+      stale) printf 'stale persisted 900s (possible wedge): fm-merged-%s\n' "$i" ;;
+      blocked) printf 'fm-lane-%s.status: blocked: credential expired (catch-all scan)\n' "$i" ;;
+      done) printf 'fm-lane-%s.status: done: PR ready (catch-all scan)\n' "$i" ;;
+      opaque) printf 'something this classifier has never seen %s\n' "$i" ;;
+    esac
+  done >> "$dir/state/.subsuper-escalations"
+}
+
+# The captain's worked example: overnight 2026-08-01 held five parked-lane
+# rechecks and four idle flags on already-merged lanes. The honest severity was
+# LOW - nothing needed the captain - and the alarm must say so rather than
+# claiming an urgency it never assessed.
+test_wedge_summary_reports_count_kinds_and_severity() {
+  local dir out
+  dir=$(make_wedge_case wedge-summary-low)
+  seed_escalations "$dir" pause 5
+  seed_escalations "$dir" stale 4
+  out=$(wedge_summary_line "$dir/state" 253189 "/s/.marker")
+  case "$out" in
+    'FMWEDGE/1 severity=LOW count=9 kinds=pause-recheck,stale-idle age=253189s:'*) : ;;
+    *) fail "the worked example must report count 9, both routine kinds and LOW severity, got '$out'" ;;
+  esac
+  case "$out" in *"/s/.marker") : ;; *) fail "the summary must end with the marker path, got '$out'" ;; esac
+  pass "wedge_summary_line: five parked rechecks plus four idle flags report count=9 kinds=pause-recheck,stale-idle severity=LOW"
+}
+
+test_wedge_summary_severity_tracks_the_strongest_item() {
+  local dir out
+  dir=$(make_wedge_case wedge-summary-high)
+  seed_escalations "$dir" pause 5
+  seed_escalations "$dir" blocked 1
+  out=$(wedge_summary_line "$dir/state" 900 "/s/.marker")
+  case "$out" in
+    *'severity=HIGH'*) : ;;
+    *) fail "one blocked lane among routine rechecks must raise severity to HIGH, got '$out'" ;;
+  esac
+  case "$out" in *'kinds=blocked,pause-recheck'*) : ;; *) fail "kinds must stay sorted and deduped, got '$out'" ;; esac
+
+  dir=$(make_wedge_case wedge-summary-medium)
+  seed_escalations "$dir" 'done' 2
+  out=$(wedge_summary_line "$dir/state" 900 "/s/.marker")
+  case "$out" in *'severity=MEDIUM'*) : ;; *) fail "work ready for review is MEDIUM, got '$out'" ;; esac
+
+  # An item this classifier cannot place must never be filed as routine: calling
+  # it LOW would claim a calm the instrument never assessed.
+  dir=$(make_wedge_case wedge-summary-opaque)
+  seed_escalations "$dir" pause 2
+  seed_escalations "$dir" opaque 1
+  out=$(wedge_summary_line "$dir/state" 900 "/s/.marker")
+  case "$out" in *'severity=MEDIUM'*) : ;; *) fail "an unclassifiable item must not read LOW, got '$out'" ;; esac
+  case "$out" in *'unclassified'*) : ;; *) fail "an unclassifiable item must be named in kinds, got '$out'" ;; esac
+  pass "wedge_summary_line: severity is the strongest buffered item, and an unclassifiable item never reads routine"
+}
+
+test_wedge_summary_reports_unknown_when_the_buffer_cannot_be_read() {
+  local dir out
+  dir=$(make_wedge_case wedge-summary-unreadable)
+  out=$(wedge_summary_line "$dir/state" 900 "/s/.marker")
+  case "$out" in
+    *'severity=UNKNOWN count=0 kinds=none'*) : ;;
+    *) fail "an absent buffer must report UNKNOWN, not a fabricated severity, got '$out'" ;;
+  esac
+  pass "wedge_summary_line: an unreadable buffer reports severity=UNKNOWN rather than defaulting in either direction"
+}
+
+test_wedge_marker_first_line_is_the_channel_summary() {
+  local dir log first
+  dir=$(make_wedge_case wedge-marker-first-line); log="$dir/alert.log"
+  seed_escalations "$dir" pause 5
+  seed_escalations "$dir" stale 4
+  FM_WEDGE_ALARM_LOG="$log" FM_WEDGE_ALARM_CHANNEL=herdr WEDGE_ALARM_LAST_EPOCH=0 \
+    inject_wedge_alarm "$dir/state" 253189
+  first=$(head -1 "$dir/state/.subsuper-inject-wedged")
+  case "$first" in
+    'FMWEDGE/1 severity=LOW count=9 kinds=pause-recheck,stale-idle'*) : ;;
+    *) fail "the marker's FIRST line must be the structured summary, got '$first'" ;;
+  esac
+  grep -Fq "$first" "$log" || fail "the channel did not receive the marker's first line verbatim: $(cat "$log")"
+  grep -Fq 'paused 3600s' "$dir/state/.subsuper-inject-wedged" \
+    || fail "the marker must still carry the full buffered list below the summary"
+  pass "inject_wedge_alarm: the marker's first line is the structured summary and reaches the channels verbatim"
+}
+
+# The defect that made every alert content-free. `sh -c "$cmd" name "$summary"`
+# gives the positionals to the sh -c SHELL, so a directive naming a BARE SCRIPT
+# PATH ran that script with empty argv. Only the inline-snippet shape was covered
+# before, and the two shapes are exactly the world-states the old test could not
+# distinguish.
+test_wedge_alarm_command_channel_reaches_a_bare_script_directive() {
+  local dir script out_argv out_stdin
+  dir=$(make_wedge_case wedge-command-bare-script)
+  script="$dir/notify.sh"; out_argv="$dir/argv.txt"; out_stdin="$dir/stdin.txt"
+  cat > "$script" <<SH
+#!/usr/bin/env bash
+printf '%s' "\${1:-<NO-SUMMARY>}" > '$out_argv'
+cat > '$out_stdin'
+SH
+  chmod +x "$script"
+  FM_WEDGE_ALARM_EXEC='' FM_WEDGE_ALARM_CHANNEL="command:$script" \
+    wedge_alarm_notify "FMWEDGE/1 severity=LOW count=9 kinds=pause-recheck" "/s/.marker"
+  [ "$(cat "$out_argv" 2>/dev/null)" = "FMWEDGE/1 severity=LOW count=9 kinds=pause-recheck" ] \
+    || fail "a bare-script directive did not receive the summary on \$1, got '$(cat "$out_argv" 2>/dev/null)'"
+  grep -Fq 'severity=LOW' "$out_stdin" || fail "a bare-script directive did not receive the summary on stdin"
+  pass "command channel: a directive naming a bare script path receives the summary on \$1 and on stdin"
+}
+
+# Only a directive that is nothing but one executable may be invoked directly.
+# Anything carrying its own arguments or shell syntax keeps its previous
+# invocation, because an extra argument is not safe to hand a command in general:
+# `sleep 30` would read it as a second duration and `notify-send SUMMARY BODY`
+# has no third parameter.
+test_wedge_alarm_command_bare_program_detection_is_narrow() {
+  local dir script
+  dir=$(make_wedge_case wedge-command-detect); script="$dir/notify.sh"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$script"; chmod +x "$script"
+  wedge_alarm_command_is_bare_program "$script" \
+    || fail "a bare path to an executable script must be detected as a bare program"
+  wedge_alarm_command_is_bare_program "$script --flag" \
+    && fail "a directive carrying arguments must not be invoked directly"
+  wedge_alarm_command_is_bare_program 'sleep 30' \
+    && fail "a command with its own argument must not be invoked directly"
+  wedge_alarm_command_is_bare_program 'powershell.exe -File "C:\fm\toast.ps1"' \
+    && fail "a quoted multi-word directive must not be invoked directly"
+  wedge_alarm_command_is_bare_program "printf '%s' \"\$1\" > a; cat > b" \
+    && fail "a shell snippet must not be invoked directly"
+  wedge_alarm_command_is_bare_program "$dir/not-executable" \
+    && fail "an unresolvable directive must not be treated as a bare program"
+  wedge_alarm_command_is_bare_program '' \
+    && fail "an empty directive must not be treated as a bare program"
+  pass "wedge_alarm_command_is_bare_program: only a single resolvable executable with no arguments or shell syntax"
+}
+
 test_wedge_alarm_command_channel_receives_summary() {
   local dir out_argv out_stdin chan
   dir=$(make_wedge_case wedge-command)
@@ -1538,7 +1683,11 @@ test_inject_wedge_alarm_fires_active_alert_on_non_tmux_backend() {
     inject_wedge_alarm "$state" 30600
   [ -s "$state/.subsuper-inject-wedged" ] || fail "inject_wedge_alarm did not write the durable marker"
   grep -F 'osascript' "$log" >/dev/null || fail "inject_wedge_alarm did not emit the active alert on a non-tmux backend: $(cat "$log")"
-  grep -F 'WEDGED 30600s' "$log" >/dev/null || fail "active alert missing the age and summary"
+  grep -F 'age=30600s' "$log" >/dev/null || fail "active alert missing the age"
+  # A held captain decision is the strongest thing the buffer can carry, so the
+  # alert must say so rather than describing only that something is wedged.
+  grep -F 'severity=HIGH' "$log" >/dev/null || fail "active alert did not carry the assessed severity: $(cat "$log")"
+  grep -F 'kinds=decision' "$log" >/dev/null || fail "active alert did not carry the buffered kinds: $(cat "$log")"
   pass "inject_wedge_alarm writes the marker AND emits the active alert even with no tmux status-line (herdr backend)"
 }
 
@@ -1898,6 +2047,12 @@ test_wedge_alarm_direct_notifiers_honor_discard_seam
 test_wedge_alarm_osascript_channel_selected
 test_wedge_alarm_herdr_channel_selected
 test_wedge_alarm_command_channel_receives_summary
+test_wedge_summary_reports_count_kinds_and_severity
+test_wedge_summary_severity_tracks_the_strongest_item
+test_wedge_summary_reports_unknown_when_the_buffer_cannot_be_read
+test_wedge_marker_first_line_is_the_channel_summary
+test_wedge_alarm_command_channel_reaches_a_bare_script_directive
+test_wedge_alarm_command_bare_program_detection_is_narrow
 test_wedge_alarm_command_failure_hides_configured_command
 test_wedge_alarm_unknown_channel_hides_configured_directive
 test_wedge_alarm_off_disables_active_alert_regardless_of_position

@@ -2762,6 +2762,82 @@ test_composer_state_pi_incomplete_separator_below_stale_generic_is_unknown() {
   pass "fm_backend_herdr_composer_state: an incomplete lower Pi separator cannot inherit a stale empty row"
 }
 
+# --- rule-framed (Claude 2.x) composer, task fm-alarm-chain-reachability -----
+#
+# Claude 2.x draws its composer as a horizontal `─` rule, a bare `❯` input row
+# padded with U+00A0, then a second `─` rule - no side borders. Every earlier
+# fixture in this file used a rounded-corner box that no fleet harness actually
+# renders, which is why the suite stayed green while every live Claude pane
+# classified `unknown` and the away-mode injector deferred for days
+# (docs/verification/supervision.md "Away-mode composer read on a live
+# claude-on-herdr pane"). These fixtures reproduce the captured shape byte for
+# byte, including the labelled opening rule that stops a separator PAIR from
+# completing and the U+00A0 padding.
+herdr_rule_framed_capture() {  # <input-row-content> [opening-rule-label]
+  local content=$1 label=${2:-}
+  local rule='─────────────────────────────────────────────'
+  if [ -n "$label" ]; then
+    printf '  transcript line above the composer\n%s %s ──\n%s\n%s\n  Opus 5 | ctx: 55%% used\n' \
+      "$rule" "$label" "$content" "$rule"
+  else
+    printf '  transcript line above the composer\n%s\n%s\n%s\n  Opus 5 | ctx: 55%% used\n' \
+      "$rule" "$content" "$rule"
+  fi
+}
+
+test_composer_state_rule_framed_claude_composer_is_empty() {
+  local dir log resp fb out label
+  # Both opening-rule shapes: labelled (no pair completes, the branch this fixes)
+  # and plain (a pair completes, already handled) must reach the same verdict.
+  for label in 'firstmate' ''; do
+    dir="$TMP_ROOT/composer-rule-framed-empty-${label:-plain}"; mkdir -p "$dir/responses"
+    log="$dir/log"; resp="$dir/responses"; : > "$log"
+    herdr_rule_framed_capture "$(printf '\xe2\x9d\xaf\xc2\xa0')" "$label" > "$resp/1.out"
+    printf '{"result":{"agent":{"agent":"claude","agent_status":"done"}}}\n' > "$resp/2.out"
+    fb=$(make_herdr_fakebin "$dir")
+    out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+      bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_state lab:w1:p2' "$ROOT" )
+    [ "$out" = empty ] || fail "an idle rule-framed Claude composer (opening rule label '${label:-none}') must read empty, got '$out'"
+  done
+  pass "fm_backend_herdr_composer_state: a live idle rule-framed Claude composer reads empty, labelled opening rule or not"
+}
+
+# The direction that must never loosen. Each case keeps exactly one condition of
+# the closing-rule exemption unmet, so a fix that made everything deliverable -
+# strictly worse than the bug, because it types into live composers - fails here.
+test_composer_state_rule_framed_exemption_stays_narrow() {
+  local dir log resp fb out case_id content label identity sep_gap
+  # case_id | input row | identity json | extra row before the closing rule
+  for case_id in real-text pi-identity unreadable-identity dead-shell multi-row; do
+    dir="$TMP_ROOT/composer-rule-framed-$case_id"; mkdir -p "$dir/responses"
+    log="$dir/log"; resp="$dir/responses"; : > "$log"
+    content=$(printf '\xe2\x9d\xaf\xc2\xa0'); label='firstmate'; sep_gap=''
+    identity='{"result":{"agent":{"agent":"claude","agent_status":"done"}}}'
+    case "$case_id" in
+      real-text)   content=$(printf '\xe2\x9d\xaf\xc2\xa0fix findings 1 and 3') ;;
+      pi-identity) identity='{"result":{"agent":{"agent":"pi","agent_status":"idle"}}}' ;;
+      unreadable-identity) identity='' ;;
+      dead-shell)  content='$' ;;
+      multi-row)   sep_gap='continued input on a second row' ;;
+    esac
+    if [ -n "$sep_gap" ]; then
+      printf '  transcript line above the composer\n───────────────────────────────────── %s ──\n%s\n%s\n─────────────────────────────────────\n' \
+        "$label" "$content" "$sep_gap" > "$resp/1.out"
+    else
+      herdr_rule_framed_capture "$content" "$label" > "$resp/1.out"
+    fi
+    if [ -n "$identity" ]; then printf '%s\n' "$identity" > "$resp/2.out"; else printf '1\n' > "$resp/2.exit"; fi
+    fb=$(make_herdr_fakebin "$dir")
+    out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+      bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_state lab:w1:p2' "$ROOT" )
+    case "$case_id" in
+      real-text) [ "$out" = pending ] || fail "real text in a rule-framed composer must read pending, got '$out'" ;;
+      *) [ "$out" != empty ] || fail "case '$case_id' must never read empty (it would authorize typing into that pane), got '$out'" ;;
+    esac
+  done
+  pass "fm_backend_herdr_composer_state: the closing-rule exemption never covers real text, a Pi or unreadable identity, a dead shell, or a multi-row composer"
+}
+
 test_composer_state_pi_separator_requires_safe_native_identity() {
   local dir log resp fb out status case_id idx=0
   for case_id in working non-pi unreadable over-tall; do
@@ -3966,6 +4042,8 @@ test_composer_state_unknown_when_no_composer_row_found
 test_composer_state_pi_separator_idle_is_empty
 test_composer_state_pi_separator_real_text_is_pending
 test_composer_state_pi_incomplete_separator_below_stale_generic_is_unknown
+test_composer_state_rule_framed_claude_composer_is_empty
+test_composer_state_rule_framed_exemption_stays_narrow
 test_composer_state_pi_separator_requires_safe_native_identity
 test_composer_state_claude_unbordered_prompt_is_empty
 test_composer_state_claude_unbordered_prompt_is_pending
