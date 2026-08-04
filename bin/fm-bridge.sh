@@ -240,6 +240,7 @@ case "$COMMAND" in
       printf 'bridge lint: UNKNOWN - the fold returned nothing, so nothing was checked\n' >&2
       exit 3
     }
+    # shellcheck disable=SC2016 # The checker is python source, not shell.
     printf '%s' "$STATE_DOC" | python3 -c '
 import json, sys
 try:
@@ -261,8 +262,10 @@ for key, item in sorted(doc["items"].items()):
     label = item["ref"] or key
     recognized = item.get("recognized", {})
     # The two axes, read the way the fold reads them: who owes it, and how it
-    # ended. Nothing here ranks one against the other.
-    ended = item["outcome"] != "in-flight"
+    # ended. `ended` comes FROM the fold rather than being spelled again here -
+    # an ending must have been observed, and only the fold knows whether a value
+    # was stated, worked out from evidence, or never observable at all.
+    ended = item["ended"]
     # An item that ended without any record of who owed it is the fold
     # declining to invent one, which is the honest reading and not a record to
     # clean up.
@@ -273,12 +276,12 @@ for key, item in sorted(doc["items"].items()):
                 continue
             problems.append("%s: unrecognized %s %r (kept verbatim, shown as odd)"
                             % (label, field, item[field]))
-    # Either axis can say the item is finished, and each says it independently:
-    # nobody owes it any more, or the work ended by landing. Whichever says so,
-    # a reader needs to be able to find what came of it.
-    if (item["state"] == "resolved" or item["outcome"] == "landed") \
-            and not item["pointer"] and item["kind"] in ("decision", "critical"):
-        problems.append("%s: resolved with no pointer to the outcome" % label)
+    # The fold states this rule once, on the axis that triggered it, and the
+    # board draws the same field - two spellings of one rule is how they came to
+    # disagree about which axis it tested.
+    if item["pointer_gap"]:
+        problems.append("%s: %s, with no pointer to where it went"
+                        % (label, item["pointer_gap"]))
     # An ask is owed AND still live, so a missing answer form is only a problem
     # while both hold - the same conjunction the board uses to decide whether to
     # offer one.

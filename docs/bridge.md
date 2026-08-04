@@ -64,13 +64,13 @@ Only `ts` and `id` are required on every record.
 
 | Field | Type | Meaning |
 | --- | --- | --- |
-| `v` | int | schema version, currently `1`; absent means pre-versioning and is tolerated |
+| `v` | int | schema version, currently `2`; absent means pre-versioning and is tolerated. The bump is load-bearing: `v2` is where the writer gained the `outcome` vocabulary |
 | `ts` | string | RFC3339 UTC, when the event happened |
 | `id` | string | the fold key; `[a-z0-9._-]` |
 | `kind` | string | `critical`, `decision`, `event`, `task`, `term`, `steering` |
 | `project` | string | grouping key; defaults to `fleet` |
 | `state` | string | WHO OWES THIS: `needs-captain`, `needs-cocaptain`, `fm-handling`, `resolved` |
-| `outcome` | string | HOW IT ENDED: `in-flight` (the default when absent), `landed`, `discarded`, `unknown` |
+| `outcome` | string | HOW IT ENDED: `in-flight`, `landed`, `discarded`, `unknown`. What ABSENCE means depends on `v` - see below |
 | `severity` | string | `critical`, `high`, `normal`, `low` |
 | `owner` | string | the reader it is addressed to: `captain`, `cocaptain`, `firstmate`, or a worker id |
 | `title` | string | one line, the thing itself |
@@ -109,6 +109,29 @@ Both facts are recordable, neither overwrites the other, and no consumer decides
 
 A cleanup that could not run the landed-work test records `unknown` rather than guessing, because a guess recorded as `discarded` invents a loss and a guess recorded as `landed` invents an outcome.
 
+### What absence on the outcome axis means, and why `v` is load-bearing
+
+A record that says nothing about `outcome` is saying two completely different things depending on when it was written, and the record itself carries which.
+
+| The record | What silence means | Folded outcome | `outcome_source` |
+| --- | --- | --- | --- |
+| `v` >= 2 | the writer HAD this vocabulary and used none of it, so nothing has been observed to end | `in-flight` | `unstated` |
+| `v` < 2 or absent | the writer had no way to say, so the silence carries no information | `unknown` | `unobserved` |
+
+Reading pre-axis silence as `in-flight` would assert in bulk that five rounds of already-written rows are still running, in a field built to be authoritative.
+A blanket default is a translation table with one row, and it is worse than an explicit one because it is invisible at the call site.
+Observation populates; assertion never does.
+
+Only EVIDENCE may fill an unstated outcome, and each backfill names what it read.
+A `merged` phase recorded together with a pointer to where it landed is an observation of an ending, so such an item folds to `landed` with `outcome_source: backfilled` and `outcome_evidence` naming the ledger line.
+A recorded landed-test verdict arrives as a stated `outcome`, so it is `observed` rather than backfilled.
+
+**An old `phase=discarded` is not evidence and never becomes `outcome=discarded`.**
+That phase is the ambiguous field the two axes exist to split: it was written both for genuinely unlanded work and for merged work whose worktree was force-cleaned, and the record cannot say which.
+Mapping it would dress the old ambiguity in the new axis's confidence, so such an item is `unknown`.
+
+Rows that cannot be resolved are named on the board rather than quietly filled in, and `--state` lists them under `unobserved_outcomes` with the per-item source in `outcome_source`.
+
 Where a definition needs both axes it is a **conjunction of independently necessary conditions**, never a tiebreak.
 An ask is "someone owes a decision" AND "the work is still live": a discarded item is not an ask because there is nothing left to decide, and a merged item is not an ask because nobody owes it.
 Those are two separate reasons, either sufficient on its own, and neither is a ranking of one axis over the other.
@@ -116,7 +139,9 @@ Those are two separate reasons, either sufficient on its own, and neither is a r
 Because the axes are independent, so are the published keys.
 Every zone that means "over" is keyed on the outcome axis alone, and no key mixes two endings: `zones.fleet_landed`, `zones.fleet_discarded` and `zones.fleet_unknown` are separate lists, as are `zones.criticals_landed`, `zones.criticals_discarded` and `zones.criticals_unknown`, and each project's decision group carries `open`, `landed`, `discarded` and `unknown`.
 An auditor reading `landed` never has to check whether a row under it was actually thrown away.
-`summary` tallies the state axis and `outcomes` tallies the outcome axis; neither is a rollup of both.
+`summary` tallies the state axis and `outcomes` tallies the outcome axis; neither is a rollup of both, and each counts EVERY board item, so both sum to `counts.board_items`.
+The ask count is a third, separate number - the conjunction, owed AND still live - published as `asks_count` and labelled as its own thing on the board.
+A tally that quietly dropped items would be the same failure as a fold that dropped lines: on a surface whose discipline is that the numbers add up in public, a silent gap is where a wrong reading hides.
 
 `needs-cocaptain` is a **routing** target, not a fourth flavour of "open".
 Machine and repo-infrastructure work is addressed to the co-captain - the dotfiles session, which reads this ledger directly - and never joins the captain's ask list.
@@ -177,7 +202,10 @@ A persistent secondmate is not a work item, so neither spawn nor teardown ever g
 A cleanup records both axes, and takes the outcome from the landed-work determination itself rather than from whether `--force` was used.
 `--force` means the checks were SKIPPED; it does not mean the work was THROWN AWAY, and for work that already merged a forced cleanup discards nothing - it reclaims a working copy.
 So a forced cleanup still evaluates that determination without refusing on it: the test would have passed means `outcome=landed`, would have failed means `outcome=discarded`, and could not reach a verdict means `outcome=unknown`.
-An ordinary cleanup runs only after the test passed, so it records `outcome=landed` and `state=resolved`; a forced one records the verdict, records `phase=force-cleaned` with the reason that authorized the override, and leaves the state axis exactly as the row had earned it, because skipping the checks says nothing about who owes what.
+Both paths record the verdict that determination actually returned - the gate and the record read ONE evaluation, so a refusal an operator reads and an outcome the board shows can never disagree about the same worktree.
+An ordinary cleanup additionally records `state=resolved`, because it ran every check that applies; a forced one records `phase=force-cleaned` with the reason that authorized the override and leaves the state axis exactly as the row had earned it, because skipping the checks says nothing about who owes what.
+Where no landed-work test applies at all - no worktree left, or a scout or secondmate kind - both paths record `unknown`, since "the gate let it through" is not the same statement as "the test passed".
+Uncommitted changes are unlanded work on every path: teardown removes the worktree, so those changes are gone.
 A forced retirement of a persistent secondmate records the same provenance as a `kind=event` note against `fleet`, because a secondmate is not a work item and must never become a strip row.
 The events zone renders that note on the board, so the most destructive override in the fleet is not the one whose reason is hardest to read.
 

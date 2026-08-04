@@ -1372,6 +1372,103 @@ if doc["zones"]["fleet_landed"] != ["task-x1"]:
   pass "a forced cleanup of work that already landed records landed, not discarded"
 }
 
+# Uncommitted work is unlanded work, on every path. This is the shape a dirty
+# worktree takes when its commits ARE all pushed - the branch that used to skip
+# the dirty check entirely and answer `landed` for work the cleanup then threw
+# away, while the safety gate refused that exact state as unlanded.
+test_forced_teardown_of_dirty_worktree_records_discarded() {
+  local case_dir rc records
+  case_dir=$(make_case force-dirty-record)
+  write_meta "$case_dir" local-only ship
+  wt_commit "$case_dir" "work that landed"
+  add_fork_with_pushed_branch "$case_dir"
+  printf 'scratch nobody committed\n' > "$case_dir/wt/uncommitted.txt"
+
+  set +e
+  run_teardown "$case_dir" --force "captain said drop the scratch" \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 0 "$rc" "force-dirty-record: forced teardown failed"
+
+  records=$(bridge_records "$case_dir")
+  case "$records" in
+    *'"outcome":"landed"'*)
+      fail "force-dirty-record: uncommitted work the cleanup removed was recorded as landed: $records" ;;
+  esac
+  case "$records" in
+    *'"outcome":"discarded"'*) : ;;
+    *) fail "force-dirty-record: a dirty worktree did not end as discarded: $records" ;;
+  esac
+  pass "a forced cleanup of a dirty worktree records the uncommitted work as discarded"
+}
+
+# The gate and the record read ONE determination, so what an operator is told
+# and what the board shows cannot disagree about the same worktree.
+test_gate_and_record_agree_about_the_same_worktree() {
+  local case_dir rc records
+  case_dir=$(make_case verdict-agrees-with-gate)
+  write_meta "$case_dir" local-only ship
+  wt_commit "$case_dir" "work that landed"
+  add_fork_with_pushed_branch "$case_dir"
+  printf 'scratch nobody committed\n' > "$case_dir/wt/uncommitted.txt"
+
+  # Unforced: the gate refuses this exact state as unlanded, and nothing is removed.
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "verdict-agrees-with-gate: the gate accepted a dirty worktree"
+  assert_contains "$(cat "$case_dir/stderr")" "uncommitted changes" \
+    "verdict-agrees-with-gate: the refusal does not name the uncommitted work"
+  [ -z "$(bridge_records "$case_dir")" ] \
+    || fail "verdict-agrees-with-gate: a refused teardown still recorded an outcome"
+
+  # Forced: the same determination, now recorded rather than refused.
+  run_teardown "$case_dir" --force "captain said drop the scratch" \
+    > "$case_dir/stdout2" 2> "$case_dir/stderr2" \
+    || fail "verdict-agrees-with-gate: forced teardown failed: $(cat "$case_dir/stderr2")"
+  records=$(bridge_records "$case_dir")
+  case "$records" in
+    *'"outcome":"discarded"'*) : ;;
+    *) fail "verdict-agrees-with-gate: the record disagrees with the refusal: $records" ;;
+  esac
+  pass "the refusal and the recorded outcome read one determination of the same worktree"
+}
+
+# Where no landed-work test applies, neither path may claim it passed. The gate
+# returns 0 without testing anything for a scout, and "it let me through" is not
+# the same statement as "the work landed".
+test_teardown_without_a_landed_test_records_unknown() {
+  local case_dir records
+  case_dir=$(make_case no-worktree-unknown-outcome)
+  write_meta "$case_dir" local-only ship
+  wt_commit "$case_dir" "work whose copy is already gone"
+  # The gate returns 0 without inspecting anything when the worktree is not
+  # there, so nothing observed the ending. "It let me through" is not the same
+  # statement as "the test passed".
+  rm -rf "$case_dir/wt"
+
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" \
+    || fail "no-worktree-unknown-outcome: teardown failed: $(cat "$case_dir/stderr")"
+
+  records=$(bridge_records "$case_dir")
+  case "$records" in
+    *'"outcome":"landed"'*)
+      fail "no-worktree-unknown-outcome: a cleanup that ran no landed-work test claimed landed: $records" ;;
+  esac
+  case "$records" in
+    *'"outcome":"unknown"'*) : ;;
+    *) fail "no-worktree-unknown-outcome: the untested ending was not recorded as unknown: $records" ;;
+  esac
+  # It still closes the row on the state axis - the checks that apply all ran.
+  case "$records" in
+    *'"state":"resolved"'*) : ;;
+    *) fail "no-worktree-unknown-outcome: an ordinary cleanup stopped recording resolved: $records" ;;
+  esac
+  pass "a cleanup with no landed-work test to run records unknown, never landed"
+}
+
 test_forced_teardown_records_the_reason_it_was_authorized() {
   local case_dir records
   case_dir=$(make_case force-provenance)
@@ -2041,6 +2138,9 @@ test_no_mistakes_truly_unpushed_refuses
 test_local_only_force_overrides_unpushed
 test_forced_teardown_records_discarded_not_resolved
 test_forced_teardown_of_landed_work_records_landed
+test_forced_teardown_of_dirty_worktree_records_discarded
+test_gate_and_record_agree_about_the_same_worktree
+test_teardown_without_a_landed_test_records_unknown
 test_forced_teardown_records_the_reason_it_was_authorized
 test_force_without_a_reason_refuses_before_removing_anything
 test_ordinary_teardown_still_records_resolved

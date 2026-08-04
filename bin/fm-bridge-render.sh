@@ -129,10 +129,28 @@ LIFECYCLE_STAGES = ("sent", "delivered", "consumed")
 # decision" AND "the work is still live", and either condition alone can
 # disqualify without overriding the other.
 KNOWN_OUTCOMES = ("in-flight", "landed", "discarded", "unknown")
-OUTCOME_WHEN_UNSTATED = "in-flight"
+IN_FLIGHT = "in-flight"
 # The endings. `unknown` is one of them: it means the work ended and nobody
 # could tell how, which is a different claim from "still going".
 ENDED_OUTCOMES = ("landed", "discarded", "unknown")
+
+# The schema version at which a writer gained the outcome vocabulary. Below it,
+# a record's silence on the axis says nothing at all; at or above it, silence is
+# the writer declining to report an ending it could have reported.
+OUTCOME_AXIS_VERSION = 2
+
+# Where an item's outcome came from. A reader has to be able to tell a value the
+# ledger stated from one this fold worked out, and a legitimate in-flight from a
+# row that predates the axis entirely - which is why this is four values and not
+# a boolean.
+#   observed    - a record stated it
+#   backfilled  - derived from evidence in the item's own history, named in
+#                 `outcome_evidence`
+#   unstated    - a writer that HAD the vocabulary said nothing, so nothing has
+#                 been observed to end
+#   unobserved  - every writer predates the axis and no evidence resolves it, so
+#                 the honest value is `unknown`
+OUTCOME_SOURCES = ("observed", "backfilled", "unstated", "unobserved")
 
 
 def owed_by(item):
@@ -141,12 +159,83 @@ def owed_by(item):
 
 
 def ended(item):
-    """The outcome axis alone: has the work stopped, however it stopped?
+    """The outcome axis alone: has the work been OBSERVED to stop?
 
-    An outcome nobody recognizes is not read as `in-flight`: the fold cannot
-    claim work is still live on the strength of a value it does not understand.
+    Observed is the load-bearing word, and it is why this is not just
+    `outcome != in-flight`. `unknown` reaches an item two ways that look
+    identical in the value and are opposite in what they license:
+
+      a cleanup ran and could not tell how the work ended - the ending WAS
+      observed, only its manner was not, so there is nothing left to decide;
+
+      every record for the item predates the outcome axis - NOTHING was
+      observed, so the fold knows neither that it ended nor that it is running.
+
+    Retiring an ask on the second one would silently empty the captain's queue
+    of everything written before this axis existed - the missing-alarm failure
+    this whole surface is built to prevent, dressed as tidiness. An unrecognized
+    value is treated the same way, because a value the fold cannot read is not
+    an observation either.
     """
-    return item["outcome"] != OUTCOME_WHEN_UNSTATED
+    if item["outcome"] in ("landed", "discarded"):
+        return True
+    if item["outcome"] == "unknown":
+        return item["outcome_source"] in ("observed", "backfilled")
+    return False
+
+
+def resolve_outcome(item):
+    """Fill the outcome axis for an item that never stated one, from EVIDENCE.
+
+    THE RULE, and the reason for it: five rounds of rows were written before
+    this axis existed, by writers that had no way to say how work ended.
+    Reading their silence as `in-flight` would assert that all of it is still
+    running - a claim, applied in bulk, in a field built to be authoritative.
+    A blanket default is a translation table with one row, and it is worse than
+    an explicit one because it is invisible at the call site.
+
+    So absence is read against what the WRITER could say, which the record
+    itself records as `v`:
+
+      v >= 2 and silent  ->  the writer had the vocabulary and used none of it.
+                             Nothing has been observed to end: `in-flight`.
+      v <  2, or no v    ->  the writer could not have said. Silence carries no
+                             information, so the value is `unknown` unless
+                             evidence in the item's own history resolves it.
+
+    Evidence, and only evidence, may populate a value. The one that exists in
+    old data is a `merged` phase recorded together with a pointer to where it
+    landed - a merge is an observation of an ending, and the pointer is where
+    that ending lives. A recorded landed-test verdict arrives as a stated
+    outcome and is therefore `observed`, not backfilled.
+
+    AND THE ONE THAT MATTERS MOST: an old `phase=discarded` is NOT evidence of
+    a discard and never maps to one. That phase is precisely the ambiguous
+    field the two axes exist to split - it was written both for genuinely
+    unlanded work and for merged work whose worktree was force-cleaned, and the
+    record cannot say which. Laundering it into `outcome=discarded` would dress
+    the old ambiguity in the new axis's confidence. Such an item is `unknown`.
+    """
+    if item["outcome"]:
+        item["outcome_source"] = "observed"
+        return
+    if "merged" in item["phases_seen"] and item["pointer"]:
+        item["outcome"] = "landed"
+        item["outcome_source"] = "backfilled"
+        item["outcome_evidence"] = (
+            "a merged phase recorded at ledger line %d, with a pointer to where "
+            "it landed" % item["phases_seen"]["merged"]["line"])
+        return
+    if item["schema_version_max"] >= OUTCOME_AXIS_VERSION:
+        item["outcome"] = IN_FLIGHT
+        item["outcome_source"] = "unstated"
+        return
+    item["outcome"] = "unknown"
+    item["outcome_source"] = "unobserved"
+    item["outcome_evidence"] = (
+        "every record for this item predates the outcome axis (schema v%s), so "
+        "its silence says nothing about how the work ended"
+        % (item["schema_version_max"] or "unversioned"))
 # `needs-cocaptain` is a ROUTING target, not a second flavour of "open". An
 # item addressed to the co-captain (the dotfiles session, which reads this
 # ledger directly) never joins the captain's ask list, because the cost being
@@ -332,6 +421,13 @@ def fold(ledger_path, folded_at):
                         # records arrived in - and it is why a later unrelated
                         # record can never erase a lifecycle fact.
                         "phases_seen": {},
+                        # Highest schema version any record for this item was
+                        # written at, as a number. It is what tells silence on
+                        # the outcome axis apart from a writer that had no way
+                        # to speak it.
+                        "schema_version_max": 0,
+                        "outcome_source": "",
+                        "outcome_evidence": "",
                         "extra": {},
                         "schema_versions": [],
                     }
@@ -367,6 +463,12 @@ def fold(ledger_path, folded_at):
                 version_text = _text(version) if version is not None else "unversioned"
                 if version_text not in item["schema_versions"]:
                     item["schema_versions"].append(version_text)
+                try:
+                    numeric_version = int(version)
+                except (TypeError, ValueError):
+                    numeric_version = 0
+                if numeric_version > item["schema_version_max"]:
+                    item["schema_version_max"] = numeric_version
 
                 for field in SCALARS:
                     if field in obj:
@@ -393,15 +495,10 @@ def fold(ledger_path, folded_at):
             "outcome": item["outcome"] in KNOWN_OUTCOMES,
             "severity": item["severity"] in KNOWN_SEVERITIES,
         }
-        if not item["outcome"]:
-            # Silence on the outcome axis means the work has not been observed
-            # to end. That is a default over ABSENCE, never over a value the
-            # ledger carried, and it is the one reading that claims nothing: a
-            # cleanup states how the work ended, and until one does, nothing
-            # has.
-            item["outcome"] = OUTCOME_WHEN_UNSTATED
-            item["recognized"]["outcome"] = True
-            item["defaulted_outcome"] = True
+        stated_outcome = bool(item["outcome"])
+        resolve_outcome(item)
+        if not stated_outcome:
+            item["recognized"]["outcome"] = item["outcome"] in KNOWN_OUTCOMES
         if not item["kind"]:
             # An outcome is only ever recorded about work, so a kind-less record
             # that carries one folds to a task rather than to the generic event
@@ -438,6 +535,26 @@ def fold(ledger_path, folded_at):
         if not item["owner"]:
             item["owner"] = {"needs-captain": "captain",
                              "needs-cocaptain": "cocaptain"}.get(item["state"], "firstmate")
+        # ONE PREDICATE FOR ONE RULE. The board draws this warning and
+        # bin/fm-bridge.sh's lint reports it; when each spelled the rule for
+        # itself they disagreed about which axis it tested, so the fold states
+        # it once and both read the same field. The phrase names the axis that
+        # actually triggered, because "resolved" and "landed" are answers to
+        # different questions.
+        # Published, not left to be re-derived. Every consumer that needs to
+        # know whether the work has been observed to end - the board, the
+        # linter, the co-captain's audit - reads this one answer, because a
+        # second spelling of it is how two readers of one fact drift apart.
+        item["ended"] = ended(item)
+        item["pointer_gap"] = ""
+        if item["kind"] in ("decision", "critical") and not item["pointer"]:
+            closed_by = []
+            if item["state"] == "resolved":
+                closed_by.append("state resolved")
+            if item["outcome"] == "landed":
+                closed_by.append("outcome landed")
+            if closed_by:
+                item["pointer_gap"] = " and ".join(closed_by)
         if not item["project"]:
             item["project"] = "fleet"
 
@@ -615,33 +732,46 @@ def fold(ledger_path, folded_at):
     # kinds they read. Substrate is reported separately rather than folded in,
     # because a machinery record inflating "resolved" would quietly change what
     # the tallies mean.
-    # ONE TALLY PER AXIS. `summary` counts who owes what; `outcomes` counts how
-    # work ended. Neither is derived from the other, and neither is a rollup of
-    # both - a single blended tally is exactly the collapse that let a merged
-    # task be counted as thrown away.
+    # ONE TALLY PER AXIS, AND EACH TALLY COUNTS EVERY ITEM.
     #
-    # The ask states count ASKS, which is the same conjunction the queues use:
-    # owed AND still live. That is not the outcome axis overriding the state
-    # axis - `summary` and the queues answer the same question and must answer
-    # it the same way, or the board disagrees with its own index.
+    # `summary` partitions the board's items by who owes them; `outcomes`
+    # partitions the SAME items by how they ended. Both sum to
+    # `counts.board_items`, so a reader who sees a needs-captain chip can find
+    # that item in the state tally and read on the other axis why it is not an
+    # ask. A tally that drops items is the same failure as a fold that drops
+    # lines: on a surface whose discipline is that the numbers add up in public,
+    # a silent gap is where a wrong reading hides.
+    #
+    # The ASK COUNT is a third, separate number - the conjunction the queues
+    # use, owed AND still live - and it is labelled as one rather than being
+    # folded into either axis.
     summary = {"needs-captain": 0, "needs-cocaptain": 0, "fm-handling": 0,
-               "resolved": 0, "unrecognized": 0}
+               "resolved": 0, "unstated": 0, "unrecognized": 0}
     outcomes = {outcome: 0 for outcome in KNOWN_OUTCOMES}
     outcomes["unrecognized"] = 0
-    for item in items.values():
+    outcome_sources = {source: 0 for source in OUTCOME_SOURCES}
+    board_items = 0
+    unobserved_outcomes = []
+    for key in order:
+        item = items[key]
         if item["kind"] not in BOARD_KINDS:
             continue
+        board_items += 1
         state = owed_by(item)
-        if state not in summary:
-            summary["unrecognized"] += 1
-        elif state in ("needs-captain", "needs-cocaptain") and ended(item):
-            pass
-        else:
+        if state in summary and state != "unstated":
             summary[state] += 1
+        elif not state:
+            summary["unstated"] += 1
+        else:
+            summary["unrecognized"] += 1
         if item["recognized"]["outcome"]:
             outcomes[item["outcome"]] += 1
         else:
             outcomes["unrecognized"] += 1
+        outcome_sources[item["outcome_source"]] = \
+            outcome_sources.get(item["outcome_source"], 0) + 1
+        if item["outcome_source"] == "unobserved":
+            unobserved_outcomes.append(key)
 
     lifecycle_counts = {stage: 0 for stage in LIFECYCLE_STAGES}
     for key in steering:
@@ -668,6 +798,7 @@ def fold(ledger_path, folded_at):
             "records": records,
             "malformed": len(malformed),
             "items": len(items),
+            "board_items": board_items,
         },
         # The conservation invariant, stated as data so every consumer can check
         # it without re-deriving it.
@@ -698,6 +829,11 @@ def fold(ledger_path, folded_at):
         "glossary": glossary,
         "summary": summary,
         "outcomes": outcomes,
+        "outcome_sources": outcome_sources,
+        # Items whose ending nobody could observe, named rather than folded
+        # away: a row the fold cannot resolve is worth the captain seeing once.
+        "unobserved_outcomes": unobserved_outcomes,
+        "asks_count": len(asks),
         "substrate": substrate,
         "caps": {
             "events": CAP_EVENTS,
@@ -890,6 +1026,10 @@ h1 .sub { color:var(--tn-dim); font-weight:400; font-size:.85rem; margin-left:.6
   font-size:.8rem; background:var(--tn-panel); min-width:0;
 }
 .tally b { font-size:1rem; margin-right:.3rem; }
+.tallylbl {
+  flex-basis:100%; font-size:.7rem; text-transform:uppercase; letter-spacing:.09em;
+  color:var(--tn-muted); margin-bottom:-.2rem;
+}
 .tally.ask { border-color:var(--tn-red); } .tally.ask b { color:var(--tn-red); }
 .tally.fm  { border-color:var(--tn-blue); } .tally.fm b { color:var(--tn-blue); }
 .tally.ok  { border-color:var(--tn-green); } .tally.ok b { color:var(--tn-green); }
@@ -1224,7 +1364,7 @@ def outcome_chip(item):
     instead of it, because a row that shows one axis makes the reader guess the
     other - and every guess so far has been wrong in an expensive direction."""
     outcome = item["outcome"]
-    if outcome == OUTCOME_WHEN_UNSTATED:
+    if outcome == IN_FLIGHT:
         return ""
     if not item.get("recognized", {}).get("outcome", True):
         return '<span class="chip odd">%s ?</span>' % esc(outcome)
@@ -1253,10 +1393,11 @@ def meta_line(item):
 
 def pointer_line(item):
     if not item["pointer"]:
-        if item["outcome"] == "landed" and item["kind"] in ("decision", "critical"):
+        if item["pointer_gap"]:
             return ('<div class="pointer"><span class="lbl">outcome</span>'
-                    '<span style="color:var(--tn-orange)">resolved with no pointer '
-                    '- see record hygiene</span></div>')
+                    '<span style="color:var(--tn-orange)">%s, with no pointer to '
+                    'where it went - see record hygiene</span></div>'
+                    % esc(item["pointer_gap"]))
         return ""
     target = item["pointer"]
     if target.startswith("http://") or target.startswith("https://"):
@@ -1380,29 +1521,39 @@ def render_html(doc, checked_at):
     add('<header class="top"><div class="wrap">')
     add('<h1>Bridge<span class="sub">fleet state, generated from the ledger</span></h1>')
     add(freshness_html(checked_at, doc["folded_at"]))
+    # THREE GROUPS, AND TWO OF THEM ADD UP. The ask count is the conjunction -
+    # owed AND still live - and is labelled as its own number rather than being
+    # blended into either axis. Below it each axis partitions the SAME items, so
+    # both rows total `records folded`'s item count and a chip a reader can see
+    # is always a chip they can find in a tally.
+    total = counts["board_items"]
     add('<div class="tallies">')
-    add('<div class="tally ask"><b>%d</b>need you</div>' % summary.get("needs-captain", 0))
-    if summary.get("needs-cocaptain", 0):
+    add('<div class="tally ask" title="asks: someone owes a decision AND the '
+        'work is still live"><b>%d</b>waiting on you</div>' % len(asks))
+    if doc["cocaptain_asks"]:
         add('<div class="tally co"><b>%d</b>with the co-captain</div>'
-            % summary["needs-cocaptain"])
-    add('<div class="tally fm"><b>%d</b>firstmate has</div>' % summary.get("fm-handling", 0))
-    add('<div class="tally ok"><b>%d</b>resolved</div>' % summary.get("resolved", 0))
-    if summary.get("unrecognized", 0):
-        add('<div class="tally warn"><b>%d</b>unrecognized state</div>'
-            % summary["unrecognized"])
-    # The second axis gets its own tiles rather than being blended into the
-    # first: who owes what and how work ended are different questions, and one
-    # number answering both is what made merged work read as thrown away.
-    if outcomes.get("landed", 0):
-        add('<div class="tally ok"><b>%d</b>landed</div>' % outcomes["landed"])
-    if outcomes.get("discarded", 0):
-        add('<div class="tally warn"><b>%d</b>discarded</div>' % outcomes["discarded"])
-    if outcomes.get("unknown", 0):
-        add('<div class="tally warn"><b>%d</b>ended, how unknown</div>'
-            % outcomes["unknown"])
-    if outcomes.get("unrecognized", 0):
-        add('<div class="tally warn"><b>%d</b>unrecognized outcome</div>'
-            % outcomes["unrecognized"])
+            % len(doc["cocaptain_asks"]))
+    add("</div>")
+    add('<div class="tallies"><div class="tallylbl">who owes it, all %d</div>' % total)
+    for state, label, cls in (("needs-captain", "needs-captain", "ask"),
+                              ("needs-cocaptain", "needs-cocaptain", "co"),
+                              ("fm-handling", "firstmate has", "fm"),
+                              ("resolved", "resolved", "ok"),
+                              ("unstated", "never said", "warn"),
+                              ("unrecognized", "unrecognized", "warn")):
+        if summary.get(state, 0) or state in ("needs-captain", "fm-handling", "resolved"):
+            add('<div class="tally %s"><b>%d</b>%s</div>'
+                % (cls, summary.get(state, 0), esc(label)))
+    add("</div>")
+    add('<div class="tallies"><div class="tallylbl">how it ended, all %d</div>' % total)
+    for outcome, label, cls in (("in-flight", "still going", "fm"),
+                                ("landed", "landed", "ok"),
+                                ("discarded", "discarded", "warn"),
+                                ("unknown", "ended, how unknown", "warn"),
+                                ("unrecognized", "unrecognized", "warn")):
+        if outcomes.get(outcome, 0) or outcome in ("in-flight", "landed"):
+            add('<div class="tally %s"><b>%d</b>%s</div>'
+                % (cls, outcomes.get(outcome, 0), esc(label)))
     add('<div class="tally"><b>%d</b>records folded</div>' % counts["records"])
     add("</div>")
     add('<p class="zone-note">Two things about every row, kept apart: who owes it, '
@@ -1432,6 +1583,19 @@ def render_html(doc, checked_at):
         if doc["malformed_omitted"]:
             add("<div>+%d more unreadable lines.</div>" % doc["malformed_omitted"])
         add("</div>")
+    # Rows the fold could not resolve are NAMED, not quietly filled in. These
+    # were written before the outcome axis existed, so their silence about how
+    # the work ended says nothing at all - and a row nobody can resolve is worth
+    # the captain seeing once rather than acquiring a confident-looking value.
+    if doc["unobserved_outcomes"]:
+        unresolved = doc["unobserved_outcomes"]
+        add('<div class="banner"><b>%d %s written before the outcome axis '
+            "existed.</b> Nothing in the record says how they ended, so the "
+            "board says unknown rather than guessing: %s.%s</div>"
+            % (len(unresolved),
+               "row was" if len(unresolved) == 1 else "rows were",
+               ", ".join(esc(items[key]["ref"] or key) for key in unresolved[:8]),
+               "" if len(unresolved) <= 8 else " +%d more" % (len(unresolved) - 8)))
     if not doc["ledger"]["present"]:
         add('<div class="banner">No ledger at <code>%s</code> yet. '
             "The board is empty because nothing has been written, not because "

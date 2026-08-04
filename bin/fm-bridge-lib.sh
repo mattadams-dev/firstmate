@@ -47,7 +47,11 @@ if [ -n "${FM_BRIDGE_LIB_SOURCED:-}" ]; then
 fi
 FM_BRIDGE_LIB_SOURCED=1
 
-FM_BRIDGE_SCHEMA_VERSION=1
+# v2 added the `outcome` axis. The bump is load-bearing for the READER: at v1 a
+# writer had no way to say how work ended, so silence carries no information and
+# must not be read as "still going". From v2 a writer that stays silent on the
+# axis it can speak means it, and the fold may read that silence as in-flight.
+FM_BRIDGE_SCHEMA_VERSION=2
 FM_BRIDGE_MAX_RECORD_BYTES=${FM_BRIDGE_MAX_RECORD_BYTES:-3800}
 
 # The four captain-facing zones, plus two substrate kinds.
@@ -82,8 +86,10 @@ FM_BRIDGE_STATES='needs-captain needs-cocaptain fm-handling resolved'
 # owes it. `state` answers WHO OWES THIS. `outcome` answers HOW IT ENDED.
 # `phase` answers WHERE IT GOT TO mechanically (dispatched, pr-open, merged,
 # cleaned, force-cleaned) and is not a disposition at all.
-#   in-flight - the default when no record has said otherwise: the work has not
-#               been observed to end
+#   in-flight - a v2+ writer had this vocabulary and stated nothing, so the work
+#               has not been observed to end. Silence from a v1 writer is NOT
+#               this value: it had no way to say, so it said nothing about
+#               anything (see the fold's backfill contract)
 #   landed    - it ended by being carried through; the outcome exists
 #   discarded - it ended by being thrown away; nothing was kept
 #   unknown   - it ended and NOBODY COULD TELL HOW. This value is not

@@ -549,54 +549,123 @@ content_in_default() {
 #
 # Never guess in either direction: an unknown recorded as `discarded` invents a
 # loss, and an unknown recorded as `landed` invents an outcome.
-landed_work_verdict() {  # -> landed | discarded | unknown
+# THE ONE LANDED-WORK DETERMINATION. Both readers of it live below: the gate
+# that refuses, and the record of how the work ended. They must not be two
+# implementations of one question - that is the drift this whole design exists
+# to prevent, and it already produced a verdict of `landed` for a dirty
+# worktree the gate itself refuses as unlanded.
+#
+# This function OBSERVES and never refuses, never prints, and never waits: the
+# refusal messages and the lock probe belong to the gate, because they only make
+# sense when something is being blocked. It fills:
+#
+#   LANDED_WORK_VERDICT   landed | discarded | unknown
+#   LANDED_WORK_REASON    which condition decided it, for the gate's message
+#   LANDED_WORK_DETAIL    the evidence to print with that message
+#   LANDED_WORK_BLOCKED   what could not be inspected, for the gate's lock probe
+#
+# Uncommitted changes are unlanded work on EVERY path, not just the local-only
+# one: teardown hard-resets and removes the worktree, so those changes are gone,
+# and AGENTS.md's third hard rule says so plainly.
+LANDED_WORK_VERDICT=unknown
+LANDED_WORK_REASON=
+LANDED_WORK_DETAIL=
+LANDED_WORK_BLOCKED=
+LANDED_WORK_DIRTY=
+LANDED_WORK_DEFAULT_BRANCH=
+
+evaluate_landed_work() {
   local dirty_raw dirty unpushed_raw unpushed DEFAULT unmerged_raw unmerged branch
-  [ -d "$WT" ] || { printf 'unknown'; return 0; }
+  LANDED_WORK_VERDICT=unknown
+  LANDED_WORK_REASON=
+  LANDED_WORK_DETAIL=
+  LANDED_WORK_BLOCKED=
+  LANDED_WORK_DIRTY=
+  LANDED_WORK_DEFAULT_BRANCH=
+
+  if [ ! -d "$WT" ]; then
+    LANDED_WORK_REASON="not-applicable"
+    return 0
+  fi
   case "$KIND" in
-    secondmate|scout) printf 'unknown'; return 0 ;;
+    secondmate|scout)
+      LANDED_WORK_REASON="not-applicable"
+      return 0 ;;
   esac
-  dirty_raw=$(git -C "$WT" status --porcelain 2>/dev/null) \
-    || { printf 'unknown'; return 0; }
+
+  if ! dirty_raw=$(git -C "$WT" status --porcelain 2>/dev/null); then
+    LANDED_WORK_REASON=uninspectable
+    LANDED_WORK_BLOCKED="uncommitted changes"
+    return 0
+  fi
   dirty=$(printf '%s\n' "$dirty_raw" | grep -vE '^\?\? (\.claude/|\.fm-(grok|kimi)-turnend$)' | head -1 || true)
-  unpushed_raw=$(git -C "$WT" log --oneline HEAD --not --remotes -- 2>/dev/null) \
-    || { printf 'unknown'; return 0; }
+
+  if ! unpushed_raw=$(git -C "$WT" log --oneline HEAD --not --remotes -- 2>/dev/null); then
+    LANDED_WORK_REASON=uninspectable
+    LANDED_WORK_BLOCKED="commits not on a remote"
+    return 0
+  fi
   unpushed=$(printf '%s\n' "$unpushed_raw" | head -5)
 
   if [ -n "$unpushed" ] && [ "$MODE" = local-only ]; then
-    DEFAULT=$(default_branch) || { printf 'unknown'; return 0; }
-    unmerged_raw=$(git -C "$WT" log --oneline HEAD --not "$DEFAULT" -- 2>/dev/null) \
-      || { printf 'unknown'; return 0; }
+    DEFAULT=$(default_branch) || {
+      LANDED_WORK_REASON="no-default-branch"
+      return 0
+    }
+    if ! unmerged_raw=$(git -C "$WT" log --oneline HEAD --not "$DEFAULT" -- 2>/dev/null); then
+      LANDED_WORK_REASON=uninspectable
+      LANDED_WORK_BLOCKED="commits not on $DEFAULT"
+      return 0
+    fi
     unmerged=$(printf '%s\n' "$unmerged_raw" | head -5)
     if [ -n "$dirty" ] || [ -n "$unmerged" ]; then
-      printf 'discarded'
-    else
-      printf 'landed'
+      LANDED_WORK_VERDICT=discarded
+      LANDED_WORK_REASON="local-unmerged"
+      LANDED_WORK_DETAIL=$unmerged
+      LANDED_WORK_DEFAULT_BRANCH=$DEFAULT
+      LANDED_WORK_DIRTY=$dirty
+      return 0
     fi
+    LANDED_WORK_VERDICT=landed
+    LANDED_WORK_REASON="on-default-branch"
+    return 0
+  fi
+
+  if [ -n "$dirty" ]; then
+    LANDED_WORK_VERDICT=discarded
+    LANDED_WORK_REASON=dirty
     return 0
   fi
 
   if [ -z "$unpushed" ]; then
-    printf 'landed'
+    LANDED_WORK_VERDICT=landed
+    LANDED_WORK_REASON="on-a-remote"
     return 0
   fi
+
   branch=${TEARDOWN_WORKTREE_BRANCH_FOR_SAFETY:-}
   if [ -z "$branch" ]; then
     branch=$(git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)
+    TEARDOWN_WORKTREE_BRANCH_FOR_SAFETY=$branch
   fi
+  LANDED_WORK_DETAIL=$unpushed
   if pr_is_merged "$branch"; then
-    printf 'landed'
+    LANDED_WORK_VERDICT=landed
+    LANDED_WORK_REASON="pr-merged"
     return 0
   fi
   if content_in_default; then
-    printf 'landed'
+    LANDED_WORK_VERDICT=landed
+    LANDED_WORK_REASON="content-in-default"
     return 0
   fi
   # Both said no. Only the content comparison can tell "no" from "could not
   # look", so it decides whether this is a discard or an open question.
   if [ "$CONTENT_IN_DEFAULT_CONCLUSIVE" -eq 1 ]; then
-    printf 'discarded'
+    LANDED_WORK_VERDICT=discarded
+    LANDED_WORK_REASON=unlanded
   else
-    printf 'unknown'
+    LANDED_WORK_REASON="cannot-tell"
   fi
 }
 
@@ -856,70 +925,48 @@ teardown_treehouse_return() {
   return 1
 }
 
+# The GATE. It adds refusal, messages, and the stale-lock probe on top of the
+# determination above - and recomputes nothing, so a verdict the board records
+# and a refusal the operator reads can never disagree about the same worktree.
 validate_worktree_teardown_safety() {
-  local dirty_raw dirty unpushed_raw unpushed DEFAULT unmerged_raw unmerged branch
   [ -d "$WT" ] || return 0
   [ "$FORCE" != "--force" ] || return 0
   case "$KIND" in
     secondmate|scout) return 0 ;;
   esac
 
-  if ! dirty_raw=$(git -C "$WT" status --porcelain 2>/dev/null); then
-    if worktree_safety_blocked_by_lock "uncommitted changes"; then
-      return "$TEARDOWN_WORKTREE_SAFETY_LOCK_BLOCKED"
-    fi
-    echo "REFUSED: cannot inspect worktree $WT for uncommitted changes." >&2
-    echo "Restore the git index state, or get the captain's explicit OK to discard, then --force." >&2
-    return 1
-  fi
-  dirty=$(printf '%s\n' "$dirty_raw" | grep -vE '^\?\? (\.claude/|\.fm-(grok|kimi)-turnend$)' | head -1 || true)
+  evaluate_landed_work
 
-  if ! unpushed_raw=$(git -C "$WT" log --oneline HEAD --not --remotes -- 2>/dev/null); then
-    if worktree_safety_blocked_by_lock "commits not on a remote"; then
-      return "$TEARDOWN_WORKTREE_SAFETY_LOCK_BLOCKED"
-    fi
-    echo "REFUSED: cannot inspect worktree $WT for commits not on a remote." >&2
-    echo "Restore the git index state, or get the captain's explicit OK to discard, then --force." >&2
-    return 1
-  fi
-  unpushed=$(printf '%s\n' "$unpushed_raw" | head -5)
-
-  if [ -n "$unpushed" ] && [ "$MODE" = local-only ]; then
-    DEFAULT=$(default_branch) || { echo "REFUSED: cannot determine default branch for $PROJ; expected origin/HEAD, main, or master." >&2; return 1; }
-    if ! unmerged_raw=$(git -C "$WT" log --oneline HEAD --not "$DEFAULT" -- 2>/dev/null); then
-      if worktree_safety_blocked_by_lock "commits not on $DEFAULT"; then
+  case "$LANDED_WORK_REASON" in
+    uninspectable)
+      if worktree_safety_blocked_by_lock "$LANDED_WORK_BLOCKED"; then
         return "$TEARDOWN_WORKTREE_SAFETY_LOCK_BLOCKED"
       fi
-      echo "REFUSED: cannot inspect worktree $WT for commits not on $DEFAULT." >&2
+      echo "REFUSED: cannot inspect worktree $WT for $LANDED_WORK_BLOCKED." >&2
       echo "Restore the git index state, or get the captain's explicit OK to discard, then --force." >&2
-      return 1
-    fi
-    unmerged=$(printf '%s\n' "$unmerged_raw" | head -5)
-    if [ -n "$dirty" ] || [ -n "$unmerged" ]; then
-      echo "REFUSED: local-only worktree $WT has work not yet merged into $DEFAULT and not on any remote." >&2
-      [ -n "$dirty" ] && echo "uncommitted changes present" >&2
-      [ -n "$unmerged" ] && printf 'commits not yet on %s:\n%s\n' "$DEFAULT" "$unmerged" >&2
-      echo "Merge the branch into local $DEFAULT first (bin/fm-merge-local.sh after the captain approves), or push to a fork/remote, or get the captain's explicit OK to discard, then --force." >&2
-      return 1
-    fi
-  elif [ -n "$dirty" ]; then
-    echo "REFUSED: worktree $WT has uncommitted changes." >&2
-    echo "uncommitted changes present" >&2
-    echo "Commit them (or get the captain's explicit OK to discard, then --force)." >&2
-    return 1
-  elif [ -n "$unpushed" ]; then
-    branch=${TEARDOWN_WORKTREE_BRANCH_FOR_SAFETY:-}
-    if [ -z "$branch" ]; then
-      branch=$(git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)
-      TEARDOWN_WORKTREE_BRANCH_FOR_SAFETY=$branch
-    fi
-    if ! work_is_landed "$branch"; then
+      return 1 ;;
+    no-default-branch)
+      echo "REFUSED: cannot determine default branch for $PROJ; expected origin/HEAD, main, or master." >&2
+      return 1 ;;
+    local-unmerged)
+      echo "REFUSED: local-only worktree $WT has work not yet merged into $LANDED_WORK_DEFAULT_BRANCH and not on any remote." >&2
+      [ -n "$LANDED_WORK_DIRTY" ] && echo "uncommitted changes present" >&2
+      [ -n "$LANDED_WORK_DETAIL" ] \
+        && printf 'commits not yet on %s:\n%s\n' "$LANDED_WORK_DEFAULT_BRANCH" "$LANDED_WORK_DETAIL" >&2
+      echo "Merge the branch into local $LANDED_WORK_DEFAULT_BRANCH first (bin/fm-merge-local.sh after the captain approves), or push to a fork/remote, or get the captain's explicit OK to discard, then --force." >&2
+      return 1 ;;
+    dirty)
+      echo "REFUSED: worktree $WT has uncommitted changes." >&2
+      echo "uncommitted changes present" >&2
+      echo "Commit them (or get the captain's explicit OK to discard, then --force)." >&2
+      return 1 ;;
+    unlanded|cannot-tell)
       echo "REFUSED: worktree $WT has work not on any remote and not landed." >&2
-      printf 'unpushed commits:\n%s\n' "$unpushed" >&2
+      printf 'unpushed commits:\n%s\n' "$LANDED_WORK_DETAIL" >&2
       echo "Push the branch, land its PR, or get the captain's explicit OK to discard, then --force." >&2
-      return 1
-    fi
-  fi
+      return 1 ;;
+  esac
+  return 0
 }
 
 require_orca_worktree_path_match() {
@@ -1503,16 +1550,13 @@ if [ "$BACKEND" = orca ] && [ "$KIND" != scout ] && [ "$KIND" != secondmate ] &&
   ORCA_PATH_MATCH_VERIFIED=1
 fi
 
-# Asked here, while the worktree still exists: every answer below this point is
-# about a copy that is about to be removed. A non-forced teardown only proceeds
-# past the check below when the landed-work test passed, so it records `landed`;
-# a forced one records whatever the same determination actually found.
-if [ "$FORCE" = "--force" ]; then
-  TEARDOWN_OUTCOME=$(landed_work_verdict)
-else
-  TEARDOWN_OUTCOME=landed
-fi
-
+# Asked while the worktree still exists: every answer below this point is about
+# a copy that is about to be removed. BOTH paths record what the determination
+# actually found - a forced cleanup because it skipped only the refusal, and a
+# non-forced one because "the gate let it through" is not the same statement as
+# "the landed-work test passed". The gate returns 0 without testing anything
+# when there is no worktree and for scout and secondmate kinds, and recording
+# `landed` there would be exactly the guess `unknown` exists to forbid.
 if [ -d "$WT" ] && [ "$FORCE" != "--force" ]; then
   if validate_worktree_teardown_safety; then
     :
@@ -1525,7 +1569,10 @@ if [ -d "$WT" ] && [ "$FORCE" != "--force" ]; then
       exit 1
     fi
   fi
+else
+  evaluate_landed_work
 fi
+TEARDOWN_OUTCOME=$LANDED_WORK_VERDICT
 
 # A Herdr close may reposition shared workspace order, so the whole
 # destructive sequence below (worktree return, pane close, record removal)

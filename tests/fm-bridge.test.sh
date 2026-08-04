@@ -418,7 +418,7 @@ cat > "$LEDGER9" <<'EOF'
 EOF
 lint_out=$(FM_HOME=$HOME9 "$BRIDGE" lint)
 case "$lint_out" in
-  *"resolved with no pointer"*) : ;;
+  *"state resolved, with no pointer to where it went"*) : ;;
   *) fail "lint: did not flag a resolved decision with no pointer" ;;
 esac
 case "$lint_out" in
@@ -1146,11 +1146,14 @@ for key in ("task-pr", "m-gone"):
 # changed, the ledger did not.
 if doc["items"]["task-pr"]["state"] != "needs-captain":
     sys.exit("the cleanup rewrote the disposition the ledger recorded")
-if doc["summary"]["needs-captain"] != 1:
-    sys.exit("captain tally is %d, so work that ended is still counted as owed"
-             % doc["summary"]["needs-captain"])
-if doc["summary"]["needs-cocaptain"]:
-    sys.exit("the co-captain tally still counts work that ended")
+# The ASK count is the conjunction and drops it; the state tally still counts
+# it, because a chip a reader can see must be findable in a count.
+if doc["asks_count"] != 1:
+    sys.exit("the ask count is %d, so work that ended is still asked about"
+             % doc["asks_count"])
+if doc["summary"]["needs-captain"] != 2:
+    sys.exit("the state tally is %r - it should still count the row that earned "
+             "needs-captain before the work ended" % doc["summary"])
 if doc["asks"] != ["o-live"]:
     sys.exit("the asks index is %r, not the one live ask" % doc["asks"])
 ' || fail "asks: see the reported queue"
@@ -1159,7 +1162,9 @@ pass "work that ended leaves every queue, tally, and aging flag it had earned"
 # The OTHER half of the conjunction, tested alone: a live item that nobody owes
 # is not an ask either, for an entirely independent reason.
 HOME23B=$(new_home)
-FM_HOME=$HOME23B "$BRIDGE" task -q --id t-settled --project orca --phase merged \
+# Deliberately no merge evidence: this fixture has to stay live on the outcome
+# axis so the STATE half of the conjunction is what disqualifies it.
+FM_HOME=$HOME23B "$BRIDGE" task -q --id t-settled --project orca --phase validating \
   --state resolved --pointer "https://example.invalid/pull/3" >/dev/null
 FM_HOME=$HOME23B "$RENDER" --state | python3 -c '
 import json, sys
@@ -1273,12 +1278,19 @@ if doc["asks"] or doc["cocaptain_asks"]:
 # The state tally reads the state axis. A consumer that re-derived it by
 # ranking - counting an ending as though it were a disposition - would move
 # these counts, which is what a blended value did before there were two axes.
-expected = {"needs-captain": 0, "needs-cocaptain": 0, "fm-handling": 3,
-            "resolved": 3, "unrecognized": 0}
+expected = {"needs-captain": 3, "needs-cocaptain": 3, "fm-handling": 3,
+            "resolved": 3, "unstated": 0, "unrecognized": 0}
 got = {key: doc["summary"][key] for key in expected}
 if got != expected:
     sys.exit("the state tally is %r, not %r - something is ranking the axes"
              % (got, expected))
+# Each axis partitions the same items, so both add up to the same total.
+if sum(doc["summary"].values()) != doc["counts"]["board_items"]:
+    sys.exit("the state axis counts %d of %d items"
+             % (sum(doc["summary"].values()), doc["counts"]["board_items"]))
+if sum(doc["outcomes"].values()) != doc["counts"]["board_items"]:
+    sys.exit("the outcome axis counts %d of %d items"
+             % (sum(doc["outcomes"].values()), doc["counts"]["board_items"]))
 # The outcome tally reads the outcome axis, with four items per ending.
 for outcome in outcomes:
     if doc["outcomes"][outcome] != 4:
@@ -1353,5 +1365,171 @@ for group in zones["decisions"]:
         sys.exit("a discarded decision was filed under landed: %r" % group["landed"])
 ' || fail "zones: see the reported placement"
 pass "a critical or decision that ended is grouped by how it ended, never under landed"
+
+# --- 26. absence on the outcome axis is read against what the writer could say
+
+# Five rounds of rows were written before this axis existed. Reading their
+# silence as `in-flight` would assert in bulk that all of it is still running -
+# a claim, in a field built to be authoritative. So absence is resolved against
+# the schema version the record carries, and only EVIDENCE may fill a value.
+
+HOME26=$(new_home)
+LEDGER26=$(ledger_of "$HOME26")
+mkdir -p "$(dirname "$LEDGER26")"
+cat > "$LEDGER26" <<'EOF'
+{"v":1,"ts":"2026-07-30T10:00:00Z","id":"old-quiet","kind":"task","project":"orca","state":"fm-handling","title":"written before the axis existed"}
+{"v":1,"ts":"2026-07-30T10:01:00Z","id":"old-merged","kind":"task","project":"orca","state":"resolved","phase":"merged","pointer":"https://example.invalid/pull/4","title":"merged before the axis existed"}
+{"v":1,"ts":"2026-07-30T10:02:00Z","id":"old-discard","kind":"task","project":"orca","state":"fm-handling","phase":"discarded","note":"forced teardown: landed-work check skipped, work discarded - the old conflated record","title":"force-cleaned before the axis existed"}
+{"ts":"2026-07-30T10:03:00Z","id":"no-version","kind":"task","project":"orca","state":"fm-handling","title":"no v at all"}
+{"v":2,"ts":"2026-07-31T10:04:00Z","id":"new-quiet","kind":"task","project":"orca","state":"fm-handling","title":"written after the axis, saying nothing"}
+{"v":2,"ts":"2026-07-31T10:05:00Z","id":"new-stated","kind":"task","project":"orca","state":"resolved","outcome":"landed","phase":"cleaned","pointer":"https://example.invalid/pull/5","title":"written after the axis, saying so"}
+EOF
+
+FM_HOME=$HOME26 "$RENDER" --state | python3 -c '
+import json, sys
+doc = json.load(sys.stdin)
+items = doc["items"]
+
+# A pre-axis row that nothing resolves is unknown, and says why.
+for key in ("old-quiet", "no-version"):
+    item = items[key]
+    if item["outcome"] != "unknown":
+        sys.exit("%s reads %r; a writer with no outcome vocabulary said nothing about "
+                 "how the work ended" % (key, item["outcome"]))
+    if item["outcome_source"] != "unobserved":
+        sys.exit("%s claims source %r" % (key, item["outcome_source"]))
+    if not item["outcome_evidence"]:
+        sys.exit("%s does not say why its ending is unobservable" % key)
+
+# An old phase=discarded is NOT evidence of a discard. It is the ambiguous
+# field the two axes exist to split, and laundering it would dress the old
+# ambiguity in the new axis confidence.
+discard = items["old-discard"]
+if discard["outcome"] == "discarded":
+    sys.exit("an old phase=discarded was mapped straight onto outcome=discarded, "
+             "which is the conflation this axis removes")
+if discard["outcome"] != "unknown" or discard["outcome_source"] != "unobserved":
+    sys.exit("the old force-cleaned row reads %r/%r"
+             % (discard["outcome"], discard["outcome_source"]))
+
+# Evidence, and only evidence, populates a value.
+merged = items["old-merged"]
+if merged["outcome"] != "landed":
+    sys.exit("a merged phase with a pointer is an observation of an ending, but "
+             "%s reads %r" % ("old-merged", merged["outcome"]))
+if merged["outcome_source"] != "backfilled":
+    sys.exit("the backfilled value does not say it was backfilled: %r"
+             % merged["outcome_source"])
+if "merged phase" not in merged["outcome_evidence"]:
+    sys.exit("the backfill does not name its evidence: %r" % merged["outcome_evidence"])
+
+# A post-axis row that genuinely says nothing still reads in-flight - the
+# correction must not swallow the legitimate case.
+quiet = items["new-quiet"]
+if quiet["outcome"] != "in-flight" or quiet["outcome_source"] != "unstated":
+    sys.exit("a v2 row with genuine silence reads %r/%r, not in-flight/unstated"
+             % (quiet["outcome"], quiet["outcome_source"]))
+
+# And a stated value is reported as stated, never as worked out.
+stated = items["new-stated"]
+if stated["outcome"] != "landed" or stated["outcome_source"] != "observed":
+    sys.exit("a stated outcome reads %r/%r" % (stated["outcome"], stated["outcome_source"]))
+' || fail "backfill: see the reported row"
+pass "pre-axis silence is unknown, evidence backfills, and post-axis silence is still in-flight"
+
+# The rows nobody can resolve are named on the board, not quietly filled in.
+FM_HOME=$HOME26 "$RENDER" --html > "$TMP_ROOT/backfill.html"
+case "$(cat "$TMP_ROOT/backfill.html")" in
+  *"written before the outcome axis existed"*) : ;;
+  *) fail "backfill: the board does not surface the rows it could not resolve" ;;
+esac
+unresolved=$(state_query "$HOME26" 'sorted(d["unobserved_outcomes"])')
+[ "$unresolved" = "['no-version', 'old-discard', 'old-quiet']" ] \
+  || fail "backfill: unobserved_outcomes is $unresolved"
+pass "rows whose ending nobody can observe are named on the board and in --state"
+
+# --- 27. each axis counts every item, and the ask count is its own number ---
+#
+# Ledger conservation says every non-blank line is accounted for. The same
+# discipline applies to the tallies: a reader who sees a needs-captain chip
+# must be able to find that item in a count, and read on the other axis why it
+# is not an ask.
+
+HOME27=$(new_home)
+for state in needs-captain needs-cocaptain fm-handling resolved; do
+  for outcome in in-flight landed discarded unknown; do
+    FM_HOME=$HOME27 "$BRIDGE" task -q --id "p-$state-$outcome" --project orca \
+      --state "$state" --outcome "$outcome" >/dev/null
+  done
+done
+FM_HOME=$HOME27 "$RENDER" --state | python3 -c '
+import json, sys
+doc = json.load(sys.stdin)
+total = doc["counts"]["board_items"]
+if total != 16:
+    sys.exit("expected 16 board items, got %d" % total)
+state_total = sum(doc["summary"].values())
+outcome_total = sum(doc["outcomes"].values())
+if state_total != total:
+    sys.exit("the state axis counts %d of %d items - it drops some silently"
+             % (state_total, total))
+if outcome_total != total:
+    sys.exit("the outcome axis counts %d of %d items" % (outcome_total, total))
+# The ask count is the conjunction and is published as its own number: four
+# needs-captain rows, of which only the in-flight one is an ask.
+if doc["asks_count"] != 1:
+    sys.exit("the ask count is %d, not the one owed-and-live item" % doc["asks_count"])
+if doc["summary"]["needs-captain"] != 4:
+    sys.exit("the state tally lost the needs-captain rows that ended: %r" % doc["summary"])
+' || fail "tallies: see the reported count"
+pass "both axes count every item, and the ask count stands apart from them"
+
+FM_HOME=$HOME27 "$RENDER" --html > "$TMP_ROOT/tallies.html"
+tallyboard=$(cat "$TMP_ROOT/tallies.html")
+case "$tallyboard" in
+  *"waiting on you"*) : ;;
+  *) fail "tallies: the board does not label the ask count" ;;
+esac
+case "$tallyboard" in
+  *"who owes it, all 16"*) : ;;
+  *) fail "tallies: the state axis does not say what it totals" ;;
+esac
+case "$tallyboard" in
+  *"how it ended, all 16"*) : ;;
+  *) fail "tallies: the outcome axis does not say what it totals" ;;
+esac
+pass "the board states what each axis totals, so a chip is always findable in a count"
+
+# --- 28. one pointer rule, one predicate, two readers ----------------------
+
+HOME28=$(new_home)
+FM_HOME=$HOME28 "$BRIDGE" append -q id=d-state kind=decision project=orca \
+  state=resolved title="closed on the state axis with nowhere to look" >/dev/null
+FM_HOME=$HOME28 "$BRIDGE" append -q id=d-outcome kind=decision project=orca \
+  state=needs-captain outcome=landed title="ended on the outcome axis with nowhere to look" >/dev/null
+FM_HOME=$HOME28 "$BRIDGE" ask -q --id d-fine --project orca --title "still open" \
+  --answer A >/dev/null
+
+FM_HOME=$HOME28 "$BRIDGE" lint > "$TMP_ROOT/pointer-lint.txt"
+FM_HOME=$HOME28 "$RENDER" --html > "$TMP_ROOT/pointer-board.html"
+python3 - "$TMP_ROOT/pointer-lint.txt" "$TMP_ROOT/pointer-board.html" <<'POINTER' || fail "pointer: see the report"
+import sys
+lint = open(sys.argv[1]).read()
+html = open(sys.argv[2]).read()
+for key, axis in (("d-state", "state resolved"), ("d-outcome", "outcome landed")):
+    if axis not in lint:
+        sys.exit("lint does not name the axis that triggered for %s: %s" % (key, lint))
+warned = html.count("with no pointer to where it went")
+flagged = lint.count("with no pointer to where it went")
+if warned != flagged:
+    sys.exit("the board warns on %d items and lint reports %d - one rule, two answers"
+             % (warned, flagged))
+if flagged != 2:
+    sys.exit("expected both closed-without-pointer items reported, got %d" % flagged)
+if "d-fine" in lint:
+    sys.exit("an open decision was reported as missing a pointer")
+sys.exit(0)
+POINTER
+pass "the board and the linter read one pointer rule and name the axis that triggered it"
 
 echo "all bridge ledger and fold tests passed"
