@@ -19,6 +19,8 @@ It lists channel directives, one per non-empty, non-comment line, and every list
 - `command:<cmd>` delivers the alarm summary to `<cmd>` on stdin and as an argument, allowing delivery to a phone or pager service.
   A directive that is nothing but one executable, with no arguments and no shell syntax, is run directly with the summary as its only argument.
   Every other directive runs through `sh -c` with the summary as `$1`, because appending an argument to a command that already carries its own can change what that command does.
+  Whitespace around `<cmd>` is ignored, so `command: <cmd>` and `command:<cmd>` are the same directive and reach the same branch.
+  A directive that is empty or nothing but whitespace runs nothing and logs that there was nothing to run.
 
 ## Summary format
 

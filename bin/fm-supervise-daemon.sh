@@ -641,14 +641,13 @@ escalate_add() {  # <state> <distilled-item>
 # supervisor pane. Returns 0 on successful inject (or empty buffer), non-zero on
 # inject failure (buffer preserved for retry / catch-up).
 escalate_flush() {  # <state>
-  local state=$1 buf item n msg kinds_seen=''
+  local state=$1 buf n msg
   buf="$state/.subsuper-escalations"
   [ -s "$buf" ] || return 0
-  n=$(wc -l < "$buf" 2>/dev/null || echo 0)
-  while IFS= read -r item || [ -n "$item" ]; do
-    [ -n "$item" ] || continue
-    kinds_seen="${kinds_seen}$(wedge_escalation_kind "$item")"$'\n'
-  done < "$buf"
+  # Non-blank items, the same unit wedge_summary_line counts, so a delivered
+  # record and a wedged one can never disagree on how many items a buffer held.
+  n=$(grep -c . "$buf" 2>/dev/null || true)
+  [ -n "$n" ] || n=0
   # Join buffered items with the literal " | " separator into one digest line.
   msg=$(awk 'NR>1{printf " | "} {printf "%s",$0} END{print ""}' "$buf" 2>/dev/null)
   # Single-line wrapper: no embedded newlines (inject_msg also collapses as a
@@ -657,8 +656,11 @@ escalate_flush() {  # <state>
   if inject_msg "$msg" "$state"; then
     # Name WHAT was delivered, not only that something was: the same count and
     # kind vocabulary the wedge summary uses, so a delivered batch and a wedged
-    # one are directly comparable in the record.
-    log "escalation flush delivered: $n item(s), kinds=$(fm_kind_list "$kinds_seen")"
+    # one are directly comparable in the record. Derived only here, on the
+    # confirmed-submit path: the wedged path retries this flush every batch
+    # window against a buffer that only grows, and a reading it discards is
+    # work no retry should pay for.
+    log "escalation flush delivered: $n item(s), kinds=$(fm_kind_list "$(wedge_buffer_kinds "$buf")")"
     : > "$buf"; rm -f "${buf}.since" "$state/.subsuper-inject-wedged"; return 0
   fi
   return 1
@@ -685,10 +687,22 @@ escalate_flush() {  # <state>
 #   auto | default   platform default: macOS -> osascript; otherwise none
 #   osascript        macOS Notification Center banner (backend-independent)
 #   herdr            herdr UI notification (herdr notification show)
-#   command:<cmd>    run <cmd> via `sh -c`, summary on $1 and on stdin
+#   command:<cmd>    run <cmd> with the summary on $1 and on stdin; whitespace
+#                    around <cmd> is ignored, so `command: <cmd>` is the same
+#                    directive (see wedge_alarm_command_is_bare_program for
+#                    which shapes get a shell and which do not)
 # An absent config means auto, i.e. default-ON on macOS: the alarm's whole
 # purpose is to never be silent, so the reachable OS channel fires unless the
 # captain explicitly disables it.
+
+# Strip leading and trailing whitespace. The single owner of that normalisation
+# for wedge-alarm config, so a directive is read the same way wherever it is
+# split out - the config LINE and the `command:` BODY it carries alike.
+fm_trim_ws() {  # <text> -> text
+  local s=$1
+  s="${s#"${s%%[![:space:]]*}"}"
+  printf '%s' "${s%"${s##*[![:space:]]}"}"
+}
 
 # Print the configured channel directives, one per line. FM_WEDGE_ALARM_CHANNEL
 # wins (a single directive); else each non-empty, non-comment line of
@@ -702,8 +716,7 @@ wedge_alarm_configured_channels() {
   cfg="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}/wedge-alarm"
   if [ -f "$cfg" ]; then
     while IFS= read -r line || [ -n "$line" ]; do
-      line="${line#"${line%%[![:space:]]*}"}"
-      line="${line%"${line##*[![:space:]]}"}"
+      line=$(fm_trim_ws "$line")
       [ -n "$line" ] || continue
       case "$line" in '#'*) continue ;; esac
       printf '%s\n' "$line"
@@ -864,7 +877,12 @@ wedge_alarm_command_is_bare_program() {  # <cmd>
 # alert can reach a phone/pager (ntfy, Slack, SMS) even when the captain is away
 # from the machine entirely. Best-effort: logs and returns 1 on failure.
 wedge_alarm_via_command() {  # <cmd> <summary>
-  local cmd=$1 summary=$2 rc
+  local cmd summary=$2 rc
+  # Normalise before anything reads the directive's shape. `command: <path>` is
+  # the spacing docs/examples/wedge-alarm teaches, and an untrimmed leading space
+  # made a bare script path read as multi-word - back onto the `sh -c` path whose
+  # empty argv is the whole defect the bare-program branch below exists to close.
+  cmd=$(fm_trim_ws "$1")
   if [ "${WEDGE_ALARM_EMIT_ACTIVE:-}" != 1 ]; then
     wedge_alarm_emit command "$summary" "$cmd"
     return $?
@@ -974,6 +992,22 @@ wedge_escalation_kind() {  # <buffered-item> -> kind slug
   printf 'unclassified'
 }
 
+# One kind slug per non-blank buffered item, newline-terminated. This is the
+# single owner of the buffer-to-kind read: the delivered record and the wedge
+# summary both derive their kinds (and the summary its count and severity) from
+# this one stream, so the two readings cannot drift apart on what a buffer holds.
+# An absent or unreadable buffer emits nothing, which the callers read as
+# "not observed" rather than as "empty".
+wedge_buffer_kinds() {  # <buffer-path> -> one kind slug per line
+  local buf=$1 item
+  [ -r "$buf" ] || return 0
+  while IFS= read -r item || [ -n "$item" ]; do
+    [ -n "$item" ] || continue
+    wedge_escalation_kind "$item"
+    printf '\n'
+  done < "$buf"
+}
+
 # Render a newline-terminated kind stream as one sorted, deduped, comma-joined
 # list. Shared by the wedge summary and the delivery record so a wedged batch and
 # a delivered one are directly comparable.
@@ -996,22 +1030,19 @@ wedge_kind_severity() {  # <kind> -> LOW|MEDIUM|HIGH
 # to either direction: the alarm genuinely fired, but this instrument did not
 # observe what it holds, and saying LOW there would be fabrication.
 wedge_summary_line() {  # <state> <age-seconds> <marker>
-  local state=$1 age=$2 marker=$3 buf item kind sev
+  local state=$1 age=$2 marker=$3 buf kind sev
   local count=0 max='' kinds='' kind_list
   buf="$state/.subsuper-escalations"
-  if [ -r "$buf" ]; then
-    while IFS= read -r item || [ -n "$item" ]; do
-      [ -n "$item" ] || continue
-      count=$((count + 1))
-      kind=$(wedge_escalation_kind "$item")
-      kinds="${kinds}${kind}"$'\n'
-      sev=$(wedge_kind_severity "$kind")
-      case "${max:-LOW}:$sev" in
-        LOW:MEDIUM|LOW:HIGH|MEDIUM:HIGH) max=$sev ;;
-        *) max=${max:-$sev} ;;
-      esac
-    done < "$buf"
-  fi
+  kinds=$(wedge_buffer_kinds "$buf")
+  while IFS= read -r kind; do
+    [ -n "$kind" ] || continue
+    count=$((count + 1))
+    sev=$(wedge_kind_severity "$kind")
+    case "${max:-LOW}:$sev" in
+      LOW:MEDIUM|LOW:HIGH|MEDIUM:HIGH) max=$sev ;;
+      *) max=${max:-$sev} ;;
+    esac
+  done <<< "$kinds"
   if [ "$count" -eq 0 ]; then
     printf 'FMWEDGE/1 severity=UNKNOWN count=0 kinds=none age=%ss: away-mode escalations are held undelivered but the buffered list could not be read; see %s' \
       "$age" "$marker"
