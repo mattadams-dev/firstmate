@@ -207,9 +207,16 @@ case "$LOCK_PID" in
 esac
 [ "$LOCK_PID" = "$TARGET" ] \
   || refuse 3 "the $ROLE lock names pid $LOCK_PID, not pid $TARGET; the target was chosen from something other than the lock"
+# A lock recording a DIFFERENT home is proof this supervisor is not ours.
+# A lock recording NO home is not: supervision locks live inside the state
+# directory they govern, so reaching this one already means operating on that
+# fleet, and locks written before the field existed carry no home at all.
+# Refusing those would leave every pre-upgrade home unable to end its own
+# daemon - the can-never-recover direction.
 LOCK_HOME=$(cat "$LOCK/fm-home" 2>/dev/null || true)
-[ "$LOCK_HOME" = "$FM_HOME" ] \
-  || refuse 3 "the $ROLE lock belongs to home ${LOCK_HOME:-unknown}, not $FM_HOME; another home's supervisor is never this home's to end"
+if [ -n "$LOCK_HOME" ] && [ "$LOCK_HOME" != "$FM_HOME" ]; then
+  refuse 3 "the $ROLE lock belongs to home $LOCK_HOME, not $FM_HOME; another home's supervisor is never this home's to end"
+fi
 LOCK_IDENTITY=$(cat "$LOCK/pid-identity" 2>/dev/null || true)
 [ -n "$LOCK_IDENTITY" ] \
   || refuse 4 "the $ROLE lock publishes no holder identity, so pid reuse cannot be ruled out"

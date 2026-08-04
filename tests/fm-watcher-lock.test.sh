@@ -185,7 +185,7 @@ test_unidentifiable_live_lock_refuses_loudly() {
   status=0
   PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" 2> "$err" || status=$?
   [ "$status" -ne 0 ] || fail "watcher silently no-opped behind a lock it could not identify"
-  grep -F 'cannot identify its holder' "$err" >/dev/null \
+  grep -F 'publishes no identity for its holder' "$err" >/dev/null \
     || fail "watcher did not report the holder as unidentifiable (got: $(tr '\n' '|' < "$err"))"
   [ ! -e "$state/.last-watcher-beat" ] || fail "a refused watcher published a liveness beacon"
   pass "a live lock that cannot identify its holder refuses loudly and starts nothing"
