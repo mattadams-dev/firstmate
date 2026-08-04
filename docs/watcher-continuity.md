@@ -38,7 +38,8 @@ The lock and `state/.watch-cycle-exits.log` now both record the resolved home *a
 
 ## Arming authorities
 
-Several things in this repo can cause a watcher cycle to start. They are, in the order they sit above the process:
+Several things in this repo can cause a watcher cycle to start.
+They are, in the order they sit above the process:
 
 | Authority | Mode | Role |
 | --- | --- | --- |
