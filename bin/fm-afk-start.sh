@@ -81,19 +81,18 @@ daemon_lock_owner() {
   printf '%s\n' "$FM_AFK_LOCK"
 }
 
+# Identity comes from what the lock published, compared as whole bytes. There is
+# deliberately no "does this process's command line mention the daemon?"
+# fallback: in this fleet an agent's task text travels on argv, so a crewmate
+# briefed to fix the daemon matches that test, and so does the shell running it.
+# A lock that published no identity is answered "unknown" here and settled by the
+# daemon's own singleton gate, which refuses loudly rather than guessing.
 daemon_pid_matches() {
-  local pid=$1 owner=$2 identity current command
+  local pid=$1 owner=$2 identity current
   identity=$(cat "$owner/pid-identity" 2>/dev/null || true)
-  if [ -n "$identity" ]; then
-    current=$(fm_pid_identity "$pid") || return 1
-    [ "$current" = "$identity" ]
-    return
-  fi
-  command=$(ps -p "$pid" -o command= 2>/dev/null || true)
-  case "$command" in
-    *"$FM_AFK_DAEMON"*|*"fm-supervise-daemon.sh"*) return 0 ;;
-  esac
-  return 1
+  [ -n "$identity" ] || return 1
+  current=$(fm_pid_identity "$pid") || return 1
+  [ "$current" = "$identity" ]
 }
 
 daemon_lock_pid() {
@@ -131,9 +130,13 @@ fm_afk_start_main() {
     return 0
   fi
 
-  if fm_pid_alive "$pid" && [ -n "$pid" ]; then
-    fm_lock_remove_path "$FM_AFK_LOCK" 2>/dev/null || true
-  fi
+  # NOTHING removes the daemon lock here. This used to unlink it whenever the
+  # holder pid was alive but failed the match above - an unserialized decision,
+  # made from process inspection, outside the lock it was overriding. One
+  # transient identity read failure was enough to destroy a live daemon's lock
+  # and let a second daemon claim it, repeatably. The daemon's own singleton gate
+  # owns this now: it reclaims a holder that is provably gone or reused,
+  # serialized and re-verified, and refuses loudly when it cannot tell.
 
   # Fresh start: clear the previous away session's stale delivery artifacts
   # before the new daemon can surface them (fix for the leaked-artifact defect).

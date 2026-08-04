@@ -85,7 +85,6 @@ mkdir -p "$STATE"
 
 WATCH_LOCK="$STATE/.watch.lock"
 WATCH_PATH="$SCRIPT_DIR/fm-watch.sh"
-WATCHER_STALE_GRACE=${FM_WATCHER_STALE_GRACE:-${FM_GUARD_GRACE:-300}}
 # The singleton-lock acquisition, EXIT trap, and the blocking supervision loop
 # all live below the source guard at the very bottom of this file (see "Main
 # entry"). Sourcing this file for unit tests therefore loads the functions -
@@ -761,33 +760,28 @@ if [ "${BASH_SOURCE[0]}" != "$0" ]; then
   return 0
 fi
 
-# Before acquiring the watcher lock or enumerating any runnable check, replace
-# or quarantine checks created by older versions. The migration compares bytes
-# and reads data only; it never invokes legacy check files through Bash.
-"$SCRIPT_DIR/fm-pr-check-migrate.sh" --checks-safe || {
-  echo "watcher: PR check migration blocked; refusing to execute state checks" >&2
-  exit 1
-}
-
-if ! fm_lock_try_acquire "$WATCH_LOCK"; then
-  BEAT="$STATE/.last-watcher-beat"
-  if [ -n "${FM_LOCK_HELD_PID:-}" ]; then
-    if [ -e "$BEAT" ]; then
-      beat_age=$(fm_path_age "$BEAT")
-      if [ "$beat_age" -ge "$WATCHER_STALE_GRACE" ]; then
-        echo "watcher: lock held by live pid $FM_LOCK_HELD_PID but heartbeat is stale for ${beat_age}s (>${WATCHER_STALE_GRACE}s); inspect or stop that watcher before re-arming." >&2
-        exit 1
-      fi
-    elif [ "$(fm_path_age "$WATCH_LOCK")" -ge "$WATCHER_STALE_GRACE" ]; then
-      echo "watcher: lock held by live pid $FM_LOCK_HELD_PID but no heartbeat exists; inspect or stop that watcher before re-arming." >&2
-      exit 1
+# SINGLETON AT BIRTH. This is the first act of the watcher runtime, before any
+# other work, because whatever a supervisor does before its singleton gate it
+# does as an unaccountable second supervisor. The gate is decided from the lock
+# alone - never from a beacon age against a grace threshold, which cannot tell a
+# working peer from a wedged one and gets the answer catastrophically wrong in
+# both directions. bin/fm-wake-lib.sh owns the decision procedure.
+fm_supervisor_singleton_acquire "$WATCH_LOCK" watcher "$FM_HOME" "$WATCH_PATH"
+case $? in
+  0) ;;
+  1)
+    if [ -n "${FM_SINGLETON_PEER_PID:-}" ]; then
+      echo "watcher: already running pid $FM_SINGLETON_PEER_PID"
+    else
+      echo "watcher: already running"
     fi
-    echo "watcher: already running pid $FM_LOCK_HELD_PID"
-  else
-    echo "watcher: already running"
-  fi
-  exit 0
-fi
+    exit 0
+    ;;
+  *)
+    echo "watcher: ${FM_SINGLETON_REASON:-watcher singleton could not be decided}; not starting a second supervisor" >&2
+    exit 1
+    ;;
+esac
 watcher_cleanup() {
   fm_active_check_stop || return 1
   fm_check_output_cleanup
@@ -799,12 +793,37 @@ trap 'exit 1' HUP INT TERM
 # This watcher's own pid, as recorded in the lock by fm_lock_claim (which writes
 # ${BASHPID:-$$} from this same main shell). Read directly, never via a command
 # substitution, so it matches the stored holder pid for the self-eviction check.
+# Home, watcher path, and pid identity were published INTO the lock before it
+# became visible, so no peer can observe this lock without being able to
+# identify its holder.
 WATCHER_PID=${BASHPID:-$$}
-printf '%s\n' "$FM_HOME" > "$WATCH_LOCK/fm-home" || true
-printf '%s\n' "$WATCH_PATH" > "$WATCH_LOCK/watcher-path" || true
+
+# Upstream's terminal-delivery ledger identifies this watcher by pid AND process
+# identity. That identity is READ BACK from the lock rather than recomputed:
+# the lock published it before it became visible, and re-deriving it here would
+# let the ledger and the lock disagree about who this watcher is - the exact
+# false-identity shape the singleton exists to remove.
 FM_WATCH_DELIVERY_PID=$WATCHER_PID
-FM_WATCH_DELIVERY_IDENTITY=$(fm_pid_identity "$WATCHER_PID" 2>/dev/null || true)
-printf '%s\n' "$FM_WATCH_DELIVERY_IDENTITY" > "$WATCH_LOCK/pid-identity" 2>/dev/null || true
+FM_WATCH_DELIVERY_IDENTITY=$(cat "$WATCH_LOCK/pid-identity" 2>/dev/null || true)
+
+# Publish the liveness beacon immediately, not on the first loop pass. An arm
+# that polls fm_watcher_healthy during a beaconless startup window sees "no
+# healthy watcher" and forks another one; the gate above makes that duplicate
+# harmless, but leaving the window open manufactures the race for no reason.
+touch "$STATE/.last-watcher-beat"
+
+# Replace or quarantine checks created by older versions before any check can be
+# enumerated. The migration compares bytes and reads data only; it never invokes
+# legacy check files through Bash. It runs BEHIND the singleton gate and in
+# watcher-owned mode: this process already holds the exclusion the migration
+# would otherwise acquire for itself, and - the reason the ordering matters - the
+# standalone migration stops a live watcher to get that exclusion. Run ahead of
+# the gate, that made every watcher start terminate the incumbent before proving
+# it was entitled to replace it.
+"$SCRIPT_DIR/fm-pr-check-migrate.sh" --checks-safe --watcher-owned "$WATCHER_PID" || {
+  echo "watcher: PR check migration blocked; refusing to execute state checks" >&2
+  exit 1
+}
 
 [ -e "$STATE/.last-heartbeat" ] || touch "$STATE/.last-heartbeat"
 
