@@ -10,8 +10,11 @@
 #                    no built-in OS channel (configure a command: line instead)
 #   osascript        macOS Notification Center banner (backend-independent)
 #   herdr            herdr UI notification (herdr notification show)
-#   command:<cmd>    run <cmd> via `sh -c`; the alarm summary is passed as $1 and
-#                    on stdin, so it can reach a phone/pager while you are away
+#   command:<cmd>    the alarm summary reaches <cmd> on stdin AND as an argument,
+#                    so it can reach a phone/pager while you are away. A directive
+#                    that is nothing but one executable (no arguments, no shell
+#                    syntax) is run directly with the summary as its only
+#                    argument; anything else runs via `sh -c` with it as $1.
 #
 # An ABSENT config/wedge-alarm behaves as `auto` (default-on on macOS): the
 # alarm exists precisely so a wedged away-mode primary is never silent.

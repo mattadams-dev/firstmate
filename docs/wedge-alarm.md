@@ -16,7 +16,25 @@ It lists channel directives, one per non-empty, non-comment line, and every list
   Other platforms have no built-in OS channel, so configure `command:` when a durable marker alone is insufficient.
 - `osascript` posts a macOS Notification Center banner outside the terminal pane.
 - `herdr` calls `herdr notification show` outside the supervised pane.
-- `command:<cmd>` runs `<cmd>` through `sh -c` with the alarm summary as `$1` and on stdin, allowing delivery to a phone or pager service.
+- `command:<cmd>` delivers the alarm summary to `<cmd>` on stdin and as an argument, allowing delivery to a phone or pager service.
+  A directive that is nothing but one executable, with no arguments and no shell syntax, is run directly with the summary as its only argument.
+  Every other directive runs through `sh -c` with the summary as `$1`, because appending an argument to a command that already carries its own can change what that command does.
+
+## Summary format
+
+The alarm's summary is one line, written as the marker's first line and handed verbatim to every channel:
+
+```
+FMWEDGE/1 severity=<LOW|MEDIUM|HIGH|UNKNOWN> count=<n> kinds=<a,b> age=<n>s: <prose>; see <marker>
+```
+
+Severity is assessed from the buffered escalations at the moment the alarm fires, where their content is known, and is never re-derived by a channel.
+It is the strongest buffered item: a held captain decision, a blocked lane, or a failure is `HIGH`, work ready for review is `MEDIUM`, and parked-lane rechecks and idle flags are `LOW`.
+An item the classifier cannot place counts as `MEDIUM` and appears in `kinds` as `unclassified`, so the alert never reports a calm it did not assess.
+A buffer that cannot be read reports `severity=UNKNOWN count=0`.
+
+The structured tokens lead so a consumer that keys a standing alert on the message text sees `severity` and `kinds` before any truncation.
+`count` and `age` are numeric by design: a consumer that collapses digit runs when identifying a standing event will not treat their churn as a new alert, while a change of severity or kind does surface one.
 
 An absent `config/wedge-alarm` behaves as `auto`, which is default-on on macOS.
 This is deliberate because the alarm fires only after a genuine max-defer wedge and is rate-limited to at most once per max-defer window.
