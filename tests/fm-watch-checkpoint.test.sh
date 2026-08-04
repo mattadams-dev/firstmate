@@ -82,12 +82,44 @@ test_existing_singleton_watcher_is_not_success() {
   status=0
   FM_HOME="$home" FM_GUARD_GRACE=300 "$CHECKPOINT" --seconds 5 >"$out" 2>"$err" || status=$?
   expect_code 1 "$status" "singleton checkpoint exit"
-  assert_contains "$(cat "$out")" "watcher: already running" "singleton watcher output was not passed through"
+  # A hand-made lock naming a live pid publishes no holder identity, so the
+  # singleton is undecidable rather than peer-held. Both outcomes must reach the
+  # same place: a failed checkpoint that says why, never a quiet success.
+  assert_contains "$(cat "$err")" "not starting a second supervisor" "undecidable singleton was not explained"
   assert_contains "$(cat "$err")" "outside this foreground checkpoint" "singleton watcher failure was not explained"
-  pass "checkpoint rejects an existing watcher singleton as unowned"
+  pass "checkpoint rejects an undecidable watcher singleton as unowned"
+}
+
+test_live_peer_singleton_is_not_success() {
+  local home out err status peer i
+  home=$(make_home live-peer-singleton)
+  out="$home/out.txt"
+  err="$home/err.txt"
+  printf '%s\n' fm-pr-check-migration-scan-v1 > "$home/state/.pr-check-migration-scan-v1"
+  printf '%s\n' fm-pr-check-migration-v1 > "$home/state/.pr-check-migration-v1"
+  chmod 0600 "$home/state/.pr-check-migration-scan-v1" "$home/state/.pr-check-migration-v1"
+  FM_HOME="$home" FM_POLL=30 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    "$ROOT/bin/fm-watch.sh" >"$home/peer.out" 2>&1 &
+  peer=$!
+  i=0
+  while [ "$i" -lt 100 ] && [ "$(cat "$home/state/.watch.lock/pid" 2>/dev/null || true)" != "$peer" ]; do
+    sleep 0.05
+    i=$((i + 1))
+  done
+  [ "$(cat "$home/state/.watch.lock/pid" 2>/dev/null || true)" = "$peer" ] \
+    || { kill "$peer" 2>/dev/null || true; fail "peer watcher never took the singleton"; }
+  status=0
+  FM_HOME="$home" FM_GUARD_GRACE=300 "$CHECKPOINT" --seconds 5 >"$out" 2>"$err" || status=$?
+  kill "$peer" 2>/dev/null || true
+  wait "$peer" 2>/dev/null || true
+  expect_code 1 "$status" "live-peer checkpoint exit"
+  assert_contains "$(cat "$out")" "watcher: already running" "peer stand-down was not passed through"
+  assert_contains "$(cat "$err")" "outside this foreground checkpoint" "peer singleton failure was not explained"
+  pass "checkpoint rejects a verified-live peer singleton as unowned"
 }
 
 test_quiet_checkpoint_exits_124_cleanly
 test_signal_passes_through_and_exits_zero
 test_registered_check_uses_preserved_watcher_environment
 test_existing_singleton_watcher_is_not_success
+test_live_peer_singleton_is_not_success

@@ -422,19 +422,27 @@ Baselines read against: `tests/fm-watcher-lock.test.sh` 38 `ok -` lines, `tests/
 A failing case aborts its suite, so each mutation was run twice: once to see which case it kills, once with that case's invocation removed to prove nothing else depends on the mutated protection.
 Both directions are covered deliberately: a guard that refuses everything is the same failure as one that permits everything, and it is the direction that gets missed.
 
-| Mutation | Direction | Case killed | Rest of suite |
+| Mutation | Direction | Cases killed, in the order the suite reaches them | Tail |
 | --- | --- | --- | --- |
-| A verified-live peer no longer stops a second acquisition | permits too much | `test_singleton_start` | 37 clean |
+| A verified-live peer no longer stops a second acquisition | permits too much | `test_singleton_start`, then `test_wedged_incumbent_is_loud_from_the_arm_layer` | see below |
 | Restore the pre-lock PR-check migration | permits too much | `test_a_starting_watcher_never_evicts_the_incumbent` | 37 clean |
-| Publish the identity of the command substitution instead of the holder's | permits too much | `test_stale_watch_lock_reclaimed`, then `test_lock_publishes_its_real_holder_identity` | then clean |
-| Never reclaim a provably-dead or reused holder | refuses too much | `test_stale_watch_lock_reclaimed` | then clean |
+| Publish the command substitution's identity instead of the holder's | permits too much | `test_stale_watch_lock_reclaimed`, then `test_a_starting_watcher_never_evicts_the_incumbent`, then `test_lock_publishes_its_real_holder_identity`, then `test_watch_restart_rejects_reused_pid` | not chased to clean |
+| Never reclaim a provably-dead or reused holder | refuses too much | `test_stale_watch_lock_reclaimed`, then `test_lock_steals_dead_pid_lock` | see below |
 | Drop the session-lock refusal in the kill helper | permits too much | `test_refuses_the_session_lock_holder`, then `test_every_outcome_is_recorded` | 10 clean |
 | The kill helper can never complete a stop | refuses too much | `test_authorized_supervisor_stop_succeeds`, `test_daemon_role_stop_succeeds`, `test_every_outcome_is_recorded` | 9 clean |
 | The policy stops classifying terminations | permits too much | matrix `K01` (`kill -TERM 17907`) | 158 clean |
 | The policy denies signal-0 probes and job specs too | refuses too much | matrix `L01` (`kill -0 17907`) | 172 clean |
 
-The identity-from-subshell mutation is the one this work found in its own first implementation, and it is the reason the seed takes the identity as a parameter.
-A subshell shares its parent's command line but not its start time, so a self-computed identity differs by one clock tick and matches only when the fork lands inside the same tick - a lock that intermittently fails to recognize its own holder, reproducing roughly never under test.
+Four of the eight are the mirror-image direction on purpose.
+A supervisor that can never arm and a helper that can never terminate anything are the same failure as their opposites, one mirror over, and they fail silently rather than loudly.
+
+Two mutations are broad by nature and are reported as such rather than forced into a one-to-one claim.
+Published holder identity and dead-holder reclaim are load-bearing under most of the lock suite, so each kills a chain: the identity mutation was followed through four cases and the reclaim mutation through two.
+The identity chain was not chased to a clean suite, and that is recorded here as measured rather than assumed.
+
+The identity mutation is the one this work found in its own first implementation, which is why the seed takes the identity as a parameter instead of computing it.
+`test_lock_publishes_its_real_holder_identity` fails it with the difference visible: `linux-starttime=34502521` published against `34502518` actual, three clock ticks apart on an identical command line.
+A fork landing inside the same tick would have matched, so the defect reproduces roughly never under test and is invisible to every assertion that does not compare the two values directly.
 
 The session-lock refusal is shared by two cases because the durable-record case uses that refusal to produce a recorded refusal; both guard it from their own direction.
 The kill-helper success path is shared by three for the same reason.

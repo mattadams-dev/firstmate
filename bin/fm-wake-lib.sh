@@ -546,12 +546,12 @@ fm_singleton_seed() {
     "$1" "$2" "$3" "$4" "$5"
 }
 
-# fm_singleton_holder_verified <lockdir> <home>: is the lock's published holder
+# fm_singleton_holder_verified <lockdir>: is the lock's published holder
 # still that process? 0 yes (FM_SINGLETON_PEER_ROLE names its role), 1 provably
 # not (dead, or the pid was reused by something else), 2 undecidable.
 # Uncertainty is never resolved toward either answer.
 fm_singleton_holder_verified() {
-  local lockdir=$1 home=$2 pid lock_home lock_identity current
+  local lockdir=$1 pid lock_identity current
   # shellcheck disable=SC2034 # Read by callers after this returns.
   FM_SINGLETON_PEER_ROLE=
   pid=$(cat "$lockdir/pid" 2>/dev/null || true)
@@ -560,15 +560,19 @@ fm_singleton_holder_verified() {
   esac
   fm_pid_alive "$pid" || return 1
   fm_pid_is_zombie "$pid" && return 1
-  lock_home=$(cat "$lockdir/fm-home" 2>/dev/null || true)
   lock_identity=$(cat "$lockdir/pid-identity" 2>/dev/null || true)
   # A lock left by a firstmate version that predates identity-at-birth cannot be
   # judged either way from its own contents. Say so rather than guessing.
   [ -n "$lock_identity" ] || return 2
-  # A lock naming a different home reached through this address is the
-  # address-is-not-identity case: refusing to judge it keeps one home from
-  # reclaiming another's lock.
-  [ "$lock_home" = "$home" ] || return 2
+  # The recorded home is deliberately NOT part of this verdict. A supervision
+  # lock lives inside the state directory it governs, so reaching this lock at
+  # all already means sharing that fleet; two homes cannot contend for it unless
+  # they resolve to the same directory, in which case exactly one of them should
+  # win and this is the function that decides which. Treating a missing or
+  # differing home as undecidable instead would wedge every home whose lock
+  # predates the field - away mode could never start again - which is the
+  # can-never-arm failure this whole contract exists to avoid.
+  # Cross-home authority is a different question, and bin/fm-safe-kill.sh owns it.
   current=$(fm_pid_identity "$pid") || return 2
   [ "$current" = "$lock_identity" ] || return 1
   FM_SINGLETON_PEER_ROLE=$(cat "$lockdir/supervisor-role" 2>/dev/null || true)
@@ -580,13 +584,20 @@ fm_singleton_holder_verified() {
 # path uses, and re-verified while holding it, so two reclaimers cannot both
 # win and a holder that becomes verifiable mid-flight is left alone.
 fm_singleton_reclaim_reused() {
-  local lockdir=$1 role=$2 home=$3 state=$4 exec_path=$5 identity=$6 steal rc=1
+  local lockdir=$1 role=$2 home=$3 state=$4 exec_path=$5 identity=$6 steal steal_owner rc=1
   steal="$lockdir.steal"
   fm_lock_try_acquire "$steal" || return 1
-  if [ "$(fm_singleton_holder_verified "$lockdir" "$home"; echo $?)" = 1 ]; then
+  # The steal token we now hold would otherwise block our own re-create:
+  # fm_lock_claim refuses any claim made while a .steal exists unless it is told
+  # that this exact owner is the one holding it. This mirrors the dead-holder
+  # path in fm_lock_try_acquire, which passes the same argument for the same
+  # reason. Omitting it removes the lock and then fails to replace it, leaving
+  # the home with no lock at all.
+  steal_owner=${FM_LOCK_OWNER_DIR:-}
+  if [ "$(fm_singleton_holder_verified "$lockdir"; echo $?)" = 1 ]; then
     fm_lock_remove_path "$lockdir" || true
     fm_lock_with_owner_seed "$(fm_singleton_seed "$role" "$home" "$state" "$exec_path" "$identity")" \
-      fm_lock_try_create "$lockdir" && rc=0
+      fm_lock_try_create "$lockdir" "$steal_owner" && rc=0
   fi
   fm_lock_release "$steal"
   return "$rc"
@@ -621,7 +632,7 @@ fm_supervisor_singleton_acquire() {
     return 0
   fi
 
-  fm_singleton_holder_verified "$lockdir" "$home"
+  fm_singleton_holder_verified "$lockdir"
   verdict=$?
   # shellcheck disable=SC2034 # Read by callers after this returns.
   FM_SINGLETON_PEER_PID=$(cat "$lockdir/pid" 2>/dev/null || true)
@@ -639,7 +650,7 @@ fm_supervisor_singleton_acquire() {
       ;;
     *)
       # shellcheck disable=SC2034 # Read by callers after this returns.
-      FM_SINGLETON_REASON="lock $lockdir is held but cannot identify its holder as belonging to $home"
+      FM_SINGLETON_REASON="lock $lockdir is held but publishes no identity for its holder, so a live peer cannot be told from a reused pid"
       return 2
       ;;
   esac
