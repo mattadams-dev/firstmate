@@ -252,6 +252,10 @@
       "audience": "maintainer-verification"
     },
     {
+      "path": "docs/fork-freshness.md",
+      "audience": "operator-current"
+    },
+    {
       "path": "docs/gitlab-merge-watch.md",
       "audience": "maintainer-verification"
     },
@@ -309,6 +313,10 @@
     },
     {
       "path": "docs/verification/dispatch-auth.md",
+      "audience": "maintainer-verification"
+    },
+    {
+      "path": "docs/verification/fork-freshness.md",
       "audience": "maintainer-verification"
     },
     {

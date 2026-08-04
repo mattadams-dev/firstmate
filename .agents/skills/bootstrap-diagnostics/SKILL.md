@@ -2,7 +2,7 @@
 name: bootstrap-diagnostics
 description: >-
   Agent-only handling playbook for session-start bootstrap diagnostics.
-  Use whenever the session-start digest's bootstrap section prints an actionable diagnostic line - MISSING, MISSING_MANUAL, BACKEND_INVALID, NEEDS_GH_AUTH, TANGLE, STARTUP_MEMORY_BUDGET, CREW_DISPATCH invalid, FLEET_SYNC, PR_CHECK_MIGRATION, SECONDMATE_SYNC, SECONDMATE_LIVENESS, NUDGE_SECONDMATES, or FMX - or when a standalone bin/fm-bootstrap.sh run prints one of those lines.
+  Use whenever the session-start digest's bootstrap section prints an actionable diagnostic line - MISSING, MISSING_MANUAL, BACKEND_INVALID, NEEDS_GH_AUTH, TANGLE, STARTUP_MEMORY_BUDGET, CREW_DISPATCH invalid, FLEET_SYNC, PR_CHECK_MIGRATION, SECONDMATE_SYNC, SECONDMATE_LIVENESS, NUDGE_SECONDMATES, FORK_FRESHNESS, or FMX - or when a standalone bin/fm-bootstrap.sh run prints one of those lines.
   A silent bootstrap section, or a BOOTSTRAP_INFO fact, means no skill load.
 user-invocable: false
 metadata:
@@ -34,6 +34,13 @@ When any diagnostic needs captain attention, report the plain consequence and re
 - `FLEET_SYNC: <repo>: recovered: <detail>` - the clone had drifted onto a clean detached HEAD holding no unique commits and the sync self-healed it (re-attached the default branch and fast-forwarded); no action needed, it is reported only so the self-heal is visible.
 - `FLEET_SYNC: <repo>: STUCK: on <state>, N commits behind <base> - needs attention` - the clone is dirty, on a non-default branch, detached with unique commits, or diverged, so the sync left it untouched (never forcing or discarding); it will keep falling behind until you look.
   A loud STUCK, especially a growing N across bootstraps, means that clone needs hands-on attention; dispatch a crewmate or resolve it before it strands work.
+- `FORK_FRESHNESS: <owner/repo> status=behind|diverged behind=<n> ahead=<m> ... action=task <id> queued` - a maintained fork has fallen behind its upstream, and the sweep has already created that sync task with the proven procedure; it is queued, not launched, because the sync pushes a merge commit straight to a default branch.
+  Relay the outcome to the captain in project terms (which fork, how far behind and ahead, that a PR against it would misreport its own diff until it is synced) and get a decision on running the sync now; `action=task <id> already queued` or `already under way` means an earlier sweep already raised it, so re-check that task before re-escalating.
+- `FORK_FRESHNESS: <owner/repo> status=unknown reason=<text>` or `FORK_FRESHNESS_COVERAGE: status=unknown reason=<text>` - the reading could not be taken (no forge client, an expired credential, a rate limit, an unreachable forge, a renamed upstream, a timeout).
+  This is not a clean sweep and must never be reported as one: fix the named cause, or tell the captain that fork's freshness is currently unknown.
+  The sweep stays due until a reading actually succeeds, so an unresolved cause reappears rather than lapsing into silence.
+- `FORK_FRESHNESS: <owner/repo> status=ignored reason=<text>` - an archived fork or one listed in `config/fork-sweep-ignore`; no action, it is printed only so a skipped fork is never a silent absence.
+  `docs/fork-freshness.md` owns the contract; a `BACKLOG_MANUAL:` line beside these means the sync task exists but its backlog entry must be added by hand.
 - `PR_CHECK_MIGRATION: canonical polls rebuilt and armed; resume supervision for this home` - the non-executing migration rebuilt canonical task polls from validated metadata, and those polls are already armed.
   Independently verify the private per-task outcome record, then resume the emitted supervision protocol after finishing the session-start wake handling.
 - `PR_CHECK_MIGRATION: validated replacement polls armed; resume supervision for this home` - a retry proved canonical publication provenance, metadata identity binding, and single-link integrity for a replacement poll resolving an earlier ambiguous migration outcome.
