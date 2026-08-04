@@ -123,6 +123,48 @@ matrix_case D56 deny 'for x in 1; do pkill -f fm-watch; done'
 matrix_case D57 deny 'case x in x) pkill -f fm-watch ;; esac'
 matrix_case D58 deny 'until false; do kill $(pgrep -f fm-watch); done'
 
+# --- process termination (docs/arm-pretool-check.md "Termination") ----------
+#
+# K-series: every shape that selects a target by matching text, plus every
+# termination by pid, which routes to bin/fm-safe-kill.sh instead.
+matrix_case K01 deny 'kill -TERM 17907'
+matrix_case K02 deny 'kill 17907'
+matrix_case K03 deny 'kill -9 17907'
+matrix_case K04 deny 'kill -s TERM 17907'
+matrix_case K05 deny 'kill -SIGKILL 17907'
+matrix_case K06 deny 'pkill -f fm-supervise-daemon'
+matrix_case K07 deny 'pkill node'
+matrix_case K08 deny 'killall node'
+matrix_case K09 deny 'killall -9 sleep'
+matrix_case K10 deny 'kill "$PID"'
+matrix_case K11 deny 'kill $PID'
+matrix_case K12 deny 'sudo kill -TERM 17907'
+matrix_case K13 deny 'env FOO=1 kill -TERM 17907'
+matrix_case K14 deny 'ps aux | grep firstmate | awk "{print \$2}" | xargs kill'
+matrix_case K15 deny 'pgrep -f firstmate | xargs kill -9'
+matrix_case K16 deny 'kill -- -12345'
+matrix_case K17 deny 'kill -TERM -12345'
+matrix_case K18 deny 'exec kill -TERM 17907'
+matrix_case K19 deny 'timeout 5 kill -TERM 17907'
+matrix_case K20 deny 'bash -c "kill -TERM 17907"'
+
+# L-series is the mirror image, and it is the half that gets missed: a guard
+# that refuses every kill leaves supervision unrecoverable and every liveness
+# probe in the fleet broken. Signal 0 delivers nothing, job specs name only the
+# caller's own children, and the verified helper must stay reachable.
+matrix_case L01 allow 'kill -0 17907'
+matrix_case L02 allow 'kill -0 "$pid"'
+matrix_case L03 allow 'kill -0 17907 2>/dev/null'
+matrix_case L04 allow 'kill -s 0 17907'
+matrix_case L05 allow 'kill -l'
+matrix_case L06 allow 'kill %1'
+matrix_case L07 allow 'bin/fm-safe-kill.sh --pid 17907 --role watcher --reason recovery'
+matrix_case L08 allow "$ROOT/bin/fm-safe-kill.sh --pid 17907 --role supervise-daemon --reason recovery"
+matrix_case L09 allow 'pgrep -f fm-supervise-daemon'
+matrix_case L10 allow "echo 'kill -TERM 17907'"
+matrix_case L11 allow "rg -n 'pkill' docs tests"
+matrix_case L12 allow 'git status'
+
 matrix_case E01 allow "bin/fm-watch-checkpoint.sh --seconds '180;still-one-arg'"
 matrix_case E02 allow "bin/fm-watch-checkpoint.sh --label 'fm-watch-arm.sh; literal argument'"
 matrix_case E03 allow 'bin/fm-watch-arm.sh # output > file &'
@@ -183,7 +225,7 @@ run_matrix_entry() {
   fi
 
   [ "$rc" -eq 2 ] || fail "$id via $entry must deny, got exit $rc"
-  jq -e '.hookSpecificOutput.permissionDecision == "deny" and (.systemMessage | test("\\[(watcher-(background|pipeline|redirection|bundled|nested|direct)|broad-watcher-kill|unclassifiable-protected-command)\\]"))' "$err_file" >/dev/null 2>&1 \
+  jq -e '.hookSpecificOutput.permissionDecision == "deny" and (.systemMessage | test("\\[(watcher-(background|pipeline|redirection|bundled|nested|direct)|broad-watcher-kill|pattern-kill|unverified-kill|unclassifiable-protected-command)\\]"))' "$err_file" >/dev/null 2>&1 \
     || fail "$id via $entry deny must carry a stable reason code on stderr: $(cat "$err_file")"
   if [ "$entry" = claude ]; then
     [ ! -s "$out_file" ] || fail "$id via claude deny must leave stdout empty: $(cat "$out_file")"
