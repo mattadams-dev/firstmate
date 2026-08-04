@@ -185,9 +185,9 @@ test_behind_creates_a_sync_task() {
   expect_code 3 "$rc" "a fork behind its upstream must not exit clean"
   assert_contains "$out" "acme/widget status=behind behind=3 ahead=0" \
     "the reading did not report the fork as behind"
-  assert_contains "$out" "action=task fm-sync-widget queued" \
+  assert_contains "$out" "action=task fm-sync-acme-widget queued" \
     "behind > 0 only reported; it must create the sync task"
-  assert_present "$dir/home/data/fm-sync-widget/brief.md" \
+  assert_present "$dir/home/data/fm-sync-acme-widget/brief.md" \
     "the sync task carries no instructions"
   assert_contains "$out" "behind=1 " "the coverage line lost the behind count"
   pass "fm-fork-freshness: behind > 0 creates the sync task and refuses to exit clean"
@@ -203,7 +203,7 @@ test_in_sync_creates_no_task() {
   assert_contains "$out" "acme/widget status=in-sync behind=0 ahead=0" \
     "a level fork did not read as in-sync"
   assert_contains "$out" "action=none" "a level fork must produce no action"
-  assert_absent "$dir/home/data/fm-sync-widget" \
+  assert_absent "$dir/home/data/fm-sync-acme-widget" \
     "a level fork must not create a sync task - crying wolf every run is the same failure"
   assert_absent "$dir/home/state/.wake-queue" "a level fork must not wake anyone"
   pass "fm-fork-freshness: a level fork creates nothing and stays quiet"
@@ -217,7 +217,7 @@ test_ahead_only_creates_no_task() {
 
   expect_code 0 "$rc" "a fork only ahead of its upstream is not behind"
   assert_contains "$out" "status=ahead behind=0 ahead=2" "the ahead-only reading was wrong"
-  assert_absent "$dir/home/data/fm-sync-widget" "an ahead-only fork must not create a sync task"
+  assert_absent "$dir/home/data/fm-sync-acme-widget" "an ahead-only fork must not create a sync task"
   pass "fm-fork-freshness: a fork that is only ahead creates no sync task"
 }
 
@@ -255,7 +255,7 @@ test_compare_failure_reads_unknown() {
     "an unknown reading carries no behind count - that number was never measured"
   assert_not_contains "$reading" "ahead=" \
     "an unknown reading carries no ahead count - that number was never measured"
-  assert_absent "$dir/home/data/fm-sync-widget" "an unknown reading must not create a task"
+  assert_absent "$dir/home/data/fm-sync-acme-widget" "an unknown reading must not create a task"
   pass "fm-fork-freshness: a rate-limited comparison reads unknown, with no fabricated counts"
 }
 
@@ -341,7 +341,7 @@ test_unparseable_payload_reads_unknown() {
 
   expect_code 4 "$rc" "an unrecognised payload must not exit clean"
   assert_contains "$out" "status=unknown" "an unrecognised compare payload must read unknown"
-  assert_absent "$dir/home/data/fm-sync-widget" "an unrecognised payload must not create a task"
+  assert_absent "$dir/home/data/fm-sync-acme-widget" "an unrecognised payload must not create a task"
   pass "fm-fork-freshness: a compare payload the sweep cannot parse reads unknown"
 }
 
@@ -411,7 +411,7 @@ test_ignored_forks_are_reported_not_omitted() {
   assert_contains "$out" "acme/widget status=ignored" \
     "an ignored fork must still be named - skipping it silently is the omission failure"
   assert_contains "$out" "ignored=1" "the coverage line did not count the ignored fork"
-  assert_absent "$dir/home/data/fm-sync-widget" "an ignored fork must not create a task"
+  assert_absent "$dir/home/data/fm-sync-acme-widget" "an ignored fork must not create a task"
   pass "fm-fork-freshness: an ignored fork is reported by name, never omitted"
 }
 
@@ -446,12 +446,36 @@ test_configured_extra_fork_outside_enumeration_is_swept() {
 
 # --- the task the sweep creates ---------------------------------------------
 
+test_same_named_forks_under_two_owners_get_two_tasks() {
+  local dir out rc=0 tasks
+  dir=$(new_case)
+  repolist "$dir" '[{"nameWithOwner":"acme/widget","isFork":true,"isArchived":false,"parent":{"owner":{"login":"upstream"},"name":"widget"},"defaultBranchRef":{"name":"main"}}]'
+  printf 'other-org/widget\n' > "$dir/home/config/maintained-forks"
+  repo_fixture "$dir" upstream/widget false - main
+  repo_fixture "$dir" other-org/widget true up2/widget main
+  repo_fixture "$dir" up2/widget false - main
+  compare_fixture "$dir" upstream/widget main acme main behind 0 3 >/dev/null
+  compare_fixture "$dir" up2/widget main other-org main behind 0 9 >/dev/null
+  out=$(run_sweep "$dir" sweep --owner acme) || rc=$?
+
+  expect_code 3 "$rc" "two forks behind must not exit clean"
+  # A bare fm-sync-<repo> id would make the second fork find the first fork's
+  # task and report "already queued" - a silent omission dressed as idempotency.
+  assert_contains "$out" "acme/widget status=behind behind=3" "the first fork was not read"
+  assert_contains "$out" "other-org/widget status=behind behind=9" "the second fork was not read"
+  assert_not_contains "$out" "already queued" \
+    "a second fork sharing a repository name was mistaken for the first fork's task"
+  tasks=$(find "$dir/home/data" -maxdepth 1 -name 'fm-sync-*' | wc -l)
+  [ "$tasks" = 2 ] || fail "expected 2 sync tasks for 2 distinct forks, found $tasks"
+  pass "fm-fork-freshness: two forks sharing a repository name get two distinct tasks"
+}
+
 test_sync_task_carries_the_proven_procedure() {
   local dir brief
   dir=$(new_case)
   one_fork "$dir" diverged 6 20
   run_sweep "$dir" sweep --owner acme >/dev/null || true
-  brief="$dir/home/data/fm-sync-widget/brief.md"
+  brief="$dir/home/data/fm-sync-acme-widget/brief.md"
   assert_present "$brief" "no instructions were written for the sync task"
 
   assert_grep "Never through a PR" "$brief" \
@@ -486,7 +510,7 @@ test_repeat_sweep_creates_no_duplicate_task() {
   second=$(run_sweep "$dir" sweep --owner acme) || rc=$?
 
   expect_code 3 "$rc" "the fork is still behind on the second sweep"
-  assert_contains "$second" "action=task fm-sync-widget already queued" \
+  assert_contains "$second" "action=task fm-sync-acme-widget already queued" \
     "a repeat sweep must find the first sweep's task, not create another"
   out=$(find "$dir/home/data" -maxdepth 1 -name 'fm-sync-*' | wc -l)
   [ "$out" = 1 ] || fail "expected exactly 1 sync task after two sweeps, found $out"
@@ -497,14 +521,14 @@ test_task_already_under_way_is_left_alone() {
   local dir out rc=0
   dir=$(new_case)
   one_fork "$dir" behind 0 3
-  fm_write_meta "$dir/home/state/fm-sync-widget.meta" \
-    "window=firstmate:fm-fm-sync-widget" "kind=ship"
+  fm_write_meta "$dir/home/state/fm-sync-acme-widget.meta" \
+    "window=firstmate:fm-fm-sync-acme-widget" "kind=ship"
   out=$(run_sweep "$dir" sweep --owner acme) || rc=$?
 
   expect_code 3 "$rc" "the fork is still behind"
   assert_contains "$out" "already under way" \
     "a sync already under way must be recognised, not duplicated"
-  assert_absent "$dir/home/data/fm-sync-widget/brief.md" \
+  assert_absent "$dir/home/data/fm-sync-acme-widget/brief.md" \
     "a sync already under way must not have its instructions rewritten"
   pass "fm-fork-freshness: a sync already under way is recognised and left alone"
 }
@@ -515,9 +539,9 @@ test_backlog_failure_is_reported_not_swallowed() {
   one_fork "$dir" behind 0 3
   FM_TEST_TASKS_RC=1 run_sweep "$dir" sweep --owner acme >/dev/null || true
   stderr=$(cat "$dir/stderr.log")
-  assert_contains "$stderr" "BACKLOG_MANUAL: add fm-sync-widget" \
+  assert_contains "$stderr" "BACKLOG_MANUAL: add fm-sync-acme-widget" \
     "a backlog write that failed must say so rather than pass silently"
-  assert_present "$dir/home/data/fm-sync-widget/brief.md" \
+  assert_present "$dir/home/data/fm-sync-acme-widget/brief.md" \
     "a failed backlog write must not cost the task its instructions"
   pass "fm-fork-freshness: a backlog write that fails is reported, not swallowed"
 }
@@ -593,7 +617,7 @@ test_check_reports_a_fork_that_is_behind() {
   expect_code 3 "$rc" "a fork behind must not read clean before its PR"
   assert_contains "$out" "acme/widget status=behind behind=20" \
     "the pre-PR reading did not report the fork as behind"
-  assert_present "$dir/home/data/fm-sync-widget/brief.md" \
+  assert_present "$dir/home/data/fm-sync-acme-widget/brief.md" \
     "the pre-PR reading only reported; it must create the sync task too"
   pass "fm-fork-freshness: check reports a behind fork and creates its sync task"
 }
@@ -693,6 +717,7 @@ test_coverage_counts_match_the_readings
 test_ignored_forks_are_reported_not_omitted
 test_archived_forks_are_reported_as_ignored
 test_configured_extra_fork_outside_enumeration_is_swept
+test_same_named_forks_under_two_owners_get_two_tasks
 test_sync_task_carries_the_proven_procedure
 test_behind_queues_a_wake
 test_repeat_sweep_creates_no_duplicate_task

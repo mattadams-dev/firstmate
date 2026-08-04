@@ -55,9 +55,9 @@ Run in an isolated home so the tasks it created were disposable.
 
 ```
 $ FM_HOME=<disposable> bin/fm-fork-freshness.sh sweep --owner mattadams-dev
-FORK_FRESHNESS: mattadams-dev/firstmate status=diverged behind=20 ahead=6 upstream=kunchenguid/firstmate compare=main...main action=task fm-sync-firstmate queued
+FORK_FRESHNESS: mattadams-dev/firstmate status=diverged behind=20 ahead=6 upstream=kunchenguid/firstmate compare=main...main action=task fm-sync-mattadams-dev-firstmate queued
 FORK_FRESHNESS: mattadams-dev/gnhf status=ahead behind=0 ahead=2 upstream=kunchenguid/gnhf compare=main...main action=none
-FORK_FRESHNESS: mattadams-dev/no-mistakes status=behind behind=28 ahead=0 upstream=kunchenguid/no-mistakes compare=main...main action=task fm-sync-no-mistakes queued
+FORK_FRESHNESS: mattadams-dev/no-mistakes status=behind behind=28 ahead=0 upstream=kunchenguid/no-mistakes compare=main...main action=task fm-sync-mattadams-dev-no-mistakes queued
 FORK_FRESHNESS_COVERAGE: owner=mattadams-dev repos=8 forks=3 swept=3 behind=2 unknown=0 ignored=0
 exit 3
 ```
@@ -81,7 +81,8 @@ function names.
 | C: collapses an unreadable repository into an answer | make `repo_facts` return `false<TAB><TAB>main<TAB>false` instead of failing | exactly `test_unreadable_upstream_reads_unknown` and `test_check_cannot_read_reads_unknown` |
 | D: keeps real readings but always warns | `[ "$behind" -gt 0 ] \|\| { behind=1; status=behind; }` | exactly `test_in_sync_creates_no_task`, `test_ahead_only_creates_no_task`, `test_outage_and_in_sync_are_distinguishable`, `test_private_and_uncloned_forks_are_covered` |
 
-The unmutated suite breaks nothing, per-test and as a whole (28 ok).
+The unmutated suite breaks nothing, per-test and as a whole (29 ok; the mutation
+run above was taken at 28, before the id-collision regression was added).
 
 What the table establishes:
 
