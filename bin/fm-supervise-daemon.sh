@@ -658,7 +658,7 @@ escalate_flush() {  # <state>
     # Name WHAT was delivered, not only that something was: the same count and
     # kind vocabulary the wedge summary uses, so a delivered batch and a wedged
     # one are directly comparable in the record.
-    log "escalation flush delivered: $n item(s), kinds=$(printf '%s\n' "$kinds_seen" | sort -u | tr '\n' ',' | sed 's/,$//')"
+    log "escalation flush delivered: $n item(s), kinds=$(fm_kind_list "$kinds_seen")"
     : > "$buf"; rm -f "${buf}.since" "$state/.subsuper-inject-wedged"; return 0
   fi
   return 1
@@ -974,6 +974,15 @@ wedge_escalation_kind() {  # <buffered-item> -> kind slug
   printf 'unclassified'
 }
 
+# Render a newline-terminated kind stream as one sorted, deduped, comma-joined
+# list. Shared by the wedge summary and the delivery record so a wedged batch and
+# a delivered one are directly comparable.
+fm_kind_list() {  # <newline-separated kinds> -> a,b,c
+  local out
+  out=$(printf '%s' "$1" | grep -v '^[[:space:]]*$' | sort -u | tr '\n' ',')
+  printf '%s' "${out%,}"
+}
+
 wedge_kind_severity() {  # <kind> -> LOW|MEDIUM|HIGH
   case "$1" in
     pause-recheck|stale-idle) printf 'LOW' ;;
@@ -1009,8 +1018,7 @@ wedge_summary_line() {  # <state> <age-seconds> <marker>
     return 0
   fi
   # Sorted and deduped so the same standing wedge renders one stable identity.
-  kind_list=$(printf '%s' "$kinds" | sort -u | tr '\n' ',')
-  kind_list=${kind_list%,}
+  kind_list=$(fm_kind_list "$kinds")
   printf 'FMWEDGE/1 severity=%s count=%s kinds=%s age=%ss: %s away-mode escalation(s) held undelivered, max severity %s; see %s' \
     "$max" "$count" "$kind_list" "$age" "$count" "$max" "$marker"
 }
