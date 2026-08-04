@@ -70,11 +70,13 @@
 #
 # --restart: stop ONLY this FM_HOME's watcher (the pid recorded in THIS home's
 # state/.watch.lock) and own a fresh cycle, or attach if a verified live peer
-# wins the singleton while the duplicate child stands down. It
-# resolves and signals exactly that pid, so it can never touch another home's
-# watcher. NEVER `pkill -f
-# bin/fm-watch.sh`: that pattern matches every firstmate home's watcher
-# (secondmate homes run the same script) and would kill siblings.
+# wins the singleton while the duplicate child stands down. The stop goes
+# through bin/fm-safe-kill.sh, which re-derives its authority from that same
+# lock, so it can never touch another home's watcher, a session, or an ancestor.
+# A pattern-based stop is not an alternative here: the same pattern matches every
+# firstmate home's watcher (secondmate homes run the same script) and, because a
+# worker's brief travels on its argv, it also matches the workers assigned to
+# repair supervision. See docs/arm-pretool-check.md "Process termination".
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

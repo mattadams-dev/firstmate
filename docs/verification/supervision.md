@@ -302,6 +302,68 @@ tests/fm-watcher-lock.test.sh
 tests/fm-watch-triage.test.sh
 ```
 
+## Supervisor singleton at birth
+
+Measured 2026-08-04 on Linux 6.18.33.2-microsoft-standard-WSL2, against the tree that introduced `fm_supervisor_singleton_acquire`.
+
+### Cause, decided by probe rather than by plausibility
+
+Three hypotheses were proposed for why the pre-existing singleton locks did not prevent a reported supervisor duplication.
+The probes that decide them are preserved with their pre-fix capture in `tests/fixtures/supervisor-singleton/`; each takes the repo root as its one argument.
+
+| Hypothesis | Probe | Verdict |
+| --- | --- | --- |
+| A dying predecessor's release-by-path unlinks a rotated successor's lock | `h2-release-by-path.sh` | KILLED. `fm_lock_release` resolves the symlink to the owner directory it currently points at and releases only when that owner's `pid` names the releasing process, so a rotated lock is left alone. |
+| Work performed before the lock widens the window | `h3-prelock-evicts.sh` | PROVEN, and stronger than proposed. The pre-lock PR-check migration does not merely widen a window; it SIGTERMs the incumbent watcher. A newcomer that had passed no singleton gate terminated the incumbent as its first act. |
+| The lock is keyed by an address rather than a home identity | `h1-lock-path-identity.sh` | PROVEN. Path variation for one physical state directory still resolves to one lock, but two different state directories each take their own lock while both record the SAME `fm-home`. The lock recorded an identity it was never keyed by. |
+
+Two further generators were found in the daemon layer while tracing the same shape, both in `bin/fm-afk-start.sh`:
+a live daemon whose lock failed an identity match had that lock unlinked outright before a replacement was started, unserialized and outside the lock it was overriding;
+and the identity match itself fell back to a command-line substring test when no identity was published.
+
+What remains `unknown`: which of these fired during the original incident.
+`state/.watch-cycle-exits.log` recorded arm and watcher pids and lock identity but never the resolved home or state address of a cycle, so the record cannot distinguish two cycles in one home from one cycle each in two homes.
+That is treated as a defect in the instrument rather than as evidence in either direction, and both fields are now recorded per cycle.
+
+A pattern-based census run during the same incident reported four supervise daemons where zero existed.
+It matched each process's whole command line as a substring and so counted two live crewmates - whose briefs quote the script names on argv - and the inspecting shell itself.
+This is why `bin/fm-safe-kill.sh` accepts only a pid a role lock already names, and compares identity as whole-command-line bytes rather than testing for containment.
+
+### Guard-class mutation results
+
+One mutation per protection, each applied to its own copy of the tree, never to a working checkout.
+Baselines read against: `tests/fm-watcher-lock.test.sh` 38 `ok -` lines, `tests/fm-safe-kill.test.sh` 12, `tests/fm-arm-pretool-check.test.sh` 178, all exiting 0.
+A failing case aborts its suite, so each mutation was run twice: once to see which case it kills, once with that case's invocation removed to prove nothing else depends on the mutated protection.
+Both directions are covered deliberately: a guard that refuses everything is the same failure as one that permits everything, and it is the direction that gets missed.
+
+| Mutation | Direction | Case killed | Rest of suite |
+| --- | --- | --- | --- |
+| A verified-live peer no longer stops a second acquisition | permits too much | `test_singleton_start` | 37 clean |
+| Restore the pre-lock PR-check migration | permits too much | `test_a_starting_watcher_never_evicts_the_incumbent` | 37 clean |
+| Publish the identity of the command substitution instead of the holder's | permits too much | `test_stale_watch_lock_reclaimed`, then `test_lock_publishes_its_real_holder_identity` | then clean |
+| Never reclaim a provably-dead or reused holder | refuses too much | `test_stale_watch_lock_reclaimed` | then clean |
+| Drop the session-lock refusal in the kill helper | permits too much | `test_refuses_the_session_lock_holder`, then `test_every_outcome_is_recorded` | 10 clean |
+| The kill helper can never complete a stop | refuses too much | `test_authorized_supervisor_stop_succeeds`, `test_daemon_role_stop_succeeds`, `test_every_outcome_is_recorded` | 9 clean |
+| The policy stops classifying terminations | permits too much | matrix `K01` (`kill -TERM 17907`) | 158 clean |
+| The policy denies signal-0 probes and job specs too | refuses too much | matrix `L01` (`kill -0 17907`) | 172 clean |
+
+The identity-from-subshell mutation is the one this work found in its own first implementation, and it is the reason the seed takes the identity as a parameter.
+A subshell shares its parent's command line but not its start time, so a self-computed identity differs by one clock tick and matches only when the fork lands inside the same tick - a lock that intermittently fails to recognize its own holder, reproducing roughly never under test.
+
+The session-lock refusal is shared by two cases because the durable-record case uses that refusal to produce a recorded refusal; both guard it from their own direction.
+The kill-helper success path is shared by three for the same reason.
+
+Deterministic entry points for this contract:
+
+```sh
+tests/fm-watcher-lock.test.sh
+tests/fm-safe-kill.test.sh
+tests/fm-arm-pretool-check.test.sh
+tests/fixtures/supervisor-singleton/h1-lock-path-identity.sh .
+tests/fixtures/supervisor-singleton/h2-release-by-path.sh .
+tests/fixtures/supervisor-singleton/h3-prelock-evicts.sh .
+```
+
 ## Wedge-alarm channels
 
 The two real notification channels were bounded manually on 2026-07-10 on macOS 26.5.2 with Herdr 0.7.3.
