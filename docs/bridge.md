@@ -214,7 +214,7 @@ The events zone renders that note on the board, so the most destructive override
 An item whose outcome is `landed`, `discarded` or `unknown` leaves the ask queues, the `needs-captain` and `needs-cocaptain` tallies, the tab-title count, the rail badge and the aging flag, and its answer forms are withdrawn - nobody can rule on work that has ended.
 That is the ask conjunction doing its job, not the outcome axis overruling the state axis: the state it earned stays in the ledger and in `--state` for audit, and the board renders it as its own chip beside the outcome chip so a reader sees both answers rather than guessing the second from the first.
 When work ended and the ledger never said who owed it, the fold declines to invent a state rather than defaulting one - every value would be a claim nothing observed.
-Each closed group is capped with a visible overflow pointer to the record (`caps.fleet_closed`, default 6, `FM_BRIDGE_CAP_FLEET_DISCARDED`; `caps.closed_decisions` for decisions and criticals), because a rare override must not grow into a permanent wall of rows, and a cap that hides rows silently would be its own lie.
+Each closed group is capped with a visible overflow pointer to the record (`caps.fleet_closed`, default 6, `FM_BRIDGE_CAP_FLEET_RESOLVED`; `caps.closed_decisions` for decisions and criticals, default 3, `FM_BRIDGE_CAP_RESOLVED_DECISIONS`), because a rare override must not grow into a permanent wall of rows, and a cap that hides rows silently would be its own lie.
 `bin/fm-bridge.sh lint` reads the same two axes, so it never asks for an answer form on work that has ended.
 
 ### Why append-only, and why records are bounded

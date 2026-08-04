@@ -42,6 +42,11 @@
 #                       every state/*.meta, a bounded state/*.status tail,
 #                       state/.afk, and a cheap per-task endpoint-liveness read:
 #                       read-only, always runs.
+#   5b. bridge        - refreshes the captain's board (fm-bridge-render.sh
+#                       --tick) so it is current the moment a session opens
+#                       instead of up to a supervision tick behind, and prints
+#                       its path. Rendering writes, so a lock-refused session
+#                       only reports the path. Never fatal (docs/bridge.md).
 #   6. closing reminder - prints the context-specific watcher next step; this
 #                       script points back to the emitted harness supervision
 #                       block and deliberately never arms the watcher itself.

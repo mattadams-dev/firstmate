@@ -6,8 +6,13 @@
 #   fm-bridge-render.sh --state --id ID    the same fold, narrowed to one item
 #   fm-bridge-render.sh --lifecycle ID     typed answer to "what happened to ID?"
 #   fm-bridge-render.sh --html             the HTML board, on stdout
+#   fm-bridge-render.sh --write            render the board to its canonical path
 #   fm-bridge-render.sh --tick             the supervision-cycle entry point
 #   fm-bridge-render.sh --path             print the canonical board path
+#   fm-bridge-render.sh --ledger-path      print the canonical ledger path
+#
+# --out PATH sends any output shape to a file instead of stdout, and --verbose
+# (-v) makes --tick report whether it re-rendered or only restamped.
 #
 # ONE FOLD, MANY CONSUMERS
 # The fold is not logic buried in a renderer. It is a published interface with
@@ -66,7 +71,7 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE_DIR="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 STAMP="$STATE_DIR/.bridge-render"
 
-usage() { sed -n '2,53p' "$0" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,58p' "$0" | sed 's/^# \{0,1\}//'; }
 
 die() { printf 'fm-bridge-render: %s\n' "$1" >&2; exit 1; }
 
