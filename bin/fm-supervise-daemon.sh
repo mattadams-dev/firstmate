@@ -1575,7 +1575,7 @@ fm_super_main() {
   # no age threshold participates. Everything below this point - backend
   # discovery, target validation, the supervision loop - is work that only the
   # home's one daemon is entitled to do.
-  fm_supervisor_singleton_acquire "$LOCK" supervise-daemon "$FM_HOME" "$FM_DAEMON_DIR/fm-supervise-daemon.sh"
+  fm_supervisor_singleton_acquire "$LOCK" supervise-daemon "$FM_HOME" "$STATE" "$FM_DAEMON_DIR/fm-supervise-daemon.sh"
   case $? in
     0) ;;
     1)

@@ -26,7 +26,99 @@ const REASONS = {
   "broad-watcher-kill": "a broad process kill targeting the firstmate watcher is forbidden",
   "unclassifiable-protected-command": "unsupported or malformed shell syntax contains a protected watcher command",
   "watcher-direct": "bin/fm-watch.sh must not be run directly; arm the watcher with bin/fm-watch-arm.sh or run bin/fm-watch-checkpoint.sh instead",
+  "pattern-kill": "a process kill that selects its target by matching text (pkill, killall, or a grep/pgrep pipeline into kill) is forbidden; terminate a verified pid with bin/fm-safe-kill.sh",
+  "unverified-kill": "terminating a process by pid is routed through bin/fm-safe-kill.sh, which takes its authority from the lock that names the target; kill -0 and kill -l remain available for probing",
 };
+
+// Process termination.
+//
+// pkill and killall select their target by matching text, and in this fleet an
+// agent's task brief travels on argv: the processes most likely to match a
+// supervisor pattern are the crewmates assigned to fix that supervisor, and the
+// shell running the search. A recorded census matched four "supervise daemons"
+// where zero existed - two live crewmates and the observer. Pattern selection is
+// not merely imprecise here, it is biased toward the most costly targets, so it
+// is denied outright rather than bounded.
+//
+// A bare `kill <pid>` is denied for a different reason: the command carries no
+// evidence about what the pid IS. `kill -TERM 17907` was issued against a
+// correctly resolved pid, with identity and ancestry both checked, and was still
+// wrong - 17907 was the captain's own session holding the home's lock. The
+// judgment belongs to bin/fm-safe-kill.sh, which derives authority from a lock
+// rather than from inspection.
+//
+// kill -0 and kill -l are NOT terminations; denying them would break every
+// liveness probe in the fleet and turn this guard into the mirror-image failure
+// of the one it prevents. Job specs (%1) name only the invoking shell's own
+// children and stay available too.
+const KILL_BY_PATTERN = new Set(["pkill", "killall"]);
+const KILL_BY_PID = new Set(["kill"]);
+
+function isJobSpec(value) {
+  return value.startsWith("%");
+}
+
+const NULL_SIGNALS = new Set(["0", "SIGNULL", "NULL"]);
+
+// A `kill` invocation that only probes or lists, and therefore terminates
+// nothing. Signal 0 delivers no signal at all - it is the standard liveness
+// probe this fleet uses everywhere - so it stays allowed against any target.
+// A job spec names only the invoking shell's own children. Anything else,
+// including a negative pid (a whole process group), is a termination.
+function killIsProbeOrListOnly(args) {
+  let signalIsNull = false;
+  const targets = [];
+  for (let i = 0; i < args.length; i += 1) {
+    const value = args[i].value;
+    if (value === "-l" || value === "-L" || value.startsWith("--list") || value.startsWith("--table")) return true;
+    if (value === "-0") {
+      signalIsNull = true;
+      continue;
+    }
+    if (value === "-s" || value === "--signal" || value === "-n") {
+      const signal = args[i + 1]?.value ?? "";
+      i += 1;
+      if (!NULL_SIGNALS.has(signal.replace(/^SIG/, "").toUpperCase()) && signal !== "0") return false;
+      signalIsNull = true;
+      continue;
+    }
+    if (value.startsWith("--signal=") || value.startsWith("-s")) {
+      const signal = value.startsWith("--signal=") ? value.slice("--signal=".length) : value.slice(2);
+      if (signal !== "0" && !NULL_SIGNALS.has(signal.replace(/^SIG/, "").toUpperCase())) return false;
+      signalIsNull = true;
+      continue;
+    }
+    if (value === "--") continue;
+    if (value.startsWith("-")) return false;
+    targets.push(value);
+  }
+  if (targets.length === 0) return true;
+  if (signalIsNull) return true;
+  return targets.every(isJobSpec);
+}
+
+function killClassification(position) {
+  if (!position.command) return "";
+  const name = basename(position.command.value);
+  const args = position.words.slice(position.index + 1);
+  if (KILL_BY_PATTERN.has(name)) return "pattern";
+  // xargs feeds its command targets chosen by whatever produced the upstream
+  // text - the grep-pipeline shape - so the target is unverifiable here.
+  if (name === "xargs") {
+    for (const word of args) {
+      const inner = basename(word.value);
+      if (KILL_BY_PATTERN.has(inner) || KILL_BY_PID.has(inner)) return "pattern";
+    }
+    return "";
+  }
+  if (!KILL_BY_PID.has(name)) return "";
+  // A pid that arrives through a substitution or an unquoted expansion was
+  // selected by something this layer cannot see; treat it as pattern selection
+  // rather than as a verified pid.
+  if (args.some((word) => word.subs.length > 0 || word.unquotedExpansion)) return "pattern";
+  if (killIsProbeOrListOnly(args)) return "";
+  return "unverified";
+}
 
 function parseArguments(argv) {
   const result = { command: "", root: "", home: "" };
@@ -45,6 +137,14 @@ function parseArguments(argv) {
 
 function rawMentionsProtected(command) {
   return /(?:^|[/\s'"`(])fm-watch(?:-(?:arm|checkpoint))?\.sh\b/.test(normalizeLineContinuations(command));
+}
+
+function rawMentionsPatternKill(command) {
+  return /\b(?:pkill|killall)\b/.test(normalizeLineContinuations(command));
+}
+
+function rawMentionsAnyKill(command) {
+  return /\b(?:pkill|killall|kill)\b/.test(normalizeLineContinuations(command));
 }
 
 function rawMentionsBroadKill(command) {
@@ -728,16 +828,18 @@ function isWatcherPgrep(position, context) {
 
 function analyzeProgram(command, context, depth = 0) {
   if (depth > 12) {
-    return { error: "recursion limit", protectedFound: rawMentionsProtected(command), broadKill: rawMentionsBroadKill(command), pgrepWatcher: false, watcherPids: new Set() };
+    return { error: "recursion limit", protectedFound: rawMentionsProtected(command), broadKill: rawMentionsBroadKill(command), patternKill: rawMentionsPatternKill(command), unverifiedKill: rawMentionsAnyKill(command), pgrepWatcher: false, watcherPids: new Set() };
   }
   const lexed = new Lexer(command).tokenize();
   if (lexed.error) {
-    return { error: lexed.error, protectedFound: rawMentionsProtected(command), broadKill: rawMentionsBroadKill(command), pgrepWatcher: false, watcherPids: new Set() };
+    return { error: lexed.error, protectedFound: rawMentionsProtected(command), broadKill: rawMentionsBroadKill(command), patternKill: rawMentionsPatternKill(command), unverifiedKill: rawMentionsAnyKill(command), pgrepWatcher: false, watcherPids: new Set() };
   }
   const program = splitProgram(lexed.tokens);
   const nodeInfos = [];
   let nestedProtected = false;
   let broadKill = false;
+  let patternKill = false;
+  let unverifiedKill = false;
   let pgrepWatcher = false;
   let unsupported = false;
   let activeContext = {
@@ -763,6 +865,8 @@ function analyzeProgram(command, context, depth = 0) {
       const nested = analyzeProgram(payload, nodeContext, depth + 1);
       nodeNestedProtected ||= nested.protectedFound;
       broadKill ||= nested.broadKill;
+      patternKill ||= nested.patternKill;
+      unverifiedKill ||= nested.unverifiedKill;
       nodePgrepWatcher ||= nested.pgrepWatcher;
       if (nested.error && rawMentionsProtected(payload)) unsupported = true;
     }
@@ -771,6 +875,8 @@ function analyzeProgram(command, context, depth = 0) {
         const nested = analyzeProgram(token.content, nodeContext, depth + 1);
         nodeNestedProtected ||= nested.protectedFound;
         broadKill ||= nested.broadKill;
+        patternKill ||= nested.patternKill;
+        unverifiedKill ||= nested.unverifiedKill;
         nodePgrepWatcher ||= nested.pgrepWatcher;
         if (nested.error && rawMentionsProtected(token.content)) unsupported = true;
       }
@@ -780,6 +886,8 @@ function analyzeProgram(command, context, depth = 0) {
           substitutionResults.set(substitution, nested);
           nodeNestedProtected ||= nested.protectedFound;
           broadKill ||= nested.broadKill;
+          patternKill ||= nested.patternKill;
+          unverifiedKill ||= nested.unverifiedKill;
           nodePgrepWatcher ||= nested.pgrepWatcher;
           if (nested.error && rawMentionsProtected(substitution.content)) unsupported = true;
         }
@@ -804,6 +912,8 @@ function analyzeProgram(command, context, depth = 0) {
       const nested = analyzeProgram(shellPayload.value, nodeContext, depth + 1);
       nodeNestedProtected ||= nested.protectedFound;
       broadKill ||= nested.broadKill;
+      patternKill ||= nested.patternKill;
+      unverifiedKill ||= nested.unverifiedKill;
       nodePgrepWatcher ||= nested.pgrepWatcher;
       if (nested.error && rawMentionsProtected(shellPayload.value)) unsupported = true;
     }
@@ -812,6 +922,8 @@ function analyzeProgram(command, context, depth = 0) {
       const nested = analyzeProgram(payload, nodeContext, depth + 1);
       nodeNestedProtected ||= nested.protectedFound;
       broadKill ||= nested.broadKill;
+      patternKill ||= nested.patternKill;
+      unverifiedKill ||= nested.unverifiedKill;
       nodePgrepWatcher ||= nested.pgrepWatcher;
       if (nested.error && rawMentionsProtected(payload)) unsupported = true;
     }
@@ -821,6 +933,9 @@ function analyzeProgram(command, context, depth = 0) {
     if (hasUnclassifiableProtectedExpansion(position.command, context.root)) unclassifiableProtected = true;
     const commandName = basename(executable);
     const args = position.words.slice(position.index + 1);
+    const killKind = killClassification(position);
+    if (killKind === "pattern") patternKill = true;
+    else if (killKind === "unverified") unverifiedKill = true;
     if (commandName === "pkill" && args.some((word) => /fm-watch/.test(word.value) || wordReferencesAny(word, nodeContext.watcherPatterns))) broadKill = true;
     if (commandName === "kill" && (nodePgrepWatcher || args.some((word) => wordReferencesAny(word, nodeContext.watcherPids)))) broadKill = true;
     if (isWatcherPgrep(position, nodeContext)) pgrepWatcher = true;
@@ -848,10 +963,15 @@ function analyzeProgram(command, context, depth = 0) {
   const protectedFound = directProtected || nestedProtected || unclassifiableProtected;
   if (unclassifiableProtected) unsupported = true;
   const broadKillFound = broadKill || (unsupported && rawMentionsBroadKill(command));
-  if (unsupported && (protectedFound || rawMentionsProtected(command) || broadKillFound)) {
-    return { error: "unsupported compound grammar", protectedFound: true, broadKill: broadKillFound, pgrepWatcher, watcherPids: activeContext.watcherPids, program, nodeInfos };
+  const patternKillFound = patternKill || (unsupported && rawMentionsPatternKill(command));
+  // Grammar this parser cannot classify is not evidence that a kill inside it is
+  // harmless. Fail closed on the kill, exactly as an unparseable protected
+  // watcher command already fails closed.
+  const unverifiedKillFound = unverifiedKill || (unsupported && rawMentionsAnyKill(command));
+  if (unsupported && (protectedFound || rawMentionsProtected(command) || broadKillFound || unverifiedKillFound)) {
+    return { error: "unsupported compound grammar", protectedFound: protectedFound || rawMentionsProtected(command), broadKill: broadKillFound, patternKill: patternKillFound, unverifiedKill: unverifiedKillFound, pgrepWatcher, watcherPids: activeContext.watcherPids, program, nodeInfos };
   }
-  return { error: "", protectedFound, directProtected, nestedProtected, broadKill: broadKillFound, pgrepWatcher, watcherPids: activeContext.watcherPids, program, nodeInfos };
+  return { error: "", protectedFound, directProtected, nestedProtected, broadKill: broadKillFound, patternKill: patternKillFound, unverifiedKill: unverifiedKillFound, pgrepWatcher, watcherPids: activeContext.watcherPids, program, nodeInfos };
 }
 
 function xModePathAllowed(value, home) {
@@ -903,6 +1023,8 @@ function decision(command, root, home) {
   const context = { root: path.normalize(root), home: path.normalize(home), protectedVariables: new Set(), watcherPatterns: new Set(), watcherPids: new Set() };
   const analysis = analyzeProgram(command, context);
   if (analysis.broadKill) return deny("broad-watcher-kill");
+  if (analysis.patternKill) return deny("pattern-kill");
+  if (analysis.unverifiedKill) return deny("unverified-kill");
   if (analysis.error && analysis.protectedFound) return deny("unclassifiable-protected-command");
   if (!analysis.protectedFound) return { decision: "allow" };
   if (analysis.nodeInfos?.some((info) => info.protectedKind === "watch")) return deny("watcher-direct");

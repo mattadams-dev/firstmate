@@ -766,7 +766,7 @@ fi
 # alone - never from a beacon age against a grace threshold, which cannot tell a
 # working peer from a wedged one and gets the answer catastrophically wrong in
 # both directions. bin/fm-wake-lib.sh owns the decision procedure.
-fm_supervisor_singleton_acquire "$WATCH_LOCK" watcher "$FM_HOME" "$WATCH_PATH"
+fm_supervisor_singleton_acquire "$WATCH_LOCK" watcher "$FM_HOME" "$STATE" "$WATCH_PATH"
 case $? in
   0) ;;
   1)

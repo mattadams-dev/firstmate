@@ -89,9 +89,14 @@ test_stale_watch_lock_reclaimed() {
   pass "killed watcher stale lock is reclaimed"
 }
 
-test_live_stale_watch_lock_is_actionable() {
+# A lock held by a live process that publishes NO identity cannot be judged
+# either way from its own contents. That is genuinely unknown - not "probably a
+# peer" and not "probably stale" - so the watcher refuses loudly and starts
+# nothing. It replaces the former beacon-age judgment, which answered this same
+# situation from how old a file was.
+test_unidentifiable_live_lock_refuses_loudly() {
   local dir state fakebin out err status
-  dir=$(make_case live-stale-lock)
+  dir=$(make_case unidentifiable-live-lock)
   state="$dir/state"
   fakebin="$dir/fakebin"
   out="$dir/watch.out"
@@ -99,12 +104,61 @@ test_live_stale_watch_lock_is_actionable() {
   mark_pr_check_migration_complete "$state"
   mkdir "$state/.watch.lock"
   printf '%s\n' "$$" > "$state/.watch.lock/pid"
-  touch -t 200001010000 "$state/.last-watcher-beat"
   status=0
-  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_GUARD_GRACE=1 FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" 2> "$err" || status=$?
-  [ "$status" -ne 0 ] || fail "watcher silently no-opped behind a live stale holder"
-  grep -F 'heartbeat is stale' "$err" >/dev/null || fail "watcher did not explain the stale live lock"
-  pass "live watcher lock with stale heartbeat is actionable"
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" 2> "$err" || status=$?
+  [ "$status" -ne 0 ] || fail "watcher silently no-opped behind a lock it could not identify"
+  grep -F 'cannot identify its holder' "$err" >/dev/null \
+    || fail "watcher did not report the holder as unidentifiable (got: $(tr '\n' '|' < "$err"))"
+  [ ! -e "$state/.last-watcher-beat" ] || fail "a refused watcher published a liveness beacon"
+  pass "a live lock that cannot identify its holder refuses loudly and starts nothing"
+}
+
+# The wedge case the removed beacon judgment used to cover. The singleton gate
+# no longer decides anything from beacon age - it stands down quietly for a
+# verified-live peer - but the wedge must still be LOUD, from the layer that
+# owns supervision health. Proving both halves here is what stops "the gate got
+# quieter" from silently becoming "nobody reports a wedged watcher".
+test_wedged_incumbent_is_loud_from_the_arm_layer() {
+  local dir state fakebin out err status incumbent i
+  dir=$(make_case wedged-incumbent)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  mark_pr_check_migration_complete "$state"
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=30 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$dir/incumbent.out" 2>&1 &
+  incumbent=$!
+  i=0
+  while [ "$i" -lt 100 ] && [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" != "$incumbent" ]; do
+    sleep 0.05
+    i=$((i + 1))
+  done
+  [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" = "$incumbent" ] \
+    || { kill "$incumbent" 2>/dev/null || true; fail "incumbent never took the singleton"; }
+
+  # Age the beacon behind the incumbent's back: a wedged watcher holds its lock
+  # and stops beating.
+  touch -t 200001010000 "$state/.last-watcher-beat"
+
+  out="$dir/second.out"
+  err="$dir/second.err"
+  status=0
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=30 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" 2> "$err" || status=$?
+  [ "$status" -eq 0 ] || fail "the singleton gate failed instead of standing down for a verified-live peer"
+  grep -F "already running pid $incumbent" "$out" >/dev/null \
+    || fail "second watcher did not stand down for the verified-live incumbent"
+  is_live_non_zombie "$incumbent" || fail "the incumbent was evicted by a second watcher start"
+
+  # And the wedge is still surfaced, by the arm layer, which owns health.
+  status=0
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_GUARD_GRACE=1 FM_ARM_CONFIRM_TIMEOUT=2 \
+    FM_POLL=30 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    "$WATCH_ARM" > "$dir/arm.out" 2>&1 || status=$?
+  [ "$status" -ne 0 ] || fail "arm layer reported success while the incumbent was wedged"
+  grep -F 'watcher: FAILED' "$dir/arm.out" >/dev/null \
+    || fail "arm layer did not surface the wedged incumbent (got: $(tr '\n' '|' < "$dir/arm.out"))"
+
+  kill "$incumbent" 2>/dev/null || true
+  wait "$incumbent" 2>/dev/null || true
+  pass "a wedged incumbent keeps the singleton quietly and is surfaced loudly by the arm layer"
 }
 
 test_guard_warnings() {
@@ -1248,7 +1302,8 @@ test_pid_identity_is_locale_invariant
 test_proc_pid_identity_ignores_wall_clock_and_detects_pid_reuse
 test_msys_pid_identity_uses_proc
 test_stale_watch_lock_reclaimed
-test_live_stale_watch_lock_is_actionable
+test_unidentifiable_live_lock_refuses_loudly
+test_wedged_incumbent_is_loud_from_the_arm_layer
 test_guard_warnings
 test_lock_single_winner_under_concurrency
 test_lock_steals_dead_pid_lock

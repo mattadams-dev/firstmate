@@ -523,13 +523,27 @@ FM_SINGLETON_PEER_ROLE=
 # shellcheck disable=SC2034 # Read by callers after fm_supervisor_singleton_acquire returns.
 FM_SINGLETON_REASON=
 
-# fm_singleton_seed <role> <home> <exec_path>: the identity a supervisor
-# publishes with its lock. Every acquisition of a supervision lock uses this,
-# including the PR-check migration's temporary watcher exclusion, so no
-# supervision lock is ever held by an unidentifiable holder.
+# fm_singleton_seed <role> <home> <state> <exec_path> <pid-identity>: the
+# identity a supervisor publishes with its lock. Every acquisition of a supervision lock
+# uses this, including the PR-check migration's temporary watcher exclusion, so
+# no supervision lock is ever held by an unidentifiable holder.
+#
+# The identity is a PARAMETER, never computed here. This function is always
+# called inside a command substitution, and $BASHPID inside one is the
+# subshell's - which shares the holder's command line but not its start time, so
+# a self-computed identity would differ from the holder's by one clock tick and
+# match only when the fork happened to land inside the same tick. A lock that
+# fails to recognize its own holder is a duplication generator, and an
+# intermittent one.
+# <state> is recorded separately from <home> because they are not the same
+# identity and were being conflated. FM_STATE_OVERRIDE moves the supervised
+# fleet without changing FM_HOME, so two supervisors can legitimately record an
+# identical home while watching entirely different state directories - which is
+# exactly what makes a process-table census read them as duplicates of one
+# another. The supervised fleet is the state directory; the lock now says so.
 fm_singleton_seed() {
-  printf 'role %s\nfm-home %s\nwatcher-path %s\npid-identity %s\n' \
-    "$1" "$2" "$3" "$(fm_pid_identity "${BASHPID:-$$}" 2>/dev/null || true)"
+  printf 'role %s\nfm-home %s\nstate %s\nwatcher-path %s\npid-identity %s\n' \
+    "$1" "$2" "$3" "$4" "$5"
 }
 
 # fm_singleton_holder_verified <lockdir> <home>: is the lock's published holder
@@ -566,32 +580,43 @@ fm_singleton_holder_verified() {
 # path uses, and re-verified while holding it, so two reclaimers cannot both
 # win and a holder that becomes verifiable mid-flight is left alone.
 fm_singleton_reclaim_reused() {
-  local lockdir=$1 role=$2 home=$3 exec_path=$4 steal rc=1
+  local lockdir=$1 role=$2 home=$3 state=$4 exec_path=$5 identity=$6 steal rc=1
   steal="$lockdir.steal"
   fm_lock_try_acquire "$steal" || return 1
   if [ "$(fm_singleton_holder_verified "$lockdir" "$home"; echo $?)" = 1 ]; then
     fm_lock_remove_path "$lockdir" || true
-    fm_lock_with_owner_seed "$(fm_singleton_seed "$role" "$home" "$exec_path")" \
+    fm_lock_with_owner_seed "$(fm_singleton_seed "$role" "$home" "$state" "$exec_path" "$identity")" \
       fm_lock_try_create "$lockdir" && rc=0
   fi
   fm_lock_release "$steal"
   return "$rc"
 }
 
-# fm_supervisor_singleton_acquire <lockdir> <role> <home> <exec_path>
+# fm_supervisor_singleton_acquire <lockdir> <role> <home> <state> <exec_path>
 #   0 - acquired; this process is now the home's <role> supervisor.
 #   1 - a verified-live holder has it; FM_SINGLETON_PEER_PID and
 #       FM_SINGLETON_PEER_ROLE name it. Standing down is the only safe act.
 #   2 - undecidable; FM_SINGLETON_REASON says why. Never acquire on this path,
 #       and never resolve it by inspecting or terminating the holder.
 fm_supervisor_singleton_acquire() {
-  local lockdir=$1 role=$2 home=$3 exec_path=$4 verdict
+  local lockdir=$1 role=$2 home=$3 state=$4 exec_path=$5 verdict mypid identity
   FM_SINGLETON_PEER_PID=
   # shellcheck disable=SC2034 # Read by callers after this returns.
   FM_SINGLETON_PEER_ROLE=
   FM_SINGLETON_REASON=
 
-  if fm_lock_with_owner_seed "$(fm_singleton_seed "$role" "$home" "$exec_path")" \
+  # A function body is not a subshell, so this is genuinely this process's pid.
+  mypid=${BASHPID:-$$}
+  identity=$(fm_pid_identity "$mypid" 2>/dev/null || true)
+  if [ -z "$identity" ]; then
+    # A supervisor that cannot state who it is must not become the singleton:
+    # every peer would then read its lock as unidentifiable and refuse to attach,
+    # and no future holder could tell a live peer from a reused pid.
+    FM_SINGLETON_REASON="this process's own identity could not be read, so it cannot publish a $role lock"
+    return 2
+  fi
+
+  if fm_lock_with_owner_seed "$(fm_singleton_seed "$role" "$home" "$state" "$exec_path" "$identity")" \
     fm_lock_try_acquire "$lockdir"; then
     return 0
   fi
@@ -608,7 +633,7 @@ fm_supervisor_singleton_acquire() {
       # Dead holder, or a pid the OS handed to something else. Reclaiming the
       # LOCK is safe and is what keeps supervision recoverable; nothing here
       # touches the process wearing that pid.
-      fm_singleton_reclaim_reused "$lockdir" "$role" "$home" "$exec_path" && return 0
+      fm_singleton_reclaim_reused "$lockdir" "$role" "$home" "$state" "$exec_path" "$identity" && return 0
       FM_SINGLETON_REASON="lock contended while its published holder was retiring"
       return 1
       ;;

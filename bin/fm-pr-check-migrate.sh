@@ -319,9 +319,14 @@ else
     stopped_watcher=1
   fi
 
+  # Captured through a variable first: $BASHPID inside the command substitution
+  # below would be the subshell's, and the lock must publish the identity of the
+  # process that actually holds it.
+  migration_pid=${BASHPID:-$$}
+  migration_identity=$(fm_pid_identity "$migration_pid" 2>/dev/null || true)
   i=0
   while [ "$i" -lt 100 ]; do
-    if fm_lock_with_owner_seed "$(fm_singleton_seed pr-check-migration "$FM_HOME" "$WATCH")" \
+    if fm_lock_with_owner_seed "$(fm_singleton_seed pr-check-migration "$FM_HOME" "$STATE" "$WATCH" "$migration_identity")" \
       fm_lock_try_acquire "$WATCH_LOCK"; then
       lock_held=1
       break
