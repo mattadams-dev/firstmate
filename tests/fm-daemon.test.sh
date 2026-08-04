@@ -618,6 +618,67 @@ test_successful_injection_is_distinguishable_from_never_attempted() {
   pass "escalate_flush: a delivered escalation is positively recorded, so silence no longer looks the same as delivery"
 }
 
+# The buffer holds crewmate-authored status text that the daemon never
+# sanitises, so a stray NUL or non-UTF-8 byte in one item is reachable. A counter
+# that classifies such a buffer as binary reports nothing and the record settles
+# on 0 - a delivery of N items recorded as a confident zero, which is the same
+# family of lie this whole branch exists to remove.
+test_delivered_count_survives_a_buffer_holding_undecodable_bytes() {
+  local dir state fakebin sent capture daemon_log buf
+  dir=$(make_supercase delivery-count-bytes)
+  state="$dir/state"; fakebin="$dir/fakebin"
+  sent="$dir/sent.log"; : > "$sent"
+  capture="$dir/pane.txt"; : > "$capture"
+  daemon_log="$dir/daemon.log"; : > "$daemon_log"
+  buf="$state/.subsuper-escalations"
+
+  printf 'paused 3600s (awaiting external, recheck whether the wait still holds): fm-lane-1\n' > "$buf"
+  printf 'fm-lane-2.status: blocked: credential expired \xff\xfe (catch-all scan)\n' >> "$buf"
+  printf 'fm-lane-3.status: blocked: worktree lock held \0 (catch-all scan)\n' >> "$buf"
+  afk_enter "$state"
+
+  LOG="$daemon_log" PATH="$fakebin:$PATH" FM_FAKE_TMUX_PANE_ALIVE=1 FM_FAKE_TMUX_SENT="$sent" \
+    FM_FAKE_TMUX_CAPTURE="$capture" FM_ESCALATE_BATCH_SECS=0 escalate_flush "$state" \
+    || fail "escalate_flush failed on a buffer holding undecodable bytes"
+  grep -Fq 'escalation flush delivered: 3 item(s)' "$daemon_log" \
+    || fail "an undecodable byte changed the delivered count: $(cat "$daemon_log")"
+  grep -Fq 'kinds=blocked,pause-recheck' "$daemon_log" \
+    || fail "an undecodable byte changed the delivered kinds: $(cat "$daemon_log")"
+  pass "escalate_flush: an item carrying undecodable bytes never turns a delivered batch into a count of 0"
+}
+
+# A buffer that exists but cannot be read is a batch this instrument never
+# observed. The record must say so rather than name a number it never counted:
+# `unknown` and `0` are different claims, and only one of them is honest here.
+test_unreadable_buffer_reports_an_unknown_count_never_zero() {
+  local dir state fakebin sent capture daemon_log buf
+  dir=$(make_supercase delivery-count-unreadable)
+  state="$dir/state"; fakebin="$dir/fakebin"
+  sent="$dir/sent.log"; : > "$sent"
+  capture="$dir/pane.txt"; : > "$capture"
+  daemon_log="$dir/daemon.log"; : > "$daemon_log"
+  buf="$state/.subsuper-escalations"
+
+  printf 'fm-lane-1.status: blocked: credential expired (catch-all scan)\n' > "$buf"
+  chmod 000 "$buf"
+  if [ -r "$buf" ]; then
+    chmod 644 "$buf"
+    printf 'skip: this user can read a mode-000 file (unreadable buffer not simulable)\n'
+    return 0
+  fi
+  afk_enter "$state"
+
+  LOG="$daemon_log" PATH="$fakebin:$PATH" FM_FAKE_TMUX_PANE_ALIVE=1 FM_FAKE_TMUX_SENT="$sent" \
+    FM_FAKE_TMUX_CAPTURE="$capture" FM_ESCALATE_BATCH_SECS=0 escalate_flush "$state" \
+    || fail "escalate_flush failed on an unreadable buffer"
+  chmod 644 "$buf"
+  grep -Fq 'escalation flush delivered: unknown item(s)' "$daemon_log" \
+    || fail "an unread buffer did not report an unknown count: $(cat "$daemon_log")"
+  grep -Fq 'delivered: 0 item(s)' "$daemon_log" \
+    && fail "an unread buffer was recorded as a confident zero: $(cat "$daemon_log")"
+  pass "escalate_flush: a buffer it could not read reports an unknown count, never a zero it did not observe"
+}
+
 test_escalate_batches_into_one_digest() {
   local dir state fakebin sent capture n
   dir=$(make_supercase batch)
@@ -1375,6 +1436,23 @@ test_wedge_alarm_osascript_channel_selected() {
   pass "osascript channel routes through the notifier seam with the summary (never a real notification)"
 }
 
+# A padded override must still SELECT its channel. A trailing space or newline
+# arrives easily from a shell wrapper or a copied line, and an untrimmed value
+# missed the channel arm and fell to the unrecognized-directive arm, which fires
+# no alert - the padding silently disabled the alarm instead of configuring it.
+test_wedge_alarm_padded_channel_override_still_selects_its_channel() {
+  local dir log daemon_log
+  dir=$(make_wedge_case wedge-padded-override); log="$dir/alert.log"
+  daemon_log="$dir/daemon.log"; : > "$daemon_log"
+  LOG="$daemon_log" FM_WEDGE_ALARM_LOG="$log" FM_WEDGE_ALARM_CHANNEL=$'  herdr  \n' \
+    wedge_alarm_notify "away-mode escalations WEDGED 800s undelivered" "/s/.marker"
+  grep -F 'herdr' "$log" >/dev/null \
+    || fail "a padded channel override did not select its channel: $(cat "$log")"
+  grep -F 'unrecognized active-alert channel directive' "$daemon_log" >/dev/null \
+    && fail "a padded channel override was read as an unrecognized directive: $(cat "$daemon_log")"
+  pass "a padded or newline-terminated FM_WEDGE_ALARM_CHANNEL selects its channel instead of silently firing nothing"
+}
+
 test_wedge_alarm_herdr_channel_selected() {
   local dir log
   dir=$(make_wedge_case wedge-herdr); log="$dir/alert.log"
@@ -2066,6 +2144,8 @@ test_housekeeping_herdr_idle_busy_record_clears_stale
 test_housekeeping_herdr_resumed_stale_cleared
 test_housekeeping_orca_persistent_stale_resolves_terminal
 test_successful_injection_is_distinguishable_from_never_attempted
+test_delivered_count_survives_a_buffer_holding_undecodable_bytes
+test_unreadable_buffer_reports_an_unknown_count_never_zero
 test_escalate_batches_into_one_digest
 test_escalate_batch_age_uses_first_append
 test_heartbeat_scan_dedup
@@ -2107,6 +2187,7 @@ test_wake_helpers_replace_inherited_notifier_override
 test_wedge_alarm_discard_seam_fires_nothing
 test_wedge_alarm_direct_notifiers_honor_discard_seam
 test_wedge_alarm_osascript_channel_selected
+test_wedge_alarm_padded_channel_override_still_selects_its_channel
 test_wedge_alarm_herdr_channel_selected
 test_wedge_alarm_command_channel_receives_summary
 test_wedge_summary_reports_count_kinds_and_severity
