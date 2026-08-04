@@ -830,50 +830,54 @@ wedge_alarm_via_herdr() {  # <summary>
   return 1
 }
 
-# wedge_alarm_command_script: render a `command:` directive into the script `sh -c`
-# should run, so the summary reaches the directive as an ARGUMENT for both
-# directive shapes the channel supports.
+# wedge_alarm_command_is_bare_program: 0 when a `command:` directive is nothing
+# but the name or path of ONE executable, with no arguments and no shell syntax.
 #
 # `sh -c "$cmd" fm-wedge-alarm "$summary"` gives the positional parameters to the
 # sh -c SHELL, not to any command that shell then executes. A directive whose body
-# is an inline snippet reads them as its own `$1`, but a directive naming a bare
-# script path is just a command word for that shell to run, and the script it
-# invokes receives EMPTY argv - so a directive of that shape silently logged its
-# own no-summary fallback on every alarm (docs/verification/supervision.md
+# is an inline snippet reads them as its own `$1`, but a directive that is just a
+# program is a command word for that shell to run, and the program it invokes
+# receives EMPTY argv - so a directive of that shape silently logged its own
+# no-summary fallback on every alarm (docs/verification/supervision.md
 # "Wedge-alarm command-channel argv"). Only the snippet shape was covered by a
 # test, so the suite could not tell a channel that receives the summary from one
 # that never does.
 #
-# A directive carrying no shell metacharacter is a simple command word list, so
-# appending "$@" hands it the summary as a trailing argument. A directive that
-# does carry one is a shell snippet: it can place `$1` itself, and appending
-# there would attach the summary to whatever its LAST command happens to be (a
-# trailing `cat > file` would read the summary as a filename instead of stdin),
-# so those are left exactly as before. Quote characters are deliberately NOT
-# metacharacters here - they affect how the directive's own words are parsed, not
-# where an appended argument lands, and the deployed PowerShell directive quotes
-# its script path. Every shape still receives the summary on stdin as well.
-wedge_alarm_command_script() {  # <cmd> -> script for sh -c
+# The predicate is deliberately the narrowest one that names that broken shape:
+# a single word, no shell metacharacter, and resolvable to an executable. Every
+# other directive keeps its exact previous invocation, because handing an extra
+# argument to a directive that already carries its own is not safe in general -
+# a command may reject or misread it (`sleep 30` treats it as a second duration,
+# `notify-send SUMMARY BODY` has no third parameter). Those directives already
+# place `$1` themselves or read stdin, which every shape still receives.
+wedge_alarm_command_is_bare_program() {  # <cmd>
   local cmd=$1
   case "$cmd" in
-    *[\;\|\&\<\>\$\`\(\)\{\}]*|*$'\n'*) printf '%s' "$cmd" ;;
-    *) printf '%s "$@"' "$cmd" ;;
+    '') return 1 ;;
+    *[[:space:]]*) return 1 ;;
+    *[\;\|\&\<\>\$\`\(\)\{\}\'\"\*\?\[\]\~\\]*) return 1 ;;
   esac
+  command -v -- "$cmd" >/dev/null 2>&1
 }
 
 # Run a captain-supplied command with the summary on $1 and on stdin, so an
 # alert can reach a phone/pager (ntfy, Slack, SMS) even when the captain is away
 # from the machine entirely. Best-effort: logs and returns 1 on failure.
 wedge_alarm_via_command() {  # <cmd> <summary>
-  local cmd=$1 summary=$2 rc script
+  local cmd=$1 summary=$2 rc
   if [ "${WEDGE_ALARM_EMIT_ACTIVE:-}" != 1 ]; then
     wedge_alarm_emit command "$summary" "$cmd"
     return $?
   fi
   [ -n "$cmd" ] || { log "wedge alarm: empty command: channel; nothing to run"; return 1; }
-  script=$(wedge_alarm_command_script "$cmd")
-  wedge_alarm_run_bounded command sh -c "$script" fm-wedge-alarm "$summary" \
-    <<< "$summary" >/dev/null 2>&1
+  if wedge_alarm_command_is_bare_program "$cmd"; then
+    # Invoked directly, with no shell between, so the summary lands in the
+    # program's own argv rather than a wrapper shell's.
+    wedge_alarm_run_bounded command "$cmd" "$summary" <<< "$summary" >/dev/null 2>&1
+  else
+    wedge_alarm_run_bounded command sh -c "$cmd" fm-wedge-alarm "$summary" \
+      <<< "$summary" >/dev/null 2>&1
+  fi
   rc=$?
   [ "$rc" -eq 0 ] && return 0
   log "wedge alarm: command channel exited $rc (command redacted)"
