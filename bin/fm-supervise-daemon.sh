@@ -641,16 +641,26 @@ escalate_add() {  # <state> <distilled-item>
 # supervisor pane. Returns 0 on successful inject (or empty buffer), non-zero on
 # inject failure (buffer preserved for retry / catch-up).
 escalate_flush() {  # <state>
-  local state=$1 buf item n msg
+  local state=$1 buf item n msg kinds_seen=''
   buf="$state/.subsuper-escalations"
   [ -s "$buf" ] || return 0
   n=$(wc -l < "$buf" 2>/dev/null || echo 0)
+  while IFS= read -r item || [ -n "$item" ]; do
+    [ -n "$item" ] || continue
+    kinds_seen="${kinds_seen}$(wedge_escalation_kind "$item")"$'\n'
+  done < "$buf"
   # Join buffered items with the literal " | " separator into one digest line.
   msg=$(awk 'NR>1{printf " | "} {printf "%s",$0} END{print ""}' "$buf" 2>/dev/null)
   # Single-line wrapper: no embedded newlines (inject_msg also collapses as a
   # safety net, but keeping the source single-line makes the intent explicit).
   msg=$(printf 'Supervisor escalate (%s event(s)): %s (pre-read; re-arm not needed — watcher daemon-managed)' "$n" "$msg")
-  if inject_msg "$msg" "$state"; then : > "$buf"; rm -f "${buf}.since" "$state/.subsuper-inject-wedged"; return 0; fi
+  if inject_msg "$msg" "$state"; then
+    # Name WHAT was delivered, not only that something was: the same count and
+    # kind vocabulary the wedge summary uses, so a delivered batch and a wedged
+    # one are directly comparable in the record.
+    log "escalation flush delivered: $n item(s), kinds=$(printf '%s\n' "$kinds_seen" | sort -u | tr '\n' ',' | sed 's/,$//')"
+    : > "$buf"; rm -f "${buf}.since" "$state/.subsuper-inject-wedged"; return 0
+  fi
   return 1
 }
 
@@ -820,17 +830,49 @@ wedge_alarm_via_herdr() {  # <summary>
   return 1
 }
 
+# wedge_alarm_command_script: render a `command:` directive into the script `sh -c`
+# should run, so the summary reaches the directive as an ARGUMENT for both
+# directive shapes the channel supports.
+#
+# `sh -c "$cmd" fm-wedge-alarm "$summary"` gives the positional parameters to the
+# sh -c SHELL, not to any command that shell then executes. A directive whose body
+# is an inline snippet reads them as its own `$1`, but a directive naming a bare
+# script path is just a command word for that shell to run, and the script it
+# invokes receives EMPTY argv - so a directive of that shape silently logged its
+# own no-summary fallback on every alarm (docs/verification/supervision.md
+# "Wedge-alarm command-channel argv"). Only the snippet shape was covered by a
+# test, so the suite could not tell a channel that receives the summary from one
+# that never does.
+#
+# A directive carrying no shell metacharacter is a simple command word list, so
+# appending "$@" hands it the summary as a trailing argument. A directive that
+# does carry one is a shell snippet: it can place `$1` itself, and appending
+# there would attach the summary to whatever its LAST command happens to be (a
+# trailing `cat > file` would read the summary as a filename instead of stdin),
+# so those are left exactly as before. Quote characters are deliberately NOT
+# metacharacters here - they affect how the directive's own words are parsed, not
+# where an appended argument lands, and the deployed PowerShell directive quotes
+# its script path. Every shape still receives the summary on stdin as well.
+wedge_alarm_command_script() {  # <cmd> -> script for sh -c
+  local cmd=$1
+  case "$cmd" in
+    *[\;\|\&\<\>\$\`\(\)\{\}]*|*$'\n'*) printf '%s' "$cmd" ;;
+    *) printf '%s "$@"' "$cmd" ;;
+  esac
+}
+
 # Run a captain-supplied command with the summary on $1 and on stdin, so an
 # alert can reach a phone/pager (ntfy, Slack, SMS) even when the captain is away
 # from the machine entirely. Best-effort: logs and returns 1 on failure.
 wedge_alarm_via_command() {  # <cmd> <summary>
-  local cmd=$1 summary=$2 rc
+  local cmd=$1 summary=$2 rc script
   if [ "${WEDGE_ALARM_EMIT_ACTIVE:-}" != 1 ]; then
     wedge_alarm_emit command "$summary" "$cmd"
     return $?
   fi
   [ -n "$cmd" ] || { log "wedge alarm: empty command: channel; nothing to run"; return 1; }
-  wedge_alarm_run_bounded command sh -c "$cmd" fm-wedge-alarm "$summary" \
+  script=$(wedge_alarm_command_script "$cmd")
+  wedge_alarm_run_bounded command sh -c "$script" fm-wedge-alarm "$summary" \
     <<< "$summary" >/dev/null 2>&1
   rc=$?
   [ "$rc" -eq 0 ] && return 0
@@ -884,6 +926,91 @@ wedge_alarm_notify() {  # <summary> <marker>
   return 0
 }
 
+# --- structured wedge summary ------------------------------------------------
+# The alarm's one-line SUMMARY is the only thing the alert channels ever see, and
+# it used to carry no content at all - just an age and a marker path - so a wedge
+# holding nothing but routine parked-lane rechecks was indistinguishable from one
+# holding a blocked lane awaiting the captain. Severity is assessed HERE, where
+# the buffered content is known, and is carried verbatim; no downstream channel
+# invents it.
+#
+# Format (first line of the marker, and the summary handed to every channel):
+#   FMWEDGE/1 severity=<S> count=<N> kinds=<a,b> age=<n>s: <prose>; see <marker>
+#
+# The structured tokens lead deliberately. The deployed consumer keys a standing
+# event on the message with DIGIT RUNS COLLAPSED, so `count` and `age` churn
+# cannot mint a fresh alert for the same standing wedge, while `severity` and
+# `kinds` are alphabetic and a change in either does surface a new one - which is
+# exactly the resurfacing rule this wants. Keeping the tokens first also keeps
+# them inside the consumer's identity truncation regardless of marker path length.
+
+# One kind slug per buffered escalation item. The item text is produced by
+# escalate_add's callers and by the wake classifiers, so the two shapes that
+# carry no status verb are matched on their own leading text and everything else
+# keys off the strongest status verb it carries (a batched signal item can name
+# several tasks, and the strongest verb is the one that decides urgency).
+wedge_escalation_kind() {  # <buffered-item> -> kind slug
+  local item=$1
+  case "$item" in
+    'paused '*) printf 'pause-recheck'; return ;;
+    'stale persisted '*) printf 'stale-idle'; return ;;
+  esac
+  case "$item" in
+    *needs-decision:*) printf 'decision'; return ;;
+    *blocked:*) printf 'blocked'; return ;;
+    *failed:*) printf 'failed'; return ;;
+    *done:*) printf 'ready'; return ;;
+  esac
+  case "$item" in
+    check:*) printf 'check'; return ;;
+  esac
+  # An item whose kind cannot be established is NEVER quietly filed as routine:
+  # unclassified maps to MEDIUM below, so the alert cannot claim a calm it never
+  # assessed.
+  printf 'unclassified'
+}
+
+wedge_kind_severity() {  # <kind> -> LOW|MEDIUM|HIGH
+  case "$1" in
+    pause-recheck|stale-idle) printf 'LOW' ;;
+    decision|blocked|failed) printf 'HIGH' ;;
+    *) printf 'MEDIUM' ;;
+  esac
+}
+
+# Build the structured summary from the buffer that is about to go undelivered.
+# An unreadable or empty buffer reports severity=UNKNOWN rather than defaulting
+# to either direction: the alarm genuinely fired, but this instrument did not
+# observe what it holds, and saying LOW there would be fabrication.
+wedge_summary_line() {  # <state> <age-seconds> <marker>
+  local state=$1 age=$2 marker=$3 buf item kind sev
+  local count=0 max='' kinds='' kind_list
+  buf="$state/.subsuper-escalations"
+  if [ -r "$buf" ]; then
+    while IFS= read -r item || [ -n "$item" ]; do
+      [ -n "$item" ] || continue
+      count=$((count + 1))
+      kind=$(wedge_escalation_kind "$item")
+      kinds="${kinds}${kind}"$'\n'
+      sev=$(wedge_kind_severity "$kind")
+      case "${max:-LOW}:$sev" in
+        LOW:MEDIUM|LOW:HIGH|MEDIUM:HIGH) max=$sev ;;
+        *) max=${max:-$sev} ;;
+      esac
+    done < "$buf"
+  fi
+  if [ "$count" -eq 0 ]; then
+    printf 'FMWEDGE/1 severity=UNKNOWN count=0 kinds=none age=%ss: away-mode escalations are held undelivered but the buffered list could not be read; see %s' \
+      "$age" "$marker"
+    return 0
+  fi
+  # Sorted and deduped so the same standing wedge renders one stable identity.
+  kind_list=$(printf '%s' "$kinds" | sort -u | tr '\n' ',')
+  kind_list=${kind_list%,}
+  printf 'FMWEDGE/1 severity=%s count=%s kinds=%s age=%ss: %s away-mode escalation(s) held undelivered, max severity %s; see %s' \
+    "$max" "$count" "$kind_list" "$age" "$count" "$max" "$marker"
+}
+
 # Raise a loud, rate-limited alarm when escalations cannot be delivered after
 # max-defer (the supervisor pane is genuinely busy/wedged, or the submit's Enter
 # is swallowed). The daemon must NEVER silently wedge: this logs
@@ -893,7 +1020,7 @@ wedge_alarm_notify() {  # <summary> <marker>
 # is lost - the buffer and the
 # wake-queue both survive - but the stall stops being invisible.
 inject_wedge_alarm() {  # <state> <age-seconds>
-  local state=$1 age=$2 marker target backend max_defer now notify=1
+  local state=$1 age=$2 marker target backend max_defer now notify=1 summary
   marker="$state/.subsuper-inject-wedged"
   max_defer="${FM_MAX_DEFER_SECS:-$MAX_DEFER_SECS_DEFAULT}"
   # Re-alarm at most once per max-defer window so a long wedge does not spam.
@@ -907,7 +1034,12 @@ inject_wedge_alarm() {  # <state> <age-seconds>
     WEDGE_ALARM_LAST_EPOCH=$now
     log "ERROR: away-mode escalation undelivered ${age}s; inject could not confirm a submit (supervisor pane busy or wedged). Buffer + wake-queue preserved; alarm marker written."
   fi
+  # Assessed once, from the buffer, BEFORE the marker is written: the marker's
+  # first line and the summary every alert channel receives are the same bytes,
+  # so nothing downstream has to re-derive urgency from prose.
+  summary=$(wedge_summary_line "$state" "$age" "$marker")
   {
+    printf '%s\n' "$summary"
     printf 'fm away-mode inject WEDGED: %ss undelivered as of %s\n' "$age" "$(date '+%Y-%m-%dT%H:%M:%S%z')"
     printf 'The supervisor pane could not accept an escalation. Buffered items:\n'
     cat "$state/.subsuper-escalations" 2>/dev/null
@@ -927,7 +1059,7 @@ inject_wedge_alarm() {  # <state> <age-seconds>
   # incident fell through. Configurable and best-effort; the marker above stays
   # the durable record whether or not any channel fires.
   if [ "$notify" -eq 1 ]; then
-    wedge_alarm_notify "away-mode escalations WEDGED ${age}s undelivered - see $marker" "$marker"
+    wedge_alarm_notify "$summary" "$marker"
   fi
 }
 
@@ -1163,6 +1295,12 @@ inject_msg() {  # <message> [state]
   sleep_s=${FM_INJECT_CONFIRM_SLEEP:-$INJECT_CONFIRM_SLEEP_DEFAULT}
   verdict=$(fm_backend_send_text_submit "$backend" "$target" "$msg" "$retries" "$sleep_s" "$sleep_s")
   if [ "$verdict" = empty ]; then
+    # Record the DELIVERY, not just the refusals. Every path that declines to
+    # inject already logs why, but success returned silently, so a delivered
+    # escalation and one that was never attempted left the same record - and the
+    # honest reading of that silence was `unknown`, not "never delivered". This
+    # line is what makes the two distinguishable in hindsight.
+    log "inject delivered: supervisor pane confirmed the submit (${#msg} chars)"
     return 0  # Backend confirmed the submit.
   fi
   log "inject failed: submit unconfirmed after $retries retries (verdict=$verdict, text may be in composer)"
