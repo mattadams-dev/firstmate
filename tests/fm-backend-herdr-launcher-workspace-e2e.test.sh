@@ -42,6 +42,12 @@ command -v treehouse >/dev/null 2>&1 || { echo "skip: treehouse not found (requi
 # shellcheck source=tests/herdr-test-safety.sh
 . "$ROOT/tests/herdr-test-safety.sh"
 
+# This suite is registered real-herdr-gated (expected_gate_skip=herdr) but was
+# missing the shared gate its ten siblings all call, so on a host with no
+# running default Herdr session it went straight to `provision` and reported a
+# hard FAILURE where every sibling reports a clean skip.
+herdr_lab_gate_or_skip 'herdr launcher-workspace e2e' || exit 0
+
 # Every spawn below states its own launcher identity, so a pane inherited from
 # the terminal this suite was started in must not leak into any of them.
 herdr_forget_inherited_pane
