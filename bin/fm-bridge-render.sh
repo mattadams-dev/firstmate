@@ -284,8 +284,7 @@ AGING_SECONDS = int(os.environ.get("FM_BRIDGE_AGING_SECONDS", str(24 * 3600)))
 # board can show the overflow pointer rather than truncating silently.
 CAP_EVENTS = int(os.environ.get("FM_BRIDGE_CAP_EVENTS", "12"))
 CAP_RESOLVED_DECISIONS = int(os.environ.get("FM_BRIDGE_CAP_RESOLVED_DECISIONS", "3"))
-CAP_FLEET_RESOLVED = int(os.environ.get("FM_BRIDGE_CAP_FLEET_RESOLVED", "6"))
-CAP_FLEET_DISCARDED = int(os.environ.get("FM_BRIDGE_CAP_FLEET_DISCARDED", "6"))
+CAP_FLEET_CLOSED = int(os.environ.get("FM_BRIDGE_CAP_FLEET_CLOSED", "6"))
 
 
 def _text(value):
@@ -843,7 +842,7 @@ def fold(ledger_path, folded_at):
         "caps": {
             "events": CAP_EVENTS,
             "closed_decisions": CAP_RESOLVED_DECISIONS,
-            "fleet_closed": CAP_FLEET_RESOLVED,
+            "fleet_closed": CAP_FLEET_CLOSED,
         },
         "checks": {
             "folded state": "bin/fm-bridge-render.sh --state",
