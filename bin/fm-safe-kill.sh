@@ -30,14 +30,18 @@
 #      role lock already names, and why identity is compared as whole-cmdline
 #      bytes rather than tested for containment.
 #
-# Authority comes from the lock, never from the process:
+# Authority comes from the lock, never from the process. --role names the
+# supervision role whose lock must ALREADY name exactly this pid, publish this
+# home, and match its published identity. The lock is what authorizes the kill;
+# the process only has to still be the one the lock recorded. There is no
+# lockless mode: "I am fairly sure this process is mine" is precisely the
+# judgment the specimens above prove unsafe, so a target no role lock names
+# escalates to a human instead.
 #
-#   --role <name>  the named role's lock must ALREADY name exactly this pid,
-#                  publish this home, and match its published identity. The lock
-#                  is what authorizes the kill; the process only has to still be
-#                  the one the lock recorded.
-#   no --role      the target must be a descendant of this process - your own
-#                  child, which you are entitled to end. Nothing else qualifies.
+# A script ending a child it forked itself does not come here - it uses the
+# shell builtin on a pid it owns by construction, which is a different and
+# genuinely verifiable relation. This helper exists for the case where the
+# target's identity has to be established from a record.
 #
 # Refused in every mode, whatever a role lock says:
 #   - this process, or any ancestor of it;
@@ -56,8 +60,8 @@
 # record to state/.safe-kill.log. A caller must escalate rather than proceed.
 #
 # Usage:
-#   bin/fm-safe-kill.sh --pid <pid> --reason <text>
-#                       [--role watcher|supervise-daemon]
+#   bin/fm-safe-kill.sh --pid <pid> --role watcher|supervise-daemon
+#                       --reason <text>
 #                       [--signal TERM|INT|HUP|KILL] [--wait <secs>]
 #                       [--state <dir>]
 set -u
@@ -98,6 +102,7 @@ done
 [ -n "$STATE_ARG" ] && STATE=$STATE_ARG
 [ -n "$TARGET" ] || { echo "error: --pid is required" >&2; exit 2; }
 [ -n "$REASON" ] || { echo "error: --reason is required" >&2; exit 2; }
+[ -n "$ROLE" ] || { echo "error: --role is required; termination is authorized only by a supervision role lock" >&2; exit 2; }
 case "$TARGET" in
   ''|*[!0-9]*) echo "error: --pid must be a plain positive pid, never a pattern, name, or process group" >&2; exit 2 ;;
 esac
@@ -109,7 +114,7 @@ case "$SIGNAL" in
   *) echo "error: --signal must be TERM, INT, HUP, or KILL" >&2; exit 2 ;;
 esac
 case "$ROLE" in
-  ''|watcher|supervise-daemon) ;;
+  watcher|supervise-daemon) ;;
   *) echo "error: --role must be watcher or supervise-daemon" >&2; exit 2 ;;
 esac
 
@@ -193,42 +198,24 @@ fi
 
 # --- authority --------------------------------------------------------------
 
-if [ -n "$ROLE" ]; then
-  LOCK=$(role_lock "$ROLE")
-  [ -e "$LOCK" ] || [ -L "$LOCK" ] \
-    || refuse 3 "no $ROLE lock exists in this home, so nothing authorizes ending pid $TARGET"
-  LOCK_PID=$(cat "$LOCK/pid" 2>/dev/null || true)
-  case "$LOCK_PID" in
-    ''|*[!0-9]*) refuse 4 "the $ROLE lock does not name a readable holder" ;;
-  esac
-  [ "$LOCK_PID" = "$TARGET" ] \
-    || refuse 3 "the $ROLE lock names pid $LOCK_PID, not pid $TARGET; the target was chosen from something other than the lock"
-  LOCK_HOME=$(cat "$LOCK/fm-home" 2>/dev/null || true)
-  [ "$LOCK_HOME" = "$FM_HOME" ] \
-    || refuse 3 "the $ROLE lock belongs to home ${LOCK_HOME:-unknown}, not $FM_HOME; another home's supervisor is never this home's to end"
-  LOCK_IDENTITY=$(cat "$LOCK/pid-identity" 2>/dev/null || true)
-  [ -n "$LOCK_IDENTITY" ] \
-    || refuse 4 "the $ROLE lock publishes no holder identity, so pid reuse cannot be ruled out"
-  [ "$LOCK_IDENTITY" = "$TARGET_IDENTITY" ] \
-    || refuse 3 "pid $TARGET is no longer the process the $ROLE lock recorded; the pid was reused"
-  AUTHORITY="$ROLE lock in $FM_HOME names pid $TARGET with a matching identity"
-else
-  # Descendant mode: your own child. Walked from the target upward, which
-  # terminates at init, rather than enumerating descendants by pattern.
-  descendant=0
-  probe=$TARGET
-  for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24; do
-    probe=$(ps -o ppid= -p "$probe" 2>/dev/null | tr -d ' ')
-    case "$probe" in
-      ''|*[!0-9]*) break ;;
-    esac
-    if [ "$probe" = "$SELF" ]; then descendant=1; break; fi
-    [ "$probe" -gt 1 ] || break
-  done
-  [ "$descendant" -eq 1 ] \
-    || refuse 3 "pid $TARGET is not a descendant of this process and no role lock names it; there is no authority to end it"
-  AUTHORITY="pid $TARGET is a descendant of this process"
-fi
+LOCK=$(role_lock "$ROLE")
+[ -e "$LOCK" ] || [ -L "$LOCK" ] \
+  || refuse 3 "no $ROLE lock exists in this home, so nothing authorizes ending pid $TARGET"
+LOCK_PID=$(cat "$LOCK/pid" 2>/dev/null || true)
+case "$LOCK_PID" in
+  ''|*[!0-9]*) refuse 4 "the $ROLE lock does not name a readable holder" ;;
+esac
+[ "$LOCK_PID" = "$TARGET" ] \
+  || refuse 3 "the $ROLE lock names pid $LOCK_PID, not pid $TARGET; the target was chosen from something other than the lock"
+LOCK_HOME=$(cat "$LOCK/fm-home" 2>/dev/null || true)
+[ "$LOCK_HOME" = "$FM_HOME" ] \
+  || refuse 3 "the $ROLE lock belongs to home ${LOCK_HOME:-unknown}, not $FM_HOME; another home's supervisor is never this home's to end"
+LOCK_IDENTITY=$(cat "$LOCK/pid-identity" 2>/dev/null || true)
+[ -n "$LOCK_IDENTITY" ] \
+  || refuse 4 "the $ROLE lock publishes no holder identity, so pid reuse cannot be ruled out"
+[ "$LOCK_IDENTITY" = "$TARGET_IDENTITY" ] \
+  || refuse 3 "pid $TARGET is no longer the process the $ROLE lock recorded; the pid was reused"
+AUTHORITY="$ROLE lock in $FM_HOME names pid $TARGET with a matching identity"
 
 # --- signal, then verify rather than assume ----------------------------------
 
