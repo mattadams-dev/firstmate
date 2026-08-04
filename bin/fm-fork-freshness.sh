@@ -150,10 +150,12 @@ origin_slug() {
 # --- forge reads ------------------------------------------------------------
 #
 # Every read here has exactly two determinate outcomes and one indeterminate
-# one. The indeterminate one returns non-zero with a reason on stdout and is
-# never collapsed into a value.
-
-GH_ERR=""
+# one. The indeterminate one returns non-zero and prints its reason on the same
+# stdout the value would have used, so the caller that captures the value also
+# captures the reason. A reason parked in a shell variable would be lost: every
+# one of these is called through a command substitution, and a subshell's
+# assignment never reaches the caller - which is how an unknown reading loses
+# the one thing that makes it actionable.
 
 gh_available() {
   command -v gh >/dev/null 2>&1
@@ -164,13 +166,13 @@ repo_facts() {
   local slug=$1 out
   out=$(gh api "repos/$slug" \
     --jq '[(.fork|tostring), (.parent.full_name // ""), (.default_branch // ""), (.archived|tostring)] | @tsv' 2>&1) || {
-    GH_ERR=$(clean_reason "$out")
+    clean_reason "$out"
     return 1
   }
   case "$out" in
     true*|false*) printf '%s\n' "$out" ;;
     *)
-      GH_ERR=$(clean_reason "unreadable repository payload: $out")
+      clean_reason "unreadable repository payload: $out"
       return 1
       ;;
   esac
@@ -182,20 +184,20 @@ compare_status() {
   local up=$1 up_branch=$2 fork_owner=$3 fork_branch=$4 out status ahead behind
   out=$(gh api "repos/$up/compare/${up%%/*}:$up_branch...$fork_owner:$fork_branch" \
     --jq '[.status, (.ahead_by|tostring), (.behind_by|tostring)] | @tsv' 2>&1) || {
-    GH_ERR=$(clean_reason "$out")
+    clean_reason "$out"
     return 1
   }
   IFS=$'\t' read -r status ahead behind <<< "$out"
   case "$status" in
     identical|ahead|behind|diverged) ;;
     *)
-      GH_ERR=$(clean_reason "unreadable compare payload: $out")
+      clean_reason "unreadable compare payload: $out"
       return 1
       ;;
   esac
   case "$ahead$behind" in
     ''|*[!0-9]*)
-      GH_ERR=$(clean_reason "non-numeric compare counts: $out")
+      clean_reason "non-numeric compare counts: $out"
       return 1
       ;;
   esac
@@ -210,7 +212,7 @@ enumerate_owned() {
   out=$(gh repo list "$owner" --limit 200 \
     --json nameWithOwner,isFork,isArchived,parent,defaultBranchRef \
     --jq '.[] | [.nameWithOwner, (.isFork|tostring), (.isArchived|tostring), (.parent | if . == null then "" else .owner.login + "/" + .name end), (.defaultBranchRef.name // "")] | @tsv' 2>&1) || {
-    GH_ERR=$(clean_reason "$out")
+    clean_reason "$out"
     return 1
   }
   printf '%s\n' "$out"
@@ -404,7 +406,7 @@ read_fork() {
 
   if [ -z "$up" ] || [ -z "$fork_branch" ]; then
     if ! facts=$(repo_facts "$slug"); then
-      emit_unknown "$slug" "repository could not be read: $GH_ERR"
+      emit_unknown "$slug" "repository could not be read: $facts"
       return 0
     fi
     [ -n "$up" ] || up=$(printf '%s' "$facts" | cut -f2)
@@ -420,7 +422,7 @@ read_fork() {
   fi
 
   if ! facts=$(repo_facts "$up"); then
-    emit_unknown "$slug" "upstream $up could not be read: $GH_ERR"
+    emit_unknown "$slug" "upstream $up could not be read: $facts"
     return 0
   fi
   up_branch=$(printf '%s' "$facts" | cut -f3)
@@ -430,7 +432,7 @@ read_fork() {
   fi
 
   if ! cmp=$(compare_status "$up" "$up_branch" "${slug%%/*}" "$fork_branch"); then
-    emit_unknown "$slug" "compare against $up failed: $GH_ERR"
+    emit_unknown "$slug" "compare against $up failed: $cmp"
     return 0
   fi
   IFS=$'\t' read -r status ahead behind <<< "$cmp"
@@ -522,7 +524,7 @@ cmd_sweep() {
 
   if ! rows=$(enumerate_owned "$owner"); then
     printf 'FORK_FRESHNESS_COVERAGE: status=unknown reason=%s\n' \
-      "$(clean_reason "repositories of $owner could not be listed: $GH_ERR")"
+      "$(clean_reason "repositories of $owner could not be listed: $rows")"
     return 4
   fi
 
@@ -585,7 +587,7 @@ cmd_sweep() {
       continue
     fi
     if ! facts=$(repo_facts "$slug"); then
-      emit_unknown "$slug" "repository could not be read: $GH_ERR"
+      emit_unknown "$slug" "repository could not be read: $facts"
       continue
     fi
     [ "$(printf '%s' "$facts" | cut -f1)" = true ] || continue
@@ -611,7 +613,7 @@ cmd_check() {
     return 4
   fi
   if ! facts=$(repo_facts "$slug"); then
-    emit_unknown "$slug" "repository could not be read: $GH_ERR"
+    emit_unknown "$slug" "repository could not be read: $facts"
     return 4
   fi
   # A determinate "not a fork" is silence: this runs on every PR, and a repo
