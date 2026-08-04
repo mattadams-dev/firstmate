@@ -172,6 +172,22 @@ test_refuses_another_home() {
   pass "a supervisor belonging to another home is refused"
 }
 
+# A lock predating the fm-home field records no home. That is not evidence of a
+# foreign home, and refusing it would leave every pre-upgrade home unable to end
+# its own supervisor - the can-never-recover direction of the same guard.
+test_a_lock_without_a_recorded_home_still_authorizes() {
+  local state victim out rc=0
+  state=$(new_state legacy-lock-no-home)
+  start_sleeper; victim=$SLEEPER_PID
+  publish_role_lock "$state" .watch.lock watcher "$victim"
+  rm -f "$(readlink "$state/.watch.lock")/fm-home"
+  out=$(run_safe_kill "$state" --pid "$victim" --role watcher --reason "stop a pre-upgrade watcher") || rc=$?
+  [ "$rc" -eq 0 ] || fail "a lock with no recorded home refused an otherwise verified stop (rc=$rc): $out"
+  is_alive "$victim" && fail "the helper reported an exit while the process was still running"
+  wait "$victim" 2>/dev/null || true
+  pass "a lock that records no home still authorizes its own home's stop"
+}
+
 test_refuses_pattern_selectors_at_the_interface() {
   local state rc
   state=$(new_state pattern-selector)
@@ -248,6 +264,7 @@ test_requires_a_role
 test_refuses_when_no_role_lock_exists
 test_refuses_a_reused_pid
 test_refuses_another_home
+test_a_lock_without_a_recorded_home_still_authorizes
 test_refuses_pattern_selectors_at_the_interface
 test_unknown_is_not_reported_as_success
 test_authorized_supervisor_stop_succeeds

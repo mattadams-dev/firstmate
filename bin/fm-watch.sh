@@ -323,10 +323,15 @@ health_evidence_reset() {  # <window> <rendered-hash> <since-file> <escalation-c
   return 0
 }
 
-wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-file> <rendered-hash>
+wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-file> [rendered-hash]
   local win=$1 since_file=$2 label=$3 escalation_file=$4 rendered=${5:-} since age n reason
-  # Health first. A lane that has demonstrably moved since the last look starts
-  # the timer over instead of advancing a count it could never work back down.
+  # Health first, but only where liveness is the question being asked. The
+  # rendered hash is passed by the STALE paths, whose alarm means "possibly
+  # wedged"; evidence that anything moved is the right counterpart there.
+  # The busy-no-completed-turn path deliberately passes nothing: its alarm is
+  # about a turn never finishing, and a pane that is producing output while
+  # completing no turn is the very shape it exists to catch. Its counterpart is
+  # a completed turn, which already clears this timer through busy_turn_over_age.
   if health_evidence_reset "$win" "$rendered" "$since_file" "$escalation_file"; then
     date +%s > "$since_file"
     return 0
@@ -1191,7 +1196,7 @@ EOF
         # unless a genuinely busy pane has gone too long with no completed turn -
         # then route it through the same wedge timer instead of erasing it.
         if [ "$busy_now" -eq 0 ] && busy_turn_over_age "$task"; then
-          wedge_timer_check "$w" "$ssf" "busy (no completed turn)" "$ewf" "$h"
+          wedge_timer_check "$w" "$ssf" "busy (no completed turn)" "$ewf"
         else
           rm -f "$ssf" "$ewf"
         fi
@@ -1203,7 +1208,7 @@ EOF
       printf '%s' "$h" > "$hf"
       echo 0 > "$cf"
       if [ "$busy_now" -eq 0 ] && busy_turn_over_age "$task"; then
-        wedge_timer_check "$w" "$ssf" "busy (no completed turn)" "$ewf" "$h"
+        wedge_timer_check "$w" "$ssf" "busy (no completed turn)" "$ewf"
       else
         rm -f "$ssf" "$ewf"
       fi
