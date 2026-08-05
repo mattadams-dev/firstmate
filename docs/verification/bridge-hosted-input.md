@@ -205,6 +205,13 @@ Each mutation was applied to `bin/fm-bridge-render.sh` on its own, the suite run
 | the tick rewrites the board on an unchanged ledger | `tick: an unchanged ledger rewrote the board file` |
 | the writer stops comparing before it replaces | `write: a byte-identical render replaced the board file anyway` |
 
+The live guard was mutation-checked the same way, against the real vendor and a real browser rather than against the pinned list:
+
+| mutation | live guard verdict |
+|---|---|
+| none - the board as it ships | `all live Lavish annotation guards passed against lavish-axi 0.1.43` |
+| answer options rendered as `<button>` | `the board renders its answer option as a native control: uid=... button "O1: A: retire it"` |
+
 The ref mutant is the one worth keeping in mind: it passed the first version of the anchor guard, because the refs also appear in the asks index at the top of the page and a document-wide search found them there.
 An annotation is rooted where it was placed and never sees the index, so the guard now searches the ask's own card or row.
 A guard that reads the whole page answers a question nobody asked.
