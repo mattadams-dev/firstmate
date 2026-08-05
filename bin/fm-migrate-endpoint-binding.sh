@@ -37,6 +37,16 @@
 # they cannot be their own evidence. The recorded endpoint fields are read only
 # to state the expectation that the live read must then confirm.
 #
+# UNKNOWN IS NOT ABSENT
+#
+# "The endpoint is gone" and "the backend could not be queried" are two
+# different worlds, and a reading that cannot tell them apart must never report
+# the stronger one. Every live read here is status-checked before its output is
+# interpreted: a failed `herdr` call or an unparseable response yields an
+# explicit UNKNOWN disposition naming that condition, never an absence claim.
+# The receipt carries the same distinction, because the receipt is the durable
+# surface where a sharpened guess would outlive the run that made it.
+#
 # WHAT THIS REPAIRS, AND WHAT IT REFUSES TO REPAIR
 #
 # The validator refuses an opaque-backend record whose `endpoint_task_id=` is
@@ -47,6 +57,31 @@
 # already wrong, and repairing that is a different and riskier operation than
 # the one this script is authorised to perform. Those three shapes are emitted
 # as disposition items to be resolved by hand, never passed over in silence.
+#
+# Four record SHAPES are refused for the same reason - the repair this script
+# performs cannot be performed safely on them:
+#
+#   - a symlinked record, and a symlink whose target is gone. The validator
+#     requires a regular file that is not a symlink, so writing through the link
+#     would replace it with a regular file and turn a record teardown REFUSES
+#     into one teardown ACCEPTS, on content imported from outside state/.
+#   - a record that cannot be read as a regular file. Nothing about it was
+#     observed, so nothing about it is claimed.
+#   - a record whose last line carries no terminating newline. It is already
+#     malformed, and appending would concatenate the binding onto that partial
+#     line, corrupting the preceding key AND leaving the record a candidate for
+#     every later run.
+#   - a record with no `window=` line. It names no endpoint for a binding to
+#     describe, and teardown refuses it too.
+#
+# EVERY RECORD IS ACCOUNTED FOR
+#
+# Every file the state/*.meta glob matches produces exactly one outcome line, on
+# stdout and in the receipt: MIGRATED, WOULD-MIGRATE, NOT-REQUIRED, or
+# DISPOSITION. No record is passed over in silence, so a reader of a receipt can
+# never confuse a record that was skipped with one that never existed. A receipt
+# that omits entries is not a record of the run, it is a record-shaped object
+# that lies by omission.
 #
 # PROVENANCE
 #
@@ -69,12 +104,17 @@
 # the trigger right.
 #
 # Repetition is harmless because of the per-record filter, not because of any
-# home-level state. The only shape this script writes is a record with ZERO
-# `endpoint_task_id=` lines. After a record is migrated it carries exactly one
-# correct binding, so on any later run it is a non-candidate and is skipped
-# untouched: no second binding, no second provenance line, no rewrite. The
-# migrated bytes of an already-repaired record are identical after the second run
-# and after the tenth.
+# home-level state. The only shape this script writes is a well-formed record
+# with ZERO `endpoint_task_id=` lines. After such a record is migrated it carries
+# exactly one correct binding, so on any later run it is a non-candidate and is
+# skipped untouched: no second binding, no second provenance line, no rewrite.
+# The migrated bytes of an already-repaired record are identical after the second
+# run and after the tenth.
+#
+# That property depends on the appended binding landing on its own line, which is
+# why a record whose last line is unterminated is refused rather than appended
+# to: an append there would corrupt the preceding key and leave `endpoint_task_id`
+# still matching zero lines, so every later run would append again.
 #
 # That also means an interrupted run simply resumes. Records already written are
 # skipped, records not yet reached are repaired. There is no stranded state and
@@ -99,6 +139,12 @@
 # see. The receipt is a record, never an authority: nothing in this script reads
 # it back to decide whether to run or what to write.
 #
+# A run that cannot write its receipt does not run, and a run that loses the
+# receipt part way through does not continue: every append is checked, and a
+# failed one stops the run loudly and non-zero. An unrecorded or half-recorded
+# run that reported success would be exactly the divergent second account this
+# design exists to make impossible.
+#
 # Usage:
 #   bin/fm-migrate-endpoint-binding.sh [--apply]
 #
@@ -112,8 +158,8 @@
 #            mistyped invocation cannot silently repair the wrong home)
 #
 # Exit: 0 when every candidate was either migrated or reported; 1 on a usage
-# or environment error. A disposition item is a reported outcome, not a failure
-# of this script.
+# or environment error, or when the run receipt could not be written. A
+# disposition item is a reported outcome, not a failure of this script.
 
 set -uo pipefail
 
@@ -123,7 +169,7 @@ APPLY=0
 case "${1:-}" in
   '') ;;
   --apply) APPLY=1 ;;
-  -h|--help) sed -n '2,116p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
+  -h|--help) sed -n '2,162p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
   *) echo "usage: $(basename "$0") [--apply]" >&2; exit 1 ;;
 esac
 
@@ -164,6 +210,19 @@ receipt_append() {
   printf '%s\n' "$1" >> "$RECEIPTS"
 }
 
+# receipt_require <line>: append, or stop the run. Every append after the first
+# is as load-bearing as the first - a receipt that stops being written mid-run
+# leaves a partial account of a run that reported success, which is the second
+# and divergent account this design exists to prevent. Refusing here also keeps
+# the failure loud at the moment it happens rather than discoverable later by
+# noticing an absence.
+receipt_require() {
+  receipt_append "$1" || {
+    echo "REFUSED: cannot append to the run receipt at $RECEIPTS; stopping rather than continuing unrecorded." >&2
+    exit 1
+  }
+}
+
 receipt_open() {
   mkdir -p "$(dirname "$RECEIPTS")" || return 1
   receipt_append "$(printf 'run\tstart=%s\thome=%s\tmode=%s\tby=%s\ttool=%s' \
@@ -171,7 +230,7 @@ receipt_open() {
 }
 
 receipt_close() {
-  receipt_append "$(printf 'run\tend=%s\tstart=%s\tmode=%s\tobserved=%s\tdisposition=%s\tnot_required=%s' \
+  receipt_require "$(printf 'run\tend=%s\tstart=%s\tmode=%s\tobserved=%s\tdisposition=%s\tnot_required=%s' \
     "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$RUN_AT" "$MODE" "$migrated" "$refused" "$not_required")"
 }
 
@@ -180,7 +239,7 @@ receipt_close() {
 # divergent account of what the run did.
 outcome() {
   printf '%s\n' "$1"
-  receipt_append "$1"
+  receipt_require "$1"
 }
 
 receipt_open || {
@@ -188,19 +247,37 @@ receipt_open || {
   exit 1
 }
 
-# meta_count <meta> <key>: number of lines for <key>.
-meta_count() { grep -c "^$2=" "$1" 2>/dev/null || true; }
+# meta_count <meta> <key>: number of lines for <key>, or FAILS when the record
+# could not be read at all. grep -c returns 1 with a count of 0 when the key is
+# simply absent and 2 when it cannot read the file; collapsing those two into an
+# empty string is what let an unreadable record be silently read as "no such
+# key" - two worlds, one reading, and the stronger one asserted.
+meta_count() {
+  local n rc
+  n=$(grep -c "^$2=" "$1" 2>/dev/null)
+  rc=$?
+  [ "$rc" -le 1 ] || return 1
+  printf '%s' "${n:-0}"
+}
 
 # meta_one <meta> <key>: the value when the key appears exactly once and is
 # non-empty; otherwise fails. Same exactness rule the validator applies.
 meta_one() {
   local n
-  n=$(meta_count "$1" "$2")
+  n=$(meta_count "$1" "$2") || return 1
   [ "$n" -eq 1 ] || return 1
   local v
   v=$(grep "^$2=" "$1" | cut -d= -f2-)
   [ -n "$v" ] || return 1
   printf '%s' "$v"
+}
+
+# meta_unterminated <meta>: true when the record's last line has no terminating
+# newline. Command substitution strips trailing newlines, so a terminated file
+# yields the empty string here and an unterminated one yields its last byte.
+meta_unterminated() {
+  [ -s "$1" ] || return 1
+  [ -n "$(tail -c 1 "$1" 2>/dev/null)" ]
 }
 
 # disposition <id> <reason>: emit an explicit item requiring a decision. A
@@ -214,7 +291,9 @@ disposition() {
 # "<observed-id>\t<provenance-detail>" and returns 0 only when a single live
 # tab in this home's live workspace carries the label for this task and every
 # recorded endpoint coordinate matches what herdr currently reports. Prints a
-# refusal reason and returns 1 otherwise.
+# refusal reason and returns 1 otherwise. Every refusal reason states only what
+# was observed: an unreachable or unreadable backend yields UNKNOWN, never the
+# claim that an endpoint is gone.
 observe_herdr_binding() {
   local id=$1 meta=$2
   local session workspace tab pane window
@@ -225,12 +304,34 @@ observe_herdr_binding() {
   window=$(meta_one "$meta" window) || { echo "recorded window is missing, empty, or ambiguous"; return 1; }
 
   fm_backend_source herdr >/dev/null 2>&1 || { echo "herdr adapter unavailable"; return 1; }
+  fm_backend_herdr_tool_check >/dev/null 2>&1 || {
+    echo "the herdr CLI or jq is not available, so no live read was possible; whether this endpoint is live is UNKNOWN, not absent"
+    return 1
+  }
 
-  # 1. The recorded workspace must currently be one of THIS home's workspaces.
-  #    workspace_find_all resolves by this home's own label, so a workspace
-  #    belonging to another home or to a stale label can never qualify.
-  local live_workspaces
-  live_workspaces=$(fm_backend_herdr_workspace_find_all "$session" 2>/dev/null) || live_workspaces=
+  # 1. The recorded workspace must currently be one of THIS home's workspaces,
+  #    resolved by this home's own label, so a workspace belonging to another
+  #    home or to a stale label can never qualify.
+  #
+  #    The raw call is made HERE rather than through
+  #    fm_backend_herdr_workspace_find_all because that function returns 0 with
+  #    empty output when the query itself fails (bin/backends/herdr.sh, `||
+  #    return 0`). Reading its emptiness as absence would report "the workspace
+  #    is gone" for a stopped server, an uninstalled herdr, or a jq failure -
+  #    two worlds, one reading. Checking the call's own exit status is what
+  #    keeps them apart. The jq variable is $want, never $label: `label` is a jq
+  #    reserved keyword, and a compile error there would empty every result.
+  local workspace_list home_label live_workspaces
+  workspace_list=$(fm_backend_herdr_cli "$session" workspace list 2>/dev/null) || {
+    echo "could not list live workspaces in session $session, so whether workspace $workspace is still live is UNKNOWN, not absent"
+    return 1
+  }
+  home_label=$(fm_backend_herdr_workspace_label)
+  live_workspaces=$(printf '%s' "$workspace_list" | jq -r --arg want "$home_label" \
+    '.result.workspaces[]? | select(.label == $want) | .workspace_id') || {
+    echo "could not read the live workspace list of session $session, so whether workspace $workspace is still live is UNKNOWN, not absent"
+    return 1
+  }
   printf '%s\n' "$live_workspaces" | grep -qx -- "$workspace" || {
     echo "workspace $workspace is not a live workspace of this home in session $session"
     return 1
@@ -245,7 +346,10 @@ observe_herdr_binding() {
     return 1
   }
   label_matches=$(printf '%s' "$tabs" | jq -r --arg t "$tab" \
-    '.result.tabs[]? | select(.tab_id == $t) | "\(.label)\t\(.tab_id)"' 2>/dev/null)
+    '.result.tabs[]? | select(.tab_id == $t) | "\(.label)\t\(.tab_id)"') || {
+    echo "could not read the live tab list of workspace $workspace in session $session, so whether tab $tab is still live is UNKNOWN, not absent"
+    return 1
+  }
   [ -n "$label_matches" ] || { echo "no live tab $tab in workspace $workspace of session $session"; return 1; }
   [ "$(printf '%s\n' "$label_matches" | wc -l)" -eq 1 ] || {
     echo "tab id $tab is ambiguous in workspace $workspace of session $session"
@@ -275,7 +379,10 @@ observe_herdr_binding() {
     return 1
   }
   pane_matches=$(printf '%s' "$panes" | jq -r --arg t "$observed_tab" \
-    '.result.panes[]? | select(.tab_id == $t) | .pane_id' 2>/dev/null)
+    '.result.panes[]? | select(.tab_id == $t) | .pane_id') || {
+    echo "could not read the live pane list of workspace $workspace in session $session, so whether tab $observed_tab still holds pane $pane is UNKNOWN, not absent"
+    return 1
+  }
   [ -n "$pane_matches" ] || { echo "live tab $observed_tab has no pane"; return 1; }
   [ "$(printf '%s\n' "$pane_matches" | wc -l)" -eq 1 ] || {
     echo "live tab $observed_tab has more than one pane"
@@ -304,9 +411,12 @@ observe_herdr_binding() {
 
 # write_binding <meta> <observed-id> <detail>: append the observed value and
 # its provenance atomically, preserving the file's mode. Never rewrites an
-# existing binding - this repairs absence only.
+# existing binding - this repairs absence only. Refuses a symlink outright: the
+# `mv` below replaces the link itself, which would launder a record teardown
+# refuses into a regular file teardown accepts.
 write_binding() {
   local meta=$1 observed_id=$2 detail=$3 tmp
+  [ ! -L "$meta" ] || return 1
   tmp=$(mktemp "$meta.migrate.XXXXXX") || return 1
   cat "$meta" > "$tmp" || { rm -f "$tmp"; return 1; }
   {
@@ -323,16 +433,58 @@ printf 'run_at=%s\napply=%s\nfm_home=%s\nherdr=%s\n\n' \
   "$RUN_AT" "$APPLY" "$FM_HOME" "${HERDR_VERSION:-absent}"
 
 for meta in "$STATE"/*.meta; do
-  [ -e "$meta" ] || continue
   id=$(basename "$meta" .meta)
 
-  [ "$(meta_count "$meta" window)" -ge 1 ] || continue
+  # A dangling symlink and a live symlink are refused separately, because they
+  # are different facts about the record and a reader deserves the one that is
+  # true. Neither is written: fm_backend_validate_task_endpoint requires a
+  # regular file that is NOT a symlink, so writing through the link would
+  # replace it with a regular file holding content imported from outside state/
+  # - turning a record teardown REFUSES into one teardown ACCEPTS.
+  if [ -L "$meta" ] && [ ! -e "$meta" ]; then
+    disposition "$id" "the state record is a symlink whose target does not exist, so nothing about its endpoint could be read; teardown refuses a symlinked record too, resolve by hand"
+    continue
+  fi
+  if [ -L "$meta" ]; then
+    disposition "$id" "the state record is a symlink, which the validator refuses as endpoint metadata; writing here would replace the link with a regular file and turn a record teardown refuses into one it accepts, so it is left exactly as found"
+    continue
+  fi
+  # Only an unmatched glob reaches this: a dangling symlink was caught above.
+  [ -e "$meta" ] || continue
+  if [ ! -f "$meta" ] || [ ! -r "$meta" ]; then
+    disposition "$id" "the state record could not be read as a regular file, so nothing about its binding was observed; resolve by hand"
+    continue
+  fi
+  # An unterminated last line is refused rather than repaired: appending would
+  # concatenate the binding onto that partial line, corrupting the preceding key
+  # while leaving endpoint_task_id= still matching zero lines - so the record
+  # would stay a candidate and every later run would append again. That is the
+  # one way the structural idempotence above can fail, so it is closed here.
+  if meta_unterminated "$meta"; then
+    disposition "$id" "the record's last line has no terminating newline, so it is already malformed and an appended binding would run onto that partial line; resolve by hand, this migration does not guess where a truncated line ended"
+    continue
+  fi
+
+  # A read that fails is not a record that lacks a key. meta_count fails rather
+  # than returning an empty count, so this can never silently mean "no window
+  # line" for a record nothing was actually read from.
+  if ! window_lines=$(meta_count "$meta" window); then
+    disposition "$id" "the record could not be read, so whether it records an endpoint is unknown; resolve by hand"
+    continue
+  fi
+  if [ "$window_lines" -lt 1 ]; then
+    disposition "$id" "no window= line, so this record names no endpoint for a binding to describe; teardown refuses it too as a missing, empty, or ambiguous window endpoint, resolve by hand"
+    continue
+  fi
 
   # Binding shape decides candidacy. Absence is the only shape this migration
   # can repair, because it appends an observed binding and never rewrites one.
   # The validator's three other refusal shapes are reported rather than passed
   # over in silence.
-  binding_lines=$(meta_count "$meta" endpoint_task_id)
+  if ! binding_lines=$(meta_count "$meta" endpoint_task_id); then
+    disposition "$id" "the record could not be read, so its endpoint task binding was not observed; resolve by hand"
+    continue
+  fi
   if [ "$binding_lines" -gt 1 ]; then
     disposition "$id" "$binding_lines endpoint_task_id= lines, which the validator refuses as an ambiguous endpoint task binding; resolve by hand, this migration writes a binding, it never rewrites one"
     continue
@@ -347,6 +499,10 @@ for meta in "$STATE"/*.meta; do
       continue
     fi
     # Correctly bound already: not a candidate, and nothing is wrong with it.
+    # Still accounted for, so the receipt covers every record rather than
+    # leaving this one indistinguishable from a record that never existed.
+    not_required=$((not_required + 1))
+    outcome "$(printf 'NOT-REQUIRED\t%s\talready carries endpoint_task_id=%s; not a candidate and nothing to repair' "$id" "$recorded_binding")"
     continue
   fi
 

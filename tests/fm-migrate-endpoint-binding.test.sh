@@ -37,6 +37,14 @@ set -u
 FIX="${FM_FAKE_HERDR_FIX:?}"
 [ "${1:-}" = --version ] && { echo "herdr 9.9.9-fake"; exit 0; }
 [ "${1:-}" = status ] && { echo '{"client":{"version":"0.7.5","protocol":16},"server":{"running":true}}'; exit 0; }
+# A hook for making the receipt unwritable MID-RUN, after the start line was
+# written and before the first per-record outcome. Replacing the file with a
+# directory is deterministic and cannot be bypassed by uid, unlike a mode
+# change, so the case tests the same thing when the suite runs as root.
+if [ -n "${FM_FAKE_HERDR_BREAK_RECEIPT:-}" ]; then
+  rm -rf "$FM_FAKE_HERDR_BREAK_RECEIPT"
+  mkdir -p "$FM_FAKE_HERDR_BREAK_RECEIPT"
+fi
 ws=
 prev=
 for a in "$@"; do
@@ -242,7 +250,10 @@ case_dry_run_writes_nothing() {
 }
 
 # A record that already carries the field is not a candidate and is left alone,
-# so this can never overwrite an originally-observed binding.
+# so this can never overwrite an originally-observed binding. It is still
+# ACCOUNTED for: every record the glob matches gets exactly one outcome line, so
+# a reader of the receipt cannot confuse a skipped record with one that never
+# existed. Accounted, but not a disposition - there is nothing to decide.
 case_existing_binding_untouched() {
   local h; h=$(new_home existing)
   workspaces "$h" firstmate wB
@@ -252,7 +263,10 @@ case_existing_binding_untouched() {
   local before; before=$(cat "$h/state/alpha.meta")
 
   local out; out=$(run_migrate "$h" --apply)
-  case "$out" in *alpha*) fail "an already-bound record was treated as a candidate: $out" ;; esac
+  case "$out" in *"MIGRATED"$'\t'"alpha"*) fail "an already-bound record was treated as a candidate: $out" ;; esac
+  case "$out" in *"DISPOSITION"$'\t'"alpha"*) fail "an already-bound record became a disposition item: $out" ;; esac
+  case "$out" in *"NOT-REQUIRED"$'\t'"alpha"*"already carries endpoint_task_id=alpha"*) ;;
+    *) fail "an already-bound record was not accounted for: $out" ;; esac
   [ "$(cat "$h/state/alpha.meta")" = "$before" ] || fail "an already-bound record was modified"
   assert_no_grep 'endpoint_task_id_provenance' "$h/state/alpha.meta" \
     "a spawn-written binding must not gain migration provenance"
@@ -333,6 +347,166 @@ case_valid_binding_is_not_a_disposition() {
     *) fail "the unbound sibling did not migrate: $out" ;; esac
   case "$out" in *"disposition=0"*) ;;
     *) fail "expected no disposition items in this home: $out" ;; esac
+}
+
+# --- every record is accounted for ------------------------------------------
+#
+# The receipt is THE record of a run, so it must account for every file the
+# state/*.meta glob matches. A record skipped without a line is indistinguishable
+# from a record that never existed, which is a record-shaped object that lies by
+# omission. Each shape below owns its own case, so a mutation that lets one of
+# them vanish breaks the case that owns it rather than a neighbour's.
+
+# No window= line: nothing names an endpoint, so there is no binding to describe.
+case_windowless_record_reported_not_skipped() {
+  local h; h=$(new_home windowless)
+  workspaces "$h" firstmate wB
+  {
+    echo "worktree=/wt/alpha"
+    echo "project=/proj/alpha"
+    echo "backend=herdr"
+  } > "$h/state/alpha.meta"
+  cp "$h/state/alpha.meta" "$h/alpha.before"
+
+  local out; out=$(run_migrate "$h" --apply)
+  case "$out" in *"DISPOSITION"$'\t'"alpha"*"no window= line"*) ;;
+    *) fail "a windowless record was skipped in silence: $out" ;; esac
+  cmp -s "$h/alpha.before" "$h/state/alpha.meta" || fail "a windowless record was modified"
+}
+
+# A record that could not be read is reported as exactly that. It is never
+# described as having or lacking a field, because that was not observed.
+case_unreadable_record_reported_not_skipped() {
+  local h; h=$(new_home unreadable)
+  workspaces "$h" firstmate wB
+  herdr_meta "$h" alpha 1 wB wB:t19 wB:p19
+  chmod 000 "$h/state/alpha.meta"
+  if [ -r "$h/state/alpha.meta" ]; then
+    # Running as a uid that ignores the mode. Use a shape no uid can read as a
+    # record instead, so this case exercises the same branch either way.
+    rm -f "$h/state/alpha.meta"
+    mkdir "$h/state/alpha.meta"
+  fi
+
+  local out; out=$(run_migrate "$h" --apply)
+  case "$out" in *"DISPOSITION"$'\t'"alpha"*"could not be read"*) ;;
+    *) fail "an unreadable record was skipped in silence: $out" ;; esac
+  case "$out" in *"no window= line"*) fail "an unreadable record was described as lacking a field: $out" ;; esac
+}
+
+# A dangling symlink exists as an entry but not as a record. The -e test alone
+# dropped these entirely, so the reader saw nothing at all.
+case_dangling_symlink_reported_not_skipped() {
+  local h; h=$(new_home dangling)
+  workspaces "$h" firstmate wB
+  ln -s "$h/state/nowhere.meta" "$h/state/alpha.meta"
+
+  local out; out=$(run_migrate "$h" --apply)
+  case "$out" in *"DISPOSITION"$'\t'"alpha"*"target does not exist"*) ;;
+    *) fail "a dangling symlink was skipped in silence: $out" ;; esac
+  [ -L "$h/state/alpha.meta" ] || fail "the dangling symlink was replaced"
+}
+
+# A symlinked record must never be written. write_binding's mv replaces the LINK
+# with a regular file, and fm_backend_validate_task_endpoint refuses a symlinked
+# record outright - so one --apply would convert a record teardown REFUSES into
+# one teardown ACCEPTS, on content imported from outside state/.
+case_symlinked_record_refused_and_stays_a_symlink() {
+  local h; h=$(new_home symlinked)
+  workspaces "$h" firstmate wB
+  tabs "$h" wB "wB:t19:label=fm-alpha"
+  panes "$h" wB "wB:p19@wB:t19"
+  mkdir -p "$h/outside"
+  herdr_meta "$h" alpha 1 wB wB:t19 wB:p19
+  mv "$h/state/alpha.meta" "$h/outside/alpha.meta"
+  ln -s "$h/outside/alpha.meta" "$h/state/alpha.meta"
+  cp "$h/outside/alpha.meta" "$h/alpha.before"
+
+  local out; out=$(run_migrate "$h" --apply)
+  case "$out" in *"DISPOSITION"$'\t'"alpha"*"is a symlink"*) ;;
+    *) fail "a symlinked record was not refused: $out" ;; esac
+  [ -L "$h/state/alpha.meta" ] || fail "the symlinked record was laundered into a regular file"
+  cmp -s "$h/alpha.before" "$h/outside/alpha.meta" \
+    || fail "the symlink target was modified"
+
+  # The record teardown refused before must still be refused after.
+  local rc
+  bash -c '
+    set -u
+    FM_HOME='"$h"'
+    . '"$ROOT"'/bin/fm-backend.sh >/dev/null 2>&1
+    fm_backend_validate_task_endpoint "'"$h"'/state/alpha.meta" alpha
+  ' >/dev/null 2>&1
+  rc=$?
+  [ $rc -ne 0 ] || fail "the validator now accepts a record it refused before the migration ran"
+}
+
+# A record whose last line is unterminated is already malformed. Appending would
+# run the binding onto that partial line, corrupting the preceding key AND
+# leaving endpoint_task_id= matching zero lines - so the record would stay a
+# candidate and every later run would append again. That is the one way the
+# structural idempotence claim can fail, so the record is refused instead.
+case_unterminated_record_refused() {
+  local h; h=$(new_home unterminated)
+  workspaces "$h" firstmate wB
+  tabs "$h" wB "wB:t19:label=fm-alpha"
+  panes "$h" wB "wB:p19@wB:t19"
+  herdr_meta "$h" alpha 1 wB wB:t19 wB:p19
+  printf 'traceparent=00-abc' >> "$h/state/alpha.meta"
+  cp "$h/state/alpha.meta" "$h/alpha.before"
+
+  local out; out=$(run_migrate "$h" --apply)
+  case "$out" in *"DISPOSITION"$'\t'"alpha"*"no terminating newline"*) ;;
+    *) fail "an unterminated record was not refused: $out" ;; esac
+  cmp -s "$h/alpha.before" "$h/state/alpha.meta" \
+    || fail "an unterminated record was modified"
+  assert_no_grep 'traceparendpoint_task_id' "$h/state/alpha.meta" \
+    "the binding was concatenated onto a partial line"
+}
+
+# The other direction of the accounting rule. Reporting the shapes above must
+# not degenerate into calling every record a disposition item: a healthy,
+# observable record still produces its normal outcome and nothing else.
+case_healthy_record_is_never_a_disposition() {
+  local h; h=$(new_home healthy)
+  workspaces "$h" firstmate wB
+  tabs "$h" wB "wB:t19:label=fm-alpha"
+  panes "$h" wB "wB:p19@wB:t19"
+  herdr_meta "$h" alpha 1 wB wB:t19 wB:p19
+
+  local out; out=$(run_migrate "$h" --apply)
+  case "$out" in *"MIGRATED"$'\t'"alpha"*) ;;
+    *) fail "a healthy record did not produce its normal outcome: $out" ;; esac
+  case "$out" in *DISPOSITION*) fail "a healthy record was reported as a disposition item: $out" ;; esac
+  case "$out" in *"disposition=0"*) ;;
+    *) fail "expected no disposition items for a healthy record: $out" ;; esac
+}
+
+# --- unknown is not absent --------------------------------------------------
+#
+# "the endpoint is gone" and "the backend could not be queried" are different
+# worlds. fm_backend_herdr_workspace_find_all returns 0 with EMPTY output when
+# the query fails, so an unreachable herdr used to be reported as a definite
+# absence - into stdout and into the durable receipt.
+case_unreachable_backend_is_unknown_not_absent() {
+  local h; h=$(new_home unreachable)
+  # No workspaces.json fixture: the fake herdr exits non-zero for `workspace
+  # list`, which is what a stopped server, an uninstalled herdr, or a jq
+  # failure look like from here.
+  tabs "$h" wB "wB:t19:label=fm-alpha"
+  panes "$h" wB "wB:p19@wB:t19"
+  herdr_meta "$h" alpha 1 wB wB:t19 wB:p19
+
+  local out; out=$(run_migrate "$h" --apply)
+  case "$out" in *"DISPOSITION"$'\t'"alpha"*UNKNOWN*) ;;
+    *) fail "an unreachable backend was not reported as unknown: $out" ;; esac
+  case "$out" in *"is not a live workspace"*)
+    fail "an unreachable backend was reported as a definite absence: $out" ;; esac
+  assert_no_grep 'is not a live workspace' "$h/data/endpoint-binding-migration-receipts.log" \
+    "the durable receipt records an absence claim for an unobservable world"
+  assert_grep 'UNKNOWN' "$h/data/endpoint-binding-migration-receipts.log" \
+    "the durable receipt does not carry the unknown/absent distinction"
+  assert_no_grep 'endpoint_task_id=' "$h/state/alpha.meta" "wrote a binding without a live read"
 }
 
 # --- the one-shot guard -----------------------------------------------------
@@ -473,6 +647,31 @@ case_receipt_accumulates_across_runs() {
   local starts
   starts=$(grep -c '^run	start=' "$r")
   [ "$starts" -eq 2 ] || fail "expected 2 recorded runs in the receipt, found $starts"
+}
+
+# A receipt that stops being writable MID-RUN must stop the run, loudly and
+# non-zero. Continuing would leave a partial account of a run that reported
+# success - the second and divergent account the receipt exists to prevent, and
+# the opposite of this script's own "a run that cannot write its receipt does
+# not run". The fake herdr replaces the receipt with a directory on its first
+# inventory call, which is after the start line and before the first outcome.
+case_receipt_failure_mid_run_is_not_silent() {
+  local h; h=$(new_home receiptbreak)
+  workspaces "$h" firstmate wB
+  tabs "$h" wB "wB:t19:label=fm-alpha"
+  panes "$h" wB "wB:p19@wB:t19"
+  herdr_meta "$h" alpha 1 wB wB:t19 wB:p19
+
+  local out rc
+  out=$(FM_HOME="$h" FM_FAKE_HERDR_FIX="$h/fix" \
+    FM_FAKE_HERDR_BREAK_RECEIPT="$h/data/endpoint-binding-migration-receipts.log" \
+    "$MIGRATE" --apply 2>&1)
+  rc=$?
+  [ "$rc" -ne 0 ] || fail "a run that lost its receipt mid-run still reported success: $out"
+  case "$out" in *REFUSED*receipt*) ;;
+    *) fail "a lost receipt was not reported loudly: $out" ;; esac
+  case "$out" in *"summary observed="*)
+    fail "the run continued past a failed receipt write: $out" ;; esac
 }
 
 # Observe mode on a partially migrated home still reports the record an
