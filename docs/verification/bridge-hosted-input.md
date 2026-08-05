@@ -148,3 +148,23 @@ The report belongs at https://github.com/kunchenguid/lavish-axi/issues, carries 
 Record the issue URL here once it is filed.
 
 Firstmate's own guard does not depend on that report: section 3 is why the tick skips the write, and that holds whatever upstream decides.
+
+## The guards, proven to fire
+
+Each mutation was applied to `bin/fm-bridge-render.sh` on its own, the suite run, and the renderer restored.
+"First failing guard" is what `tests/fm-bridge.test.sh` reported; the suite stops at the first failure, so a mutant reaching its own guard means nothing earlier caught it by accident.
+
+| mutation | first failing guard |
+|---|---|
+| a sendable-looking composer returns to the board | `input path: see the reported element` |
+| answer options go back to being controls | `input path: see the reported element` |
+| the per-item anchors are stripped from the cards | `mode drift: an ask present in folded state is missing from the board` |
+| the visible ref is dropped from the ask cards | `annotation anchors: see the reported ask` |
+| the answer options stop naming their own ask | `annotation anchors: see the reported ask` |
+| the signpost is removed with the composer | `signpost: see the reported gap` |
+| the tick rewrites the board on an unchanged ledger | `tick: an unchanged ledger rewrote the board file` |
+| the writer stops comparing before it replaces | `write: a byte-identical render replaced the board file anyway` |
+
+The ref mutant is the one worth keeping in mind: it passed the first version of the anchor guard, because the refs also appear in the asks index at the top of the page and a document-wide search found them there.
+An annotation is rooted where it was placed and never sees the index, so the guard now searches the ask's own card or row.
+A guard that reads the whole page answers a question nobody asked.
