@@ -125,6 +125,54 @@ test_real_text_is_pending() {
   pass "fm_composer_classify_content: real unsubmitted text reads pending (including a popup argument-hint fill)"
 }
 
+# --- Unicode composer padding (task fm-alarm-chain-reachability) ------------
+#
+# Claude Code 2.x pads its EMPTY composer row with U+00A0 after the prompt glyph
+# (verified live, docs/verification/supervision.md "Away-mode composer read on a
+# live claude-on-herdr pane"). The ASCII-only trims left that padding attached,
+# so every healthy idle pane read as real typed content and the away-mode
+# injector deferred. These pin the widened trim in BOTH directions: a composer
+# holding only blanks is empty, and a composer holding any real glyph is not.
+
+NBSP=$'\xc2\xa0'          # U+00A0 NO-BREAK SPACE - Claude's verified padding
+NNBSP=$'\xe2\x80\xaf'     # U+202F NARROW NO-BREAK SPACE
+IDEO=$'\xe3\x80\x80'      # U+3000 IDEOGRAPHIC SPACE
+ZWSP=$'\xe2\x80\x8b'      # U+200B ZERO WIDTH SPACE
+ZWJ=$'\xe2\x80\x8d'       # U+200D ZERO WIDTH JOINER - real text, never trimmed
+
+test_unicode_padded_agent_glyph_is_empty() {
+  local blank out
+  for blank in "$NBSP" "$NNBSP" "$IDEO" "$ZWSP"; do
+    out=$(classify 0 "❯${blank}")
+    [ "$out" = empty ] || fail "an agent glyph padded with a Unicode blank must read empty, got '$out'"
+    out=$(classify 1 "❯${blank}")
+    [ "$out" = empty ] || fail "a bordered agent glyph padded with a Unicode blank must read empty, got '$out'"
+  done
+  out=$(classify 0 "${NBSP}❯${NBSP}")
+  [ "$out" = empty ] || fail "a Unicode-blank-padded agent glyph must read empty on both sides, got '$out'"
+  pass "fm_composer_classify_content: a composer holding only a prompt glyph and Unicode blanks reads empty"
+}
+
+# The direction that must NEVER loosen: widening the trim may not let real typed
+# content, a dead shell, or an unreadable row read as an injection target.
+test_unicode_padding_never_hides_real_content() {
+  local out
+  out=$(classify 0 "❯${NBSP}fix findings 1 and 3")
+  [ "$out" = pending ] || fail "real text after Unicode padding must stay pending, got '$out'"
+  out=$(classify 0 "${NBSP}❯${NBSP}deploy staging${NBSP}")
+  [ "$out" = pending ] || fail "Unicode-padded real text must stay pending, got '$out'"
+  out=$(classify 0 "❯${ZWJ}")
+  [ "$out" = pending ] || fail "a zero-width JOINER is real text, not a blank, and must stay pending, got '$out'"
+  local g
+  for g in '>' '$' '%' '#'; do
+    out=$(classify 0 "${g}${NBSP}")
+    [ "$out" = unknown ] || fail "a Unicode-padded bare shell glyph '$g' is still a dead shell and must read unknown, got '$out'"
+  done
+  out=$(classify 0 '' '' sensitive "\$${NBSP}")
+  [ "$out" = unknown ] || fail "a Unicode-padded plain shell prompt must retain its unknown verdict, got '$out'"
+  pass "fm_composer_classify_content: Unicode blank trimming never turns real text, a dead shell, or an unreadable row into an injection target"
+}
+
 test_bare_shell_glyphs_are_unknown
 test_stripped_unbordered_content_uses_plain_content
 test_bare_shell_prompt_with_command_is_not_empty
@@ -134,3 +182,5 @@ test_empty_content_is_empty
 test_idle_placeholder_is_empty
 test_idle_placeholder_case_mode_is_explicit
 test_real_text_is_pending
+test_unicode_padded_agent_glyph_is_empty
+test_unicode_padding_never_hides_real_content

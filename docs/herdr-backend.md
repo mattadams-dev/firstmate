@@ -213,8 +213,15 @@ Herdr has no direct cursor-row primitive.
 The adapter locates the bottom-most recognized bordered row, Claude `❯` row, Codex `›` row, or a Pi separator region admitted only when native identity is exactly Pi and state is idle, done, or blocked.
 A working Pi, pending middle row, missing identity, incomplete separator pair, or over-tall candidate remains pending or unknown.
 
+A lone separator below the matched row normally clears that match as stale.
+The one exemption covers a rule-framed composer's own closing rule, which Claude draws directly beneath its input row, and it applies only to the bare-glyph shape when native identity reports a known non-Pi agent.
+A Pi, missing, or unreadable identity, a bordered row, or any gap between the match and the separator keeps the refusal.
+[`verification/supervision.md`](verification/supervision.md#away-mode-composer-read-on-a-live-claude-on-herdr-pane) owns the live capture behind that exemption and the non-ASCII composer padding below.
+
 ANSI capture preserves de-emphasized placeholder style.
 `bin/fm-composer-lib.sh` is the fleet-wide owner that strips dim or faint runs and dark truecolor placeholders while retaining bright typed input.
+It also owns the trim that treats Unicode space separators, the zero-width space, and the byte-order mark as blanks, so a harness padding its empty composer with a non-ASCII blank still reads empty.
+The zero-width joiner and non-joiner are excluded because they occur inside real typed text.
 If a future Herdr version strips ANSI style, ghost suggestions become pending rather than empty, which safely defers injection and eventually raises the wedge alarm.
 
 A bare shell prompt is never an empty agent composer.

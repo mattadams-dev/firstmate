@@ -302,6 +302,92 @@ tests/fm-watcher-lock.test.sh
 tests/fm-watch-triage.test.sh
 ```
 
+## Away-mode composer read on a live claude-on-herdr pane
+
+Captured 2026-08-04 with Herdr 0.7.1 against two live Claude Code panes in the running session, using `fm_backend_herdr_capture_ansi <target> 20`.
+This record supports the guarantee that a healthy idle Claude composer classifies `empty` while an unreadable pane and a dead shell stay `unknown`.
+
+Claude 2.x draws its composer as three rows with no side borders: a top horizontal rule, the input row, and a bottom horizontal rule.
+The captured input row is byte-identical on both panes, and its trailing byte pair is the load-bearing detail:
+
+```
+$ sed -n '17p' cap-ansi.raw | od -c
+0000000 342 235 257 302 240  \r  \n
+```
+
+`342 235 257` is `❯` (U+276F) and `302 240` is a NO-BREAK SPACE (U+00A0), not an ASCII space.
+The two panes differ only in whether the top rule carries a label:
+
+```
+row 16 (pane A, labelled top rule)  ...342 224 200 342 224 200  f i r s t m a t e  <ESC>[38;5;14m 342 224 200 342 224 200 <ESC>[0m
+row 16 (pane B, plain top rule)     <ESC>[0m<ESC>[38;5;7m 342 224 200 342 224 200 ... 342 224 200 <ESC>[0m
+row 18 (both panes, plain rule)     <ESC>[0m<ESC>[38;5;14m 342 224 200 ... 342 224 200 <ESC>[0m
+```
+
+`342 224 200` is `─` (U+2500).
+
+Observed classification of both live panes before the fix:
+
+```
+1:w9:p1 (labelled top rule) -> unknown
+1:w9:p7 (plain top rule)    -> pending
+```
+
+Neither verdict is `empty`, so the away-mode injector's composer guard deferred on every healthy idle pane.
+Instrumenting the two structural stages separates the two independent causes:
+
+```
+pane A: structural scan  shape=bare generic_line=17 found=1
+pane A: PI_PAIR_FOUND=0  PI_LAST_SEPARATOR_LINE=18
+pane B: PI_PAIR_FOUND=1  PI_LAST_SEPARATOR_LINE=18
+```
+
+Cause 1, reaching `unknown`: the Pi separated-composer shape treats any all-`─` row as a separator.
+Claude's bottom rule is such a row, and a labelled top rule is not, so no separator pair completes and the lone lower separator on row 18 outranks the live composer on row 17.
+The stale-separator branch then clears the match and the verdict falls through to `unknown`.
+This fires on every Claude pane whose top rule carries a label, which is the shape the primary firstmate pane always renders.
+
+Cause 2, reaching `pending`: when the pair does complete, the composer row survives to content classification as `❯` followed by U+00A0.
+The trimming in the herdr adapter and in `fm_composer_classify_content` used ASCII `[[:space:]]` only, so the no-break space survived the leading-glyph strip and read as real unsubmitted text.
+
+Both causes are structural and independent: fixing either alone still leaves one live pane shape misclassified.
+
+### Guard-class mutation coverage
+
+Run 2026-08-04 against the two guard tests in `tests/fm-backend-herdr.test.sh` and the two in `tests/fm-composer-lib.test.sh`, each executed in isolation because `fail` aborts a suite at its first failure.
+All four pass unmutated.
+
+| Mutation | Direction | Failing tests |
+| --- | --- | --- |
+| Delete the closing-rule exemption | restores always-`unknown` | rule-framed content read |
+| Drop the exemption's shape and identity gate | makes more panes look deliverable | exemption-stays-narrow |
+| Drop the Unicode blanks from the trim | restores always-`pending` | Unicode-padding read, plus the two below |
+| Treat every non-ASCII byte as trimmable | makes more panes look deliverable | Unicode-padding-never-hides-real-content |
+
+Both mutations in the dangerous direction - the ones that would let a non-empty or unreadable composer read as `empty` and so type into a live composer - break exactly one test each.
+Removing the Unicode blanks additionally breaks the rule-framed content read and the padding-safety test.
+That is genuine coupling rather than weak isolation: the trim is load-bearing for three separate guarantees, because the live composer shape needs both fixes to read `empty`, and a dead-shell prompt must lose its padding before the bare-glyph rule recognises it.
+
+## Wedge-alarm command-channel argv
+
+Captured 2026-08-04 on Linux/WSL2 with `sh` as dash.
+The alarm's `command:` channel invoked `sh -c "$cmd" fm-wedge-alarm "$summary"`, which supplies positional parameters to the `sh -c` shell itself, not to a command that shell then executes:
+
+```
+$ sh -c "/tmp/argvprobe.sh" fm-wedge-alarm "THE SUMMARY" </dev/null
+argv_count=0 argv1=[<EMPTY>]
+
+$ sh -c 'printf "argv_count=%s argv1=[%s]\n" "$#" "${1:-<EMPTY>}"' fm-wedge-alarm "THE SUMMARY" </dev/null
+argv_count=1 argv1=[THE SUMMARY]
+```
+
+A directive naming a bare script path therefore received empty argv, while a directive whose body is an inline snippet received the summary on `$1`.
+Only the inline shape was covered by an automated test, so the suite could not distinguish a channel that receives the summary from one that never does, and a directive of the bare-script shape logged its own fallback text on every alarm.
+The `command:` channel now runs a directive that resolves to a single executable file, with no arguments and no shell syntax, directly, so the summary lands in that program's own argv, while every other directive keeps its exact `sh -c` invocation with the summary on `$1`; every shape still receives the summary on stdin.
+A name that resolves to a shell function, builtin, alias, or keyword is refused that branch, so a directive colliding with one of the daemon's own functions cannot run in-process and be reported as a delivered channel.
+Narrowing it that way is what keeps a directive that already carries its own arguments from being handed an extra one, which the existing hung-notifier test rejected.
+[`wedge-alarm.md`](../wedge-alarm.md) owns that dispatch contract, and the regression test covers both directive shapes.
+
 ## Wedge-alarm channels
 
 The two real notification channels were bounded manually on 2026-07-10 on macOS 26.5.2 with Herdr 0.7.3.

@@ -583,6 +583,102 @@ test_housekeeping_orca_persistent_stale_resolves_terminal() {
   pass "persistent Orca stale resolves the terminal from metadata"
 }
 
+# Delivery observability (task fm-alarm-chain-reachability). Every path that
+# DECLINES to inject already logged why, but a confirmed submit returned
+# silently, so a delivered escalation and one that was never attempted left the
+# same record - and the honest reading of that silence was `unknown`, not "never
+# delivered". A delivered flush must now be positively identifiable in the log.
+test_successful_injection_is_distinguishable_from_never_attempted() {
+  local dir state fakebin sent capture daemon_log
+  dir=$(make_supercase delivery-record)
+  state="$dir/state"; fakebin="$dir/fakebin"
+  sent="$dir/sent.log"; : > "$sent"
+  capture="$dir/pane.txt"; : > "$capture"
+  daemon_log="$dir/daemon.log"; : > "$daemon_log"
+
+  # A never-attempted flush: nothing buffered, so nothing is delivered.
+  LOG="$daemon_log" FM_STATE_OVERRIDE="$state" escalate_flush "$state" \
+    || fail "an empty escalate_flush should succeed"
+  grep -Fq 'inject delivered' "$daemon_log" \
+    && fail "a flush that never injected must not record a delivery: $(cat "$daemon_log")"
+
+  # A delivered flush of the same shape as the captain's worked example.
+  escalate_add "$state" "paused 3600s (awaiting external, recheck whether the wait still holds): fm-lane-1"
+  escalate_add "$state" "fm-lane-2.status: blocked: credential expired (catch-all scan)"
+  afk_enter "$state"
+  LOG="$daemon_log" PATH="$fakebin:$PATH" FM_FAKE_TMUX_PANE_ALIVE=1 FM_FAKE_TMUX_SENT="$sent" \
+    FM_FAKE_TMUX_CAPTURE="$capture" FM_ESCALATE_BATCH_SECS=0 escalate_flush "$state" \
+    || fail "escalate_flush failed"
+  grep -Fq 'inject delivered' "$daemon_log" \
+    || fail "a confirmed submit left no delivery record: $(cat "$daemon_log")"
+  grep -Fq 'escalation flush delivered: 2 item(s)' "$daemon_log" \
+    || fail "the delivery record did not name how many items were delivered: $(cat "$daemon_log")"
+  grep -Fq 'kinds=blocked,pause-recheck' "$daemon_log" \
+    || fail "the delivery record did not name the delivered kinds: $(cat "$daemon_log")"
+  pass "escalate_flush: a delivered escalation is positively recorded, so silence no longer looks the same as delivery"
+}
+
+# The buffer holds crewmate-authored status text that the daemon never
+# sanitises, so a stray NUL or non-UTF-8 byte in one item is reachable. A counter
+# that classifies such a buffer as binary reports nothing and the record settles
+# on 0 - a delivery of N items recorded as a confident zero, which is the same
+# family of lie this whole branch exists to remove.
+test_delivered_count_survives_a_buffer_holding_undecodable_bytes() {
+  local dir state fakebin sent capture daemon_log buf
+  dir=$(make_supercase delivery-count-bytes)
+  state="$dir/state"; fakebin="$dir/fakebin"
+  sent="$dir/sent.log"; : > "$sent"
+  capture="$dir/pane.txt"; : > "$capture"
+  daemon_log="$dir/daemon.log"; : > "$daemon_log"
+  buf="$state/.subsuper-escalations"
+
+  printf 'paused 3600s (awaiting external, recheck whether the wait still holds): fm-lane-1\n' > "$buf"
+  printf 'fm-lane-2.status: blocked: credential expired \xff\xfe (catch-all scan)\n' >> "$buf"
+  printf 'fm-lane-3.status: blocked: worktree lock held \0 (catch-all scan)\n' >> "$buf"
+  afk_enter "$state"
+
+  LOG="$daemon_log" PATH="$fakebin:$PATH" FM_FAKE_TMUX_PANE_ALIVE=1 FM_FAKE_TMUX_SENT="$sent" \
+    FM_FAKE_TMUX_CAPTURE="$capture" FM_ESCALATE_BATCH_SECS=0 escalate_flush "$state" \
+    || fail "escalate_flush failed on a buffer holding undecodable bytes"
+  grep -Fq 'escalation flush delivered: 3 item(s)' "$daemon_log" \
+    || fail "an undecodable byte changed the delivered count: $(cat "$daemon_log")"
+  grep -Fq 'kinds=blocked,pause-recheck' "$daemon_log" \
+    || fail "an undecodable byte changed the delivered kinds: $(cat "$daemon_log")"
+  pass "escalate_flush: an item carrying undecodable bytes never turns a delivered batch into a count of 0"
+}
+
+# A buffer that exists but cannot be read is a batch this instrument never
+# observed. The record must say so rather than name a number it never counted:
+# `unknown` and `0` are different claims, and only one of them is honest here.
+test_unreadable_buffer_reports_an_unknown_count_never_zero() {
+  local dir state fakebin sent capture daemon_log buf
+  dir=$(make_supercase delivery-count-unreadable)
+  state="$dir/state"; fakebin="$dir/fakebin"
+  sent="$dir/sent.log"; : > "$sent"
+  capture="$dir/pane.txt"; : > "$capture"
+  daemon_log="$dir/daemon.log"; : > "$daemon_log"
+  buf="$state/.subsuper-escalations"
+
+  printf 'fm-lane-1.status: blocked: credential expired (catch-all scan)\n' > "$buf"
+  chmod 000 "$buf"
+  if [ -r "$buf" ]; then
+    chmod 644 "$buf"
+    printf 'skip: this user can read a mode-000 file (unreadable buffer not simulable)\n'
+    return 0
+  fi
+  afk_enter "$state"
+
+  LOG="$daemon_log" PATH="$fakebin:$PATH" FM_FAKE_TMUX_PANE_ALIVE=1 FM_FAKE_TMUX_SENT="$sent" \
+    FM_FAKE_TMUX_CAPTURE="$capture" FM_ESCALATE_BATCH_SECS=0 escalate_flush "$state" \
+    || fail "escalate_flush failed on an unreadable buffer"
+  chmod 644 "$buf"
+  grep -Fq 'escalation flush delivered: unknown item(s)' "$daemon_log" \
+    || fail "an unread buffer did not report an unknown count: $(cat "$daemon_log")"
+  grep -Fq 'delivered: 0 item(s)' "$daemon_log" \
+    && fail "an unread buffer was recorded as a confident zero: $(cat "$daemon_log")"
+  pass "escalate_flush: a buffer it could not read reports an unknown count, never a zero it did not observe"
+}
+
 test_escalate_batches_into_one_digest() {
   local dir state fakebin sent capture n
   dir=$(make_supercase batch)
@@ -1340,6 +1436,23 @@ test_wedge_alarm_osascript_channel_selected() {
   pass "osascript channel routes through the notifier seam with the summary (never a real notification)"
 }
 
+# A padded override must still SELECT its channel. A trailing space or newline
+# arrives easily from a shell wrapper or a copied line, and an untrimmed value
+# missed the channel arm and fell to the unrecognized-directive arm, which fires
+# no alert - the padding silently disabled the alarm instead of configuring it.
+test_wedge_alarm_padded_channel_override_still_selects_its_channel() {
+  local dir log daemon_log
+  dir=$(make_wedge_case wedge-padded-override); log="$dir/alert.log"
+  daemon_log="$dir/daemon.log"; : > "$daemon_log"
+  LOG="$daemon_log" FM_WEDGE_ALARM_LOG="$log" FM_WEDGE_ALARM_CHANNEL=$'  herdr  \n' \
+    wedge_alarm_notify "away-mode escalations WEDGED 800s undelivered" "/s/.marker"
+  grep -F 'herdr' "$log" >/dev/null \
+    || fail "a padded channel override did not select its channel: $(cat "$log")"
+  grep -F 'unrecognized active-alert channel directive' "$daemon_log" >/dev/null \
+    && fail "a padded channel override was read as an unrecognized directive: $(cat "$daemon_log")"
+  pass "a padded or newline-terminated FM_WEDGE_ALARM_CHANNEL selects its channel instead of silently firing nothing"
+}
+
 test_wedge_alarm_herdr_channel_selected() {
   local dir log
   dir=$(make_wedge_case wedge-herdr); log="$dir/alert.log"
@@ -1349,6 +1462,306 @@ test_wedge_alarm_herdr_channel_selected() {
   grep -F 'WEDGED 800s undelivered' "$log" >/dev/null || fail "herdr channel did not carry the summary"
   grep -F 'osascript' "$log" >/dev/null && fail "herdr-only config also selected osascript"
   pass "herdr channel routes through the notifier seam with the summary (never a real notification)"
+}
+
+# --- structured wedge summary (task fm-alarm-chain-reachability) -------------
+#
+# The summary handed to the alert channels used to carry only an age and a marker
+# path, so 935 consecutive alarms were indistinguishable from one another and
+# from each other's urgency. Severity is assessed HERE, from the buffer, and the
+# marker's first line and the channel summary are the same bytes.
+
+# Write <n> escalation buffer lines of <kind-shape> into <dir>/state.
+seed_escalations() {  # <dir> <shape> <n>
+  local dir=$1 shape=$2 n=$3 i
+  for i in $(seq 1 "$n"); do
+    case "$shape" in
+      pause) printf 'paused 3600s (awaiting external, recheck whether the wait still holds): fm-lane-%s\n' "$i" ;;
+      stale) printf 'stale persisted 900s (possible wedge): fm-merged-%s\n' "$i" ;;
+      blocked) printf 'fm-lane-%s.status: blocked: credential expired (catch-all scan)\n' "$i" ;;
+      done) printf 'fm-lane-%s.status: done: PR ready (catch-all scan)\n' "$i" ;;
+      opaque) printf 'something this classifier has never seen %s\n' "$i" ;;
+    esac
+  done >> "$dir/state/.subsuper-escalations"
+}
+
+# The captain's worked example: overnight 2026-08-01 held five parked-lane
+# rechecks and four idle flags on already-merged lanes. The honest severity was
+# LOW - nothing needed the captain - and the alarm must say so rather than
+# claiming an urgency it never assessed.
+test_wedge_summary_reports_count_kinds_and_severity() {
+  local dir out
+  dir=$(make_wedge_case wedge-summary-low)
+  seed_escalations "$dir" pause 5
+  seed_escalations "$dir" stale 4
+  out=$(wedge_summary_line "$dir/state" 253189 "/s/.marker")
+  case "$out" in
+    'FMWEDGE/1 severity=LOW count=9 kinds=pause-recheck,stale-idle age=253189s:'*) : ;;
+    *) fail "the worked example must report count 9, both routine kinds and LOW severity, got '$out'" ;;
+  esac
+  case "$out" in *"/s/.marker") : ;; *) fail "the summary must end with the marker path, got '$out'" ;; esac
+  pass "wedge_summary_line: five parked rechecks plus four idle flags report count=9 kinds=pause-recheck,stale-idle severity=LOW"
+}
+
+test_wedge_summary_severity_tracks_the_strongest_item() {
+  local dir out
+  dir=$(make_wedge_case wedge-summary-high)
+  seed_escalations "$dir" pause 5
+  seed_escalations "$dir" blocked 1
+  out=$(wedge_summary_line "$dir/state" 900 "/s/.marker")
+  case "$out" in
+    *'severity=HIGH'*) : ;;
+    *) fail "one blocked lane among routine rechecks must raise severity to HIGH, got '$out'" ;;
+  esac
+  case "$out" in *'kinds=blocked,pause-recheck'*) : ;; *) fail "kinds must stay sorted and deduped, got '$out'" ;; esac
+
+  dir=$(make_wedge_case wedge-summary-medium)
+  seed_escalations "$dir" 'done' 2
+  out=$(wedge_summary_line "$dir/state" 900 "/s/.marker")
+  case "$out" in *'severity=MEDIUM'*) : ;; *) fail "work ready for review is MEDIUM, got '$out'" ;; esac
+
+  # An item this classifier cannot place must never be filed as routine: calling
+  # it LOW would claim a calm the instrument never assessed.
+  dir=$(make_wedge_case wedge-summary-opaque)
+  seed_escalations "$dir" pause 2
+  seed_escalations "$dir" opaque 1
+  out=$(wedge_summary_line "$dir/state" 900 "/s/.marker")
+  case "$out" in *'severity=MEDIUM'*) : ;; *) fail "an unclassifiable item must not read LOW, got '$out'" ;; esac
+  case "$out" in *'unclassified'*) : ;; *) fail "an unclassifiable item must be named in kinds, got '$out'" ;; esac
+  pass "wedge_summary_line: severity is the strongest buffered item, and an unclassifiable item never reads routine"
+}
+
+# The same idle pane reaches the alarm by two internal paths: the watcher wake
+# that handle_wake escalates, and housekeeping's stale-persistence recheck. An
+# alarm whose severity depends on WHICH path noticed the condition is the
+# instrument disagreeing with itself, so both must classify and rank alike.
+test_both_wedge_stale_paths_report_the_same_kind_and_severity() {
+  local dir state fakebin pane win key wake_out housekeeping_out
+
+  dir=$(make_supercase wedge-stale-path-wake)
+  state="$dir/state"
+  win="sess:fm-twin-w1"
+  printf 'working: building\n' > "$state/twin-w1.status"
+  LOG="$dir/daemon.log" FM_STATE_OVERRIDE="$state" FM_ESCALATE_BATCH_SECS=999999 \
+    handle_wake "stale: $win (idle 900s, possible wedge, escalation 3)" "$state"
+  [ -s "$state/.subsuper-escalations" ] \
+    || fail "the wake path escalated nothing for a wedge-stale pane"
+  wake_out=$(wedge_summary_line "$state" 900 "/s/.marker")
+
+  dir=$(make_supercase wedge-stale-path-housekeeping)
+  state="$dir/state"; fakebin="$dir/fakebin"; pane="$dir/pane.txt"
+  printf 'working: building\n' > "$state/twin-w1.status"
+  printf 'idle prompt $\n' > "$pane"
+  key=$(printf '%s' "twin-w1" | tr ':/.' '___')
+  echo $(( $(date +%s) - 500 )) > "$state/.subsuper-stale-$key"
+  LOG="$dir/daemon.log" PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$win" \
+    FM_FAKE_TMUX_CAPTURE="$pane" FM_STATE_OVERRIDE="$state" FM_STALE_ESCALATE_SECS=240 \
+    FM_ESCALATE_BATCH_SECS=999999 housekeeping "$state"
+  [ -s "$state/.subsuper-escalations" ] \
+    || fail "housekeeping escalated nothing for a wedge-stale pane"
+  housekeeping_out=$(wedge_summary_line "$state" 900 "/s/.marker")
+
+  case "$wake_out" in
+    *'severity=LOW'*'kinds=stale-idle'*) : ;;
+    *) fail "the wake path's wedge-stale item must report kinds=stale-idle severity=LOW, got '$wake_out'" ;;
+  esac
+  case "$housekeeping_out" in
+    *'severity=LOW'*'kinds=stale-idle'*) : ;;
+    *) fail "housekeeping's wedge-stale item must report kinds=stale-idle severity=LOW, got '$housekeeping_out'" ;;
+  esac
+
+  # The enriched watcher shape is the same pane condition with more detail.
+  [ "$(wedge_escalation_kind "$win (idle 900s, possible wedge, escalation 3, demand-deep-inspection: same pane has wedge-escalated 3 times in a row - do not re-absorb on the run-step/pane state alone)")" = stale-idle ] \
+    || fail "the demand-deep-inspection wedge shape must classify as stale-idle too"
+
+  # The arm names the wedge-stale shape exactly: a declared pause and a
+  # terminal-verb item keep their own kinds, and so their own severities.
+  [ "$(wedge_escalation_kind 'paused 3600s (awaiting external, recheck whether the wait still holds): fm-lane-1')" = pause-recheck ] \
+    || fail "the wedge-stale arm swallowed the declared-pause shape"
+  [ "$(wedge_escalation_kind 'stale + terminal status: fm-lane-2.status: blocked: credential expired')" = blocked ] \
+    || fail "the wedge-stale arm swallowed a terminal-verb item"
+  pass "wedge_escalation_kind: both escalation paths for one wedged pane report stale-idle and LOW"
+}
+
+test_wedge_summary_reports_unknown_when_the_buffer_cannot_be_read() {
+  local dir out
+  dir=$(make_wedge_case wedge-summary-unreadable)
+  out=$(wedge_summary_line "$dir/state" 900 "/s/.marker")
+  case "$out" in
+    *'severity=UNKNOWN count=unknown kinds=unknown'*) : ;;
+    *) fail "an absent buffer must report UNKNOWN, not a fabricated severity, got '$out'" ;;
+  esac
+  case "$out" in
+    *'count=0'*) fail "a buffer that was never read must not report a count it never took, got '$out'" ;;
+  esac
+  pass "wedge_summary_line: an unreadable buffer reports severity=UNKNOWN rather than defaulting in either direction"
+}
+
+# "Read, and it named nothing" and "never read at all" are DIFFERENT
+# observations. A buffer holding only blank lines was genuinely observed, so
+# claiming the list "could not be read" reports a failure that did not happen -
+# the mirror image of naming a count nothing observed.
+test_wedge_summary_separates_an_observed_empty_buffer_from_an_unread_one() {
+  local dir observed unread
+  dir=$(make_wedge_case wedge-summary-observed-empty)
+  printf '\n\n\n' > "$dir/state/.subsuper-escalations"
+  observed=$(wedge_summary_line "$dir/state" 900 "/s/.marker")
+  case "$observed" in
+    *'count=0 kinds=none'*) : ;;
+    *) fail "a buffer that was read and named no item must report count=0, got '$observed'" ;;
+  esac
+  case "$observed" in
+    *'could not be read'*) fail "an observed-empty buffer must not claim the list could not be read, got '$observed'" ;;
+  esac
+
+  dir=$(make_wedge_case wedge-summary-observed-empty-contrast)
+  unread=$(wedge_summary_line "$dir/state" 900 "/s/.marker")
+  [ "$observed" != "$unread" ] \
+    || fail "an observed-empty buffer and a never-observed one produced the same summary: '$observed'"
+  pass "wedge_summary_line: an observed-empty buffer is worded apart from one that was never read"
+}
+
+test_wedge_marker_first_line_is_the_channel_summary() {
+  local dir log first
+  dir=$(make_wedge_case wedge-marker-first-line); log="$dir/alert.log"
+  seed_escalations "$dir" pause 5
+  seed_escalations "$dir" stale 4
+  FM_WEDGE_ALARM_LOG="$log" FM_WEDGE_ALARM_CHANNEL=herdr WEDGE_ALARM_LAST_EPOCH=0 \
+    inject_wedge_alarm "$dir/state" 253189
+  first=$(head -1 "$dir/state/.subsuper-inject-wedged")
+  case "$first" in
+    'FMWEDGE/1 severity=LOW count=9 kinds=pause-recheck,stale-idle'*) : ;;
+    *) fail "the marker's FIRST line must be the structured summary, got '$first'" ;;
+  esac
+  grep -Fq "$first" "$log" || fail "the channel did not receive the marker's first line verbatim: $(cat "$log")"
+  grep -Fq 'paused 3600s' "$dir/state/.subsuper-inject-wedged" \
+    || fail "the marker must still carry the full buffered list below the summary"
+  pass "inject_wedge_alarm: the marker's first line is the structured summary and reaches the channels verbatim"
+}
+
+# The defect that made every alert content-free. `sh -c "$cmd" name "$summary"`
+# gives the positionals to the sh -c SHELL, so a directive naming a BARE SCRIPT
+# PATH ran that script with empty argv. Only the inline-snippet shape was covered
+# before, and the two shapes are exactly the world-states the old test could not
+# distinguish.
+test_wedge_alarm_command_channel_reaches_a_bare_script_directive() {
+  local dir script out_argv out_stdin
+  dir=$(make_wedge_case wedge-command-bare-script)
+  script="$dir/notify.sh"; out_argv="$dir/argv.txt"; out_stdin="$dir/stdin.txt"
+  cat > "$script" <<SH
+#!/usr/bin/env bash
+printf '%s' "\${1:-<NO-SUMMARY>}" > '$out_argv'
+cat > '$out_stdin'
+SH
+  chmod +x "$script"
+  FM_WEDGE_ALARM_EXEC='' FM_WEDGE_ALARM_CHANNEL="command:$script" \
+    wedge_alarm_notify "FMWEDGE/1 severity=LOW count=9 kinds=pause-recheck" "/s/.marker"
+  [ "$(cat "$out_argv" 2>/dev/null)" = "FMWEDGE/1 severity=LOW count=9 kinds=pause-recheck" ] \
+    || fail "a bare-script directive did not receive the summary on \$1, got '$(cat "$out_argv" 2>/dev/null)'"
+  grep -Fq 'severity=LOW' "$out_stdin" || fail "a bare-script directive did not receive the summary on stdin"
+
+  # docs/examples/wedge-alarm ships the SPACED form, so that is the spelling a
+  # captain copies. It must reach the same branch: an untrimmed leading space
+  # made the path read as multi-word and fell back to the empty-argv `sh -c`
+  # invocation, i.e. the content-free alert this whole fix exists to end.
+  rm -f "$out_argv" "$out_stdin"
+  FM_WEDGE_ALARM_EXEC='' FM_WEDGE_ALARM_CHANNEL="command:  $script  " \
+    wedge_alarm_notify "FMWEDGE/1 severity=HIGH count=2 kinds=blocked" "/s/.marker"
+  [ "$(cat "$out_argv" 2>/dev/null)" = "FMWEDGE/1 severity=HIGH count=2 kinds=blocked" ] \
+    || fail "the shipped 'command: <path>' spacing did not receive the summary on \$1, got '$(cat "$out_argv" 2>/dev/null)'"
+  grep -Fq 'severity=HIGH' "$out_stdin" \
+    || fail "the shipped 'command: <path>' spacing did not receive the summary on stdin"
+  pass "command channel: a directive naming a bare script path receives the summary on \$1 and on stdin, spaced or not"
+}
+
+# A directive that is nothing but whitespace still has no command to run: the
+# guard must say so rather than handing an empty string to a shell.
+test_wedge_alarm_blank_command_directive_is_refused() {
+  local dir daemon_log rc
+  dir=$(make_wedge_case wedge-command-blank); daemon_log="$dir/daemon.log"
+  LOG="$daemon_log" FM_WEDGE_ALARM_EXEC='' FM_WEDGE_ALARM_CHANNEL='command:   ' \
+    wedge_alarm_notify "FMWEDGE/1 severity=LOW count=1 kinds=pause-recheck" "/s/.marker"
+  rc=$?
+  [ "$rc" -eq 0 ] || fail "a blank command directive made wedge_alarm_notify return non-zero ($rc)"
+  grep -Fq 'empty command: channel; nothing to run' "$daemon_log" \
+    || fail "a blank command directive did not log that there was nothing to run: $(cat "$daemon_log" 2>/dev/null)"
+  pass "command channel: a whitespace-only directive is refused and logged, never run as an empty command"
+}
+
+# Only a directive that is nothing but one executable may be invoked directly.
+# Anything carrying its own arguments or shell syntax keeps its previous
+# invocation, because an extra argument is not safe to hand a command in general:
+# `sleep 30` would read it as a second duration and `notify-send SUMMARY BODY`
+# has no third parameter.
+test_wedge_alarm_command_bare_program_detection_is_narrow() {
+  local dir script
+  dir=$(make_wedge_case wedge-command-detect); script="$dir/notify.sh"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$script"; chmod +x "$script"
+  wedge_alarm_command_is_bare_program "$script" \
+    || fail "a bare path to an executable script must be detected as a bare program"
+  wedge_alarm_command_is_bare_program "$script --flag" \
+    && fail "a directive carrying arguments must not be invoked directly"
+  wedge_alarm_command_is_bare_program 'sleep 30' \
+    && fail "a command with its own argument must not be invoked directly"
+  wedge_alarm_command_is_bare_program 'powershell.exe -File "C:\fm\toast.ps1"' \
+    && fail "a quoted multi-word directive must not be invoked directly"
+  wedge_alarm_command_is_bare_program "printf '%s' \"\$1\" > a; cat > b" \
+    && fail "a shell snippet must not be invoked directly"
+  wedge_alarm_command_is_bare_program "$dir/not-executable" \
+    && fail "an unresolvable directive must not be treated as a bare program"
+  wedge_alarm_command_is_bare_program '' \
+    && fail "an empty directive must not be treated as a bare program"
+  wedge_alarm_command_is_bare_program "$FM_WEDGE_ALARM_COLLIDING_FUNCTION" \
+    && fail "a shell function must never be classified as a bare program"
+  wedge_alarm_command_is_bare_program ':' \
+    && fail "a shell builtin must never be classified as a bare program"
+  wedge_alarm_command_is_bare_program 'while' \
+    && fail "a shell keyword must never be classified as a bare program"
+  pass "wedge_alarm_command_is_bare_program: only a single resolvable executable file with no arguments or shell syntax"
+}
+
+# PERMANENT SPECIMEN: a shell function whose name a `command:` directive can
+# collide with. Defined at suite scope and kept in play so every future change to
+# command dispatch is measured against it.
+#
+# Resolving a directive with a plain lookup succeeds for the daemon's own
+# FUNCTIONS, not only for external programs. Such a directive would then run
+# in-process, exit 0, and be reported as a delivered alert channel - the alarm
+# chain claiming it reached the captain when nothing left the daemon. Its two
+# world-states (a real notifier ran / a daemon function ran) are exactly what the
+# resolution check must distinguish before it is allowed to report anything.
+FM_WEDGE_ALARM_COLLIDING_FUNCTION=fm_wedge_alarm_in_process_specimen
+FM_WEDGE_ALARM_COLLISION_WITNESS=''
+# shellcheck disable=SC2317  # invoked only if dispatch regresses; that is the point
+fm_wedge_alarm_in_process_specimen() {
+  [ -n "$FM_WEDGE_ALARM_COLLISION_WITNESS" ] \
+    && printf 'ran in-process with argv: %s\n' "$*" >> "$FM_WEDGE_ALARM_COLLISION_WITNESS"
+  return 0
+}
+
+test_wedge_alarm_command_directive_colliding_with_a_function_is_never_run_in_process() {
+  local dir daemon_log witness rc
+  dir=$(make_wedge_case wedge-command-function-collision)
+  daemon_log="$dir/daemon.log"; : > "$daemon_log"
+  witness="$dir/in-process.log"; : > "$witness"
+
+  FM_WEDGE_ALARM_COLLISION_WITNESS="$witness" LOG="$daemon_log" FM_WEDGE_ALARM_EXEC='' \
+    FM_WEDGE_ALARM_CHANNEL="command:$FM_WEDGE_ALARM_COLLIDING_FUNCTION" \
+    wedge_alarm_notify "FMWEDGE/1 severity=HIGH count=2 kinds=blocked" "/s/.marker"
+  [ ! -s "$witness" ] \
+    || fail "a directive colliding with a shell function was run in-process: $(cat "$witness")"
+
+  FM_WEDGE_ALARM_COLLISION_WITNESS="$witness" LOG="$daemon_log" FM_WEDGE_ALARM_EXEC='' \
+    wedge_alarm_emit command "FMWEDGE/1 severity=HIGH count=2 kinds=blocked" \
+      "$FM_WEDGE_ALARM_COLLIDING_FUNCTION"
+  rc=$?
+  [ "$rc" -ne 0 ] \
+    || fail "a directive colliding with a shell function reported the channel delivered"
+  [ ! -s "$witness" ] \
+    || fail "a directive colliding with a shell function was run in-process: $(cat "$witness")"
+  grep -Fq 'command channel exited' "$daemon_log" \
+    || fail "the refused collision did not fail loudly: $(cat "$daemon_log" 2>/dev/null)"
+  pass "command channel: a directive colliding with a daemon function is never run in-process nor reported delivered"
 }
 
 test_wedge_alarm_command_channel_receives_summary() {
@@ -1538,7 +1951,11 @@ test_inject_wedge_alarm_fires_active_alert_on_non_tmux_backend() {
     inject_wedge_alarm "$state" 30600
   [ -s "$state/.subsuper-inject-wedged" ] || fail "inject_wedge_alarm did not write the durable marker"
   grep -F 'osascript' "$log" >/dev/null || fail "inject_wedge_alarm did not emit the active alert on a non-tmux backend: $(cat "$log")"
-  grep -F 'WEDGED 30600s' "$log" >/dev/null || fail "active alert missing the age and summary"
+  grep -F 'age=30600s' "$log" >/dev/null || fail "active alert missing the age"
+  # A held captain decision is the strongest thing the buffer can carry, so the
+  # alert must say so rather than describing only that something is wedged.
+  grep -F 'severity=HIGH' "$log" >/dev/null || fail "active alert did not carry the assessed severity: $(cat "$log")"
+  grep -F 'kinds=decision' "$log" >/dev/null || fail "active alert did not carry the buffered kinds: $(cat "$log")"
   pass "inject_wedge_alarm writes the marker AND emits the active alert even with no tmux status-line (herdr backend)"
 }
 
@@ -1855,6 +2272,9 @@ test_housekeeping_herdr_persistent_stale_resolves_meta
 test_housekeeping_herdr_idle_busy_record_clears_stale
 test_housekeeping_herdr_resumed_stale_cleared
 test_housekeeping_orca_persistent_stale_resolves_terminal
+test_successful_injection_is_distinguishable_from_never_attempted
+test_delivered_count_survives_a_buffer_holding_undecodable_bytes
+test_unreadable_buffer_reports_an_unknown_count_never_zero
 test_escalate_batches_into_one_digest
 test_escalate_batch_age_uses_first_append
 test_heartbeat_scan_dedup
@@ -1896,8 +2316,19 @@ test_wake_helpers_replace_inherited_notifier_override
 test_wedge_alarm_discard_seam_fires_nothing
 test_wedge_alarm_direct_notifiers_honor_discard_seam
 test_wedge_alarm_osascript_channel_selected
+test_wedge_alarm_padded_channel_override_still_selects_its_channel
 test_wedge_alarm_herdr_channel_selected
 test_wedge_alarm_command_channel_receives_summary
+test_wedge_summary_reports_count_kinds_and_severity
+test_wedge_summary_severity_tracks_the_strongest_item
+test_wedge_summary_reports_unknown_when_the_buffer_cannot_be_read
+test_wedge_summary_separates_an_observed_empty_buffer_from_an_unread_one
+test_both_wedge_stale_paths_report_the_same_kind_and_severity
+test_wedge_marker_first_line_is_the_channel_summary
+test_wedge_alarm_command_channel_reaches_a_bare_script_directive
+test_wedge_alarm_blank_command_directive_is_refused
+test_wedge_alarm_command_bare_program_detection_is_narrow
+test_wedge_alarm_command_directive_colliding_with_a_function_is_never_run_in_process
 test_wedge_alarm_command_failure_hides_configured_command
 test_wedge_alarm_unknown_channel_hides_configured_directive
 test_wedge_alarm_off_disables_active_alert_regardless_of_position
