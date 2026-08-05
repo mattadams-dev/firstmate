@@ -141,6 +141,21 @@ Rewriting the file with byte-identical content, through the same `mkstemp` + `os
 **Consequence the writer depends on:** re-rendering an unchanged board is not free, and "write the same bytes" is not a safe substitute for "do not write".
 The tick has to skip the write itself, which is why an unchanged ledger now leaves the board file untouched instead of restamping a freshness line into it.
 
+## The tab title carries the count when the board is hosted
+
+The board's open-ask count used to also ride a viewport-fixed counter in a reserved gutter, so an ask could not be scrolled past.
+Removing the composer left that gutter holding one number, and the question became whether the tab title alone does the never-lose-sight job.
+
+Measured in the same sessions: Lavish propagates the artifact's `<title>` into the hosting page's title, so the browser tab of a hosted board reads
+
+```
+Bridge - 1 need you · Lavish
+```
+
+and the count stays visible while the board is scrolled, while it is behind another window, and after it has been open for a day - from a place that cannot come to cover a row, which is the failure the gutter was built to avoid in the first place.
+
+That is what let the counter move into the page header in normal flow, and the board now has nothing out of flow at all.
+
 ## Upstream
 
 The silent loss of unqueued annotation text across a live reload is a Lavish behaviour, not a board behaviour: every hosted artifact its agent regenerates has the same hole, and a live reload that discards a draft the reviewer is still typing is worth fixing where it happens.
