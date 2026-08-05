@@ -117,6 +117,7 @@ state/               volatile runtime signals; gitignored
   x-poll.error x-poll.claim-error  generated X-mode relay and offer-claim diagnostic dedupe markers
   .wake-queue        durable queued wakes: epoch<TAB>seq<TAB>kind<TAB>key<TAB>payload
   .afk               durable away-mode flag; present = sub-supervisor may inject escalations (set by /afk, cleared on user return)
+  .context-footprint .rebirth-due .rebirth-armed .rebirth-handoff   session-rebirth records: the last context-footprint reading, the over-threshold marker, an asked-for exit awaiting the session's end, and what a successor inherits until its own footprint is verified; see docs/session-rebirth.md
   .watch.lock .wake-queue.lock watcher singleton and queue serialization locks
   .claude-autoarm.lock .claude-autoarm-epoch .claude-autoarm-failure-notified .claude-autoarm-failure-alarmed .turnend-claude-blocks .turnend-claude-blocks.lock   Claude Stop auto-arm single-flight, epoch, failure-episode, attended-alarm, guard-budget, and budget-lock records; never touch
   .hash-* .count-* .stale-* .stale-since-* .paused-* .wedge-escalations-* .health-sample-* .seen-* .hb-surfaced-* .last-* .heartbeat-streak .watch-successor-output.* .watch-deliveries.*   watcher internals; never touch

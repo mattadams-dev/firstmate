@@ -9,6 +9,9 @@ Related PreToolUse guards deny unsafe commands before execution rather than dete
 Their separate owners are [`arm-pretool-check.md`](arm-pretool-check.md), [`cd-guard.md`](cd-guard.md), and [`subagent-guard.md`](subagent-guard.md).
 Do not infer this guard's scope, loop safety, or compatibility tradeoffs for those guards.
 
+The same hook also takes this session's own context-footprint reading, because the guard is already awake at every turn boundary.
+That reading never changes what this guard does; [`session-rebirth.md`](session-rebirth.md) owns the threshold, the quiescence boundary, and everything the reading drives.
+
 ## Current invariant
 
 `bin/fm-guard.sh` is a pull-based warning that runs only when another supervision command invokes it.

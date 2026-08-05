@@ -105,6 +105,7 @@ pi
 FM_PI_HARNESS=pi-signed pi-signed
 ```
 
+To let firstmate shed its own transcript unattended, start the harness through the launch wrapper instead - `bin/fm-session-launch.sh -- claude` - so a session that has grown past the context threshold can be relaunched fresh at a quiet moment ([session rebirth](docs/session-rebirth.md)).
 For Grok, `--trust` is needed once per clone so project hooks and the turn-end guard load; `/hooks-trust` inside Grok works too.
 For Pi, approve the project trust prompt once per clone on first launch so the tracked `.pi/extensions/*.ts` files auto-load.
 Pi's `/calm` toggle hides supported transcript chrome, including canonically classified Firstmate operational user rows, and uses a Calm-only animated working boat during active runs while preserving all model context and session data.
@@ -212,6 +213,8 @@ Firstmate's skills live in two separate places with different audiences:
 - [docs/verification/runtime-backends.md](docs/verification/runtime-backends.md) - active maintainer verification for runtime backend guarantees.
 - [docs/gitlab-merge-watch.md](docs/gitlab-merge-watch.md) - maintainer verification for GitLab merge watching on arbitrary instances.
 - [docs/turnend-guard.md](docs/turnend-guard.md) - the primary session's current "no turn ends blind" backstop, scope, loop safety, and compatibility limits.
+- [docs/session-rebirth.md](docs/session-rebirth.md) - how a session measures its own context, picks a quiescent moment to end, relaunches fresh, and proves the result.
+- [docs/verification/session-rebirth.md](docs/verification/session-rebirth.md) - active maintainer verification for the context-footprint reading, threshold, and quiescence boundary.
 - [docs/verification/supervision.md](docs/verification/supervision.md) - active maintainer verification for session-start, guard, continuity, and wedge integrations.
 - [docs/supervision-protocols/](docs/supervision-protocols/) - rendered primary-harness watcher protocols for Claude, Codex, OpenCode, Pi and `pi-signed`, Grok, and unknown harness fallback.
 - [docs/scripts.md](docs/scripts.md) - the `bin/` toolbelt reference.
