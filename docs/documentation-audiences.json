@@ -67,6 +67,10 @@
       "target": "docs/verification/bridge-hosted-input.md"
     },
     {
+      "source": "docs/session-rebirth.md",
+      "target": "docs/verification/session-rebirth.md"
+    },
+    {
       "source": "docs/sessionstart-nudge.md",
       "target": "docs/verification/supervision.md"
     },
@@ -285,6 +289,10 @@
       "audience": "operator-current"
     },
     {
+      "path": "docs/session-rebirth.md",
+      "audience": "operator-current"
+    },
+    {
       "path": "docs/sessionstart-nudge.md",
       "audience": "operator-current"
     },
@@ -346,6 +354,10 @@
     },
     {
       "path": "docs/verification/runtime-backends.md",
+      "audience": "maintainer-verification"
+    },
+    {
+      "path": "docs/verification/session-rebirth.md",
       "audience": "maintainer-verification"
     },
     {

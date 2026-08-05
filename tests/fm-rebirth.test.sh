@@ -372,7 +372,7 @@ test_arm_refuses_an_unproven_composer() {
 test_arm_refuses_without_an_endpoint() {
   local home out
   home=$(armable_home)
-  out=$(FM_STATE_OVERRIDE="$home/state" FM_SUPERVISOR_TARGET= FM_SUPERVISOR_BACKEND= TMUX_PANE= \
+  out=$(FM_STATE_OVERRIDE="$home/state" FM_SUPERVISOR_TARGET='' FM_SUPERVISOR_BACKEND='' TMUX_PANE='' \
     "$ROOT/bin/fm-rebirth.sh" arm --harness claude) \
     && fail "arm must refuse when no endpoint can be resolved: $out"
   assert_contains "$out" "endpoint" "the refusal must say the endpoint could not be resolved"
@@ -547,14 +547,14 @@ test_a_rebirth_that_did_not_shrink_is_reported_as_a_failure() {
 # Unknown after a bounded wait is reported as unknown. Deleting the handoff
 # quietly would leave an unchecked rebirth looking exactly like a verified one.
 test_an_unreadable_successor_is_reported_as_unknown() {
-  local home i
+  local home attempt
   home=$(armable_home)
   arm "$home" >/dev/null || fail "precondition: the home must arm"
   rebirth "$home" claim || fail "precondition: the rebirth must be claimable"
-  for i in 1 2 3; do
+  for attempt in 1 2 3; do
     FM_REBIRTH_VERIFY_TRIES=3 FM_STATE_OVERRIDE="$home/state" \
       FM_REBIRTH_BRIDGE="$home/bridge-recorder" \
-      "$ROOT/bin/fm-rebirth.sh" verify --session successor \
+      "$ROOT/bin/fm-rebirth.sh" verify --session "successor-$attempt" \
         --transcript "$home/never-written.jsonl" >/dev/null 2>&1 || true
   done
   assert_grep "unverified" "$home/bridge.log" \
