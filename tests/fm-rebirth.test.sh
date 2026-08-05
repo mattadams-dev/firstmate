@@ -451,6 +451,19 @@ test_exit_commands_match_the_verified_adapters() {
   pass "timing: the exit-command table matches the verified harness adapters"
 }
 
+# A handoff with no number in it is a rebirth nobody can check, so the refusal
+# belongs at arm time rather than three steps later at verification.
+test_arm_refuses_a_due_marker_with_no_reading() {
+  local home out
+  home=$(armable_home)
+  printf 'session=predecessor\nts=t\ntokens=\nthreshold=200000\n' > "$home/state/.rebirth-due"
+  out=$(arm "$home") && fail "arm must refuse a due marker carrying no readable reading: $out"
+  assert_contains "$out" "nothing to prove smaller" \
+    "the refusal must say why an unreadable reading blocks the rebirth"
+  assert_absent "$home/typed" "nothing may be typed for a rebirth whose premise cannot be stated"
+  pass "timing: a due marker with no readable reading refuses instead of shipping an uncheckable handoff"
+}
+
 # --- Part 3: execution. Relaunch, and nothing terminated. -------------------
 
 # A wrapper that relaunches on any exit would fight the captain closing their own
@@ -610,6 +623,7 @@ test_arm_refuses_an_undelivered_escalation
 test_arm_refuses_when_not_due
 test_arm_refuses_an_unverified_harness
 test_exit_commands_match_the_verified_adapters
+test_arm_refuses_a_due_marker_with_no_reading
 test_wrapper_exits_with_the_session_when_no_rebirth_was_armed
 test_wrapper_relaunches_exactly_once_per_armed_rebirth
 test_the_rebirth_path_terminates_nothing

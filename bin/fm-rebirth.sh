@@ -171,6 +171,15 @@ case "$COMMAND" in
     TOKENS=$(fm_rebirth_field "$STATE/.rebirth-due" tokens)
     THRESHOLD=$(fm_rebirth_field "$STATE/.rebirth-due" threshold)
     PREV=$(fm_rebirth_field "$STATE/.rebirth-due" session)
+    # Refuse here rather than shipping a handoff with no number in it. The
+    # successor's whole obligation is to prove that number smaller, and a
+    # rebirth whose premise cannot be stated is one nobody can check.
+    case "$TOKENS" in
+      ''|*[!0-9]*)
+        printf 'not armed: the due marker carries no readable reading, so the successor would have nothing to prove smaller\n'
+        exit 1
+        ;;
+    esac
     if [ "$DRY_RUN" -eq 1 ]; then
       printf 'would arm: %s at %s tokens, exit command %s into %s %s\n' \
         "$PREV" "$TOKENS" "$EXIT_CMD" "$BACKEND" "$TARGET"
