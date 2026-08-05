@@ -834,12 +834,15 @@ while :; do
   touch "$STATE/.last-watcher-beat"
 
   # Bridge board: a deterministic script, zero model involvement, owned by this
-  # cycle so board freshness IS supervision freshness. It runs BEFORE the check
-  # and signal scans because wake() exits the cycle - placed after them, a
-  # chatty fleet would starve the captain's only surface exactly when the most
-  # is happening. When the ledger has not changed the tick only restamps the
-  # freshness line, so the common case is nearly free. Never fatal: a board that
-  # cannot render must not take down supervision.
+  # cycle. It runs BEFORE the check and signal scans because wake() exits the
+  # cycle - placed after them, a chatty fleet would starve the captain's only
+  # surface exactly when the most is happening. When the ledger content has not
+  # changed the tick writes nothing at all, which is both free and deliberate:
+  # the board is hosted, and a write reloads it out from under a ruling the
+  # captain is annotating (docs/verification/bridge-hosted-input.md). This cycle
+  # therefore does not prove its own liveness through the board - the beacon at
+  # state/.last-watcher-beat does. Never fatal: a board that cannot render must
+  # not take down supervision.
   if [ "$(age_of "$STATE/.last-bridge")" -ge "$BRIDGE_INTERVAL" ]; then
     FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-bridge-render.sh" --tick >/dev/null 2>&1 || true
     touch "$STATE/.last-bridge"
