@@ -143,13 +143,22 @@ function rawMentionsPatternKill(command) {
   return /\b(?:pkill|killall)\b/.test(normalizeLineContinuations(command));
 }
 
+// The sanctioned helper's own name ends in the bytes `kill`, so a raw scan for a
+// kill verb matches every mention of the one command this policy tells callers to
+// use. Dropping that exact token before the scan keeps the fallback fail-closed on
+// real kill verbs while leaving the mandated escape hatch reachable. The trailing
+// boundary is load-bearing: without it `fm-safe-killall` would launder a killall.
+function withoutSanctionedHelper(normalized) {
+  return normalized.replace(/fm-safe-kill(?![\w-])/g, "");
+}
+
 function rawMentionsAnyKill(command) {
-  return /\b(?:pkill|killall|kill)\b/.test(normalizeLineContinuations(command));
+  return /\b(?:pkill|killall|kill)\b/.test(withoutSanctionedHelper(normalizeLineContinuations(command)));
 }
 
 function rawMentionsBroadKill(command) {
   const normalized = normalizeLineContinuations(command);
-  return /fm-watch/.test(normalized) && /\b(?:pkill|kill)\b/.test(normalized);
+  return /fm-watch/.test(normalized) && /\b(?:pkill|kill)\b/.test(withoutSanctionedHelper(normalized));
 }
 
 function normalizeLineContinuations(source) {

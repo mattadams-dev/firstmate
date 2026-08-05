@@ -147,6 +147,13 @@ matrix_case K17 deny 'kill -TERM -12345'
 matrix_case K18 deny 'exec kill -TERM 17907'
 matrix_case K19 deny 'timeout 5 kill -TERM 17907'
 matrix_case K20 deny 'bash -c "kill -TERM 17907"'
+# The sanctioned helper's own name ends in `kill`, so the fallback that scans
+# unmodelled grammar has to ignore that token. These three prove ignoring it
+# launders nothing: a sibling bare kill, a killall wearing the helper's prefix,
+# and a plain kill all still fail closed inside the same unmodelled grammar.
+matrix_case K21 deny 'for p in 1; do bin/fm-safe-kill.sh --pid 5; kill 9; done'
+matrix_case K22 deny 'for p in 1; do fm-safe-killall fm-watch; done'
+matrix_case K23 deny 'for p in 1 2; do kill $p; done'
 
 # L-series is the mirror image, and it is the half that gets missed: a guard
 # that refuses every kill leaves supervision unrecoverable and every liveness
@@ -164,6 +171,15 @@ matrix_case L09 allow 'pgrep -f fm-supervise-daemon'
 matrix_case L10 allow "echo 'kill -TERM 17907'"
 matrix_case L11 allow "rg -n 'pkill' docs tests"
 matrix_case L12 allow 'git status'
+# A recovery kill is written in loops and conditionals, which this parser does
+# not model, so it falls back to a raw scan. Because the one command the policy
+# mandates is itself spelled `...-kill.sh`, that scan denied the escape hatch it
+# exists to protect: supervision could not recover, and nothing said so.
+matrix_case L13 allow 'for p in 1 2; do bin/fm-safe-kill.sh --role watcher --pid $p; done'
+matrix_case L14 allow 'if true; then bin/fm-safe-kill.sh --role watcher --pid 5; fi'
+matrix_case L15 allow 'while read p; do bin/fm-safe-kill.sh --role watcher --pid $p; done < list'
+matrix_case L16 allow 'for x in fm-watch-arm; do bin/fm-safe-kill.sh --pid 5 --role watcher; done'
+matrix_case L17 allow 'for f in fm-safe-kill fm-watcher-lock; do bash tests/$f.test.sh; done'
 
 matrix_case E01 allow "bin/fm-watch-checkpoint.sh --seconds '180;still-one-arg'"
 matrix_case E02 allow "bin/fm-watch-checkpoint.sh --label 'fm-watch-arm.sh; literal argument'"
