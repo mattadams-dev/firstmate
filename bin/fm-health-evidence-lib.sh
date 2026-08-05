@@ -52,11 +52,15 @@
 # One comparable sample line: "rendered=<hash> cpu=<ticks> children=<n>".
 # A component that cannot be read is recorded as "?" so a later comparison can
 # tell "did not move" apart from "could not be seen".
+# The tree is resolved ONCE and handed to both consumers. This runs in the
+# watcher's poll loop for every stale window, and each consumer used to walk the
+# process table for itself, so one sample cost two full walks of the same tree.
 fm_health_sample() {
-  local backend=$1 target=$2 rendered=$3 pid cpu='?' children='?'
+  local backend=$1 target=$2 rendered=$3 pid pids cpu='?' children='?'
   if pid=$(fm_health_target_pid "$backend" "$target"); then
-    cpu=$(fm_health_tree_cpu "$pid")
-    children=$(fm_health_tree_size "$pid")
+    pids=$(fm_health_tree_pids "$pid")
+    cpu=$(fm_health_tree_cpu "$pids")
+    children=$(fm_health_tree_size "$pids")
   fi
   printf 'rendered=%s cpu=%s children=%s\n' "${rendered:-?}" "$cpu" "$children"
 }
@@ -91,12 +95,12 @@ fm_health_target_pid() {  # <backend> <target>
 # Total CPU ticks consumed by <pid> and every descendant. Reads /proc directly;
 # a host without it reports "?" rather than a fabricated zero, because a zero
 # would read as "frozen" and could raise a false alarm.
-fm_health_tree_cpu() {  # <root-pid>
-  local root=$1 proc_root total=0 pid stat_line counted=0
+fm_health_tree_cpu() {  # <pid-list>
+  local pids=$1 proc_root total=0 pid stat_line counted=0
   local -a fields
   proc_root=${FM_PROC_ROOT_OVERRIDE:-/proc}
   [ -d "$proc_root" ] || { printf '?\n'; return 0; }
-  for pid in $(fm_health_tree_pids "$root"); do
+  for pid in $pids; do
     counted=1
     stat_line=$(cat "$proc_root/$pid/stat" 2>/dev/null) || continue
     read -r -a fields <<< "${stat_line##*)}"
@@ -113,17 +117,18 @@ fm_health_tree_cpu() {  # <root-pid>
   printf '%s\n' "$total"
 }
 
-fm_health_tree_size() {  # <root-pid>
+fm_health_tree_size() {  # <pid-list>
   local n
-  n=$(fm_health_tree_pids "$1" | grep -c .) || true
+  n=$(printf '%s\n' "$1" | grep -c .) || true
   case "$n" in
     ''|*[!0-9]*|0) printf '?\n' ;;
     *) printf '%s\n' "$n" ;;
   esac
 }
 
-# <pid> and its descendants. ONE ps call builds the whole pid->ppid map, then the
-# walk happens in the shell.
+# <pid> and its descendants, one line each. ONE ps call and ONE awk pass: the
+# awk program builds the ppid->children map and walks it, so the cost does not
+# grow with the size of the tree.
 #
 # It used to run `ps -o pid= --ppid <pid>` once per visited pid. That is a GNU
 # option every other parent walk in bin/ already avoids, and on macOS - a
@@ -138,7 +143,7 @@ fm_health_tree_size() {  # <root-pid>
 #
 # Failure prints nothing, so callers report '?' rather than a count.
 fm_health_tree_pids() {  # <root-pid>
-  local root=$1 table frontier next pid seen=0
+  local root=$1 table
   case "$root" in
     ''|*[!0-9]*) return 0 ;;
   esac
@@ -147,18 +152,27 @@ fm_health_tree_pids() {  # <root-pid>
   # The root must actually be in the table. Emitting it unconditionally reported
   # a tree of exactly 1 for a pid that does not exist - the same fabricated
   # constant, one level down from the GNU-option defect above.
-  printf '%s\n' "$table" | awk -v p="$root" '$1 == p { found = 1 } END { exit !found }' || return 0
-  frontier=$root
-  while [ -n "$frontier" ] && [ "$seen" -lt 256 ]; do
-    next=
-    for pid in $frontier; do
-      [ "$seen" -lt 256 ] || break
-      printf '%s\n' "$pid"
-      seen=$((seen + 1))
-      next="$next $(printf '%s\n' "$table" | awk -v p="$pid" '$2 == p { print $1 }')"
-    done
-    frontier=$next
-  done
+  printf '%s\n' "$table" | awk -v root="$root" -v limit=256 '
+    $1 ~ /^[0-9]+$/ && $2 ~ /^[0-9]+$/ {
+      kids[$2] = kids[$2] " " $1
+      if ($1 == root) found = 1
+    }
+    END {
+      if (!found) exit 1
+      frontier = root
+      seen = 0
+      while (frontier != "" && seen < limit) {
+        following = ""
+        count = split(frontier, level, " ")
+        for (i = 1; i <= count && seen < limit; i++) {
+          print level[i]
+          seen++
+          following = following kids[level[i]]
+        }
+        frontier = following
+      }
+    }
+  ' || return 0
 }
 
 # fm_health_compare <previous-sample> <current-sample>

@@ -27,7 +27,7 @@ const REASONS = {
   "unclassifiable-protected-command": "unsupported or malformed shell syntax contains a protected watcher command",
   "watcher-direct": "bin/fm-watch.sh must not be run directly; arm the watcher with bin/fm-watch-arm.sh or run bin/fm-watch-checkpoint.sh instead",
   "pattern-kill": "a process kill that selects its target by matching text (pkill, killall, or a grep/pgrep pipeline into kill) is forbidden; terminate a verified pid with bin/fm-safe-kill.sh",
-  "unverified-kill": "terminating a process by pid is routed through bin/fm-safe-kill.sh, which takes its authority from the lock that names the target; kill -0 and kill -l remain available for probing",
+  "unverified-kill": "terminating a process by pid is routed through bin/fm-safe-kill.sh, which takes its authority from the lock that names the target; a signal-0 probe (kill -0) delivers nothing and stays available in every grammar",
 };
 
 // Process termination.
@@ -51,6 +51,16 @@ const REASONS = {
 // liveness probe in the fleet and turn this guard into the mirror-image failure
 // of the one it prevents. Job specs (%1) name only the invoking shell's own
 // children and stay available too.
+//
+// Signal 0 is stronger than the other two: it is exempt in EVERY grammar
+// position, including the loops and conditionals below that this parser does not
+// model, because `if kill -0 "$pid"` is how liveness is written in shell. The
+// alternative a refusal leaves is a ps/grep pattern match, and this fleet has
+// already recorded where that ends - a census counted four supervise daemons
+// where zero existed, matching two crewmates' briefs on argv and the inspecting
+// shell itself. A guard that pushes callers onto that road is a safety
+// regression wearing a safety guard's clothes. kill -l and job specs get no such
+// treatment: they are allowed only where the grammar is modelled.
 const KILL_BY_PATTERN = new Set(["pkill", "killall"]);
 const KILL_BY_PID = new Set(["kill"]);
 
@@ -59,6 +69,10 @@ function isJobSpec(value) {
 }
 
 const NULL_SIGNALS = new Set(["0", "SIGNULL", "NULL"]);
+
+function isNullSignal(value) {
+  return value === "0" || NULL_SIGNALS.has(value.replace(/^SIG/, "").toUpperCase());
+}
 
 // A `kill` invocation that only probes or lists, and therefore terminates
 // nothing. Signal 0 delivers no signal at all - it is the standard liveness
@@ -78,13 +92,13 @@ function killIsProbeOrListOnly(args) {
     if (value === "-s" || value === "--signal" || value === "-n") {
       const signal = args[i + 1]?.value ?? "";
       i += 1;
-      if (!NULL_SIGNALS.has(signal.replace(/^SIG/, "").toUpperCase()) && signal !== "0") return false;
+      if (!isNullSignal(signal)) return false;
       signalIsNull = true;
       continue;
     }
     if (value.startsWith("--signal=") || value.startsWith("-s")) {
       const signal = value.startsWith("--signal=") ? value.slice("--signal=".length) : value.slice(2);
-      if (signal !== "0" && !NULL_SIGNALS.has(signal.replace(/^SIG/, "").toUpperCase())) return false;
+      if (!isNullSignal(signal)) return false;
       signalIsNull = true;
       continue;
     }
@@ -159,10 +173,67 @@ function withoutSanctionedHelper(normalized) {
   return normalized.replace(/fm-safe-kill(?![\w-])/g, "");
 }
 
-function rawMentionsAnyKill(command) {
-  return /\b(?:pkill|killall|kill)\b/.test(withoutSanctionedHelper(normalizeLineContinuations(command)));
+// A `kill` fragment ends where the next command could begin. `(` and a backtick
+// are in this set for a second reason: they are where a substitution starts, and
+// a substitution chooses words this raw scan cannot see.
+const KILL_FRAGMENT_BOUNDARY = /[;&|\n`()]/;
+
+// Is this whitespace-split argument list a signal-0 spec followed only by plain
+// targets? Any second option-shaped token disqualifies it: bash reads
+// `kill -0 -9 5` as signal 0 against process group 9, but that reading is not
+// something a raw text scan should be asked to make, so it stays denied.
+function killWordsAreSignalZeroProbe(words) {
+  if (words.length === 0) return false;
+  const first = words[0];
+  let index;
+  if (first === "-0") index = 1;
+  else if (first === "-s" || first === "--signal" || first === "-n") {
+    if (words.length < 2 || !isNullSignal(words[1])) return false;
+    index = 2;
+  } else if (first.startsWith("--signal=")) {
+    if (!isNullSignal(first.slice("--signal=".length))) return false;
+    index = 1;
+  } else if (first.startsWith("-s") && first.length > 2) {
+    if (!isNullSignal(first.slice(2))) return false;
+    index = 1;
+  } else return false;
+  return words.slice(index).every((word) => !word.startsWith("-"));
 }
 
+// Signal 0 delivers no signal, so a probe is exempt wherever it is written -
+// including the unmodelled grammar this scan exists for. See the KILL_BY_PID
+// note above for why refusing a probe is the more expensive failure.
+//
+// Only the VERB is dropped, never its arguments. A kill hiding inside a probe's
+// own substitution (`kill -0 $(kill -9 6)`) therefore still reaches the scan and
+// still fails closed, which stripping the whole invocation would have laundered.
+function withoutSignalZeroProbes(normalized) {
+  const verbs = /\bkill\b/g;
+  let out = "";
+  let cursor = 0;
+  let match;
+  while ((match = verbs.exec(normalized)) !== null) {
+    const argsStart = match.index + match[0].length;
+    const rest = normalized.slice(argsStart);
+    const boundary = KILL_FRAGMENT_BOUNDARY.exec(rest);
+    const fragment = boundary ? rest.slice(0, boundary.index) : rest;
+    const substituted = boundary && (boundary[0] === "`" || (boundary[0] === "(" && fragment.endsWith("$")));
+    if (substituted) continue;
+    if (!killWordsAreSignalZeroProbe(fragment.split(/\s+/).filter(Boolean))) continue;
+    out += normalized.slice(cursor, match.index);
+    cursor = argsStart;
+  }
+  return out + normalized.slice(cursor);
+}
+
+function rawMentionsAnyKill(command) {
+  return /\b(?:pkill|killall|kill)\b/.test(withoutSignalZeroProbes(withoutSanctionedHelper(normalizeLineContinuations(command))));
+}
+
+// Deliberately does NOT take the signal-0 exemption, and neither does
+// rawMentionsPatternKill. The modelled path denies a kill that names a watcher
+// pid at any signal, so exempting probes here would make the fallback more
+// permissive than the grammar it stands in for.
 function rawMentionsBroadKill(command) {
   const normalized = normalizeLineContinuations(command);
   return /fm-watch/.test(normalized) && /\b(?:pkill|kill)\b/.test(withoutSanctionedHelper(normalized));

@@ -32,6 +32,7 @@ MARKER_VALUE=fm-pr-check-migration-v1
 SCAN_MARKER="$STATE/.pr-check-migration-scan-v1"
 SCAN_MARKER_VALUE=fm-pr-check-migration-scan-v1
 WATCH="$SCRIPT_DIR/fm-watch.sh"
+MIGRATE_PATH="$SCRIPT_DIR/fm-pr-check-migrate.sh"
 WATCH_LOCK="$STATE/.watch.lock"
 NONCANONICAL_PREFIX='!noncanonical'
 LEGACY_NONCANONICAL_PREFIX=_noncanonical
@@ -333,8 +334,14 @@ else
   migration_pid=${BASHPID:-$$}
   migration_identity=$(fm_pid_identity "$migration_pid" 2>/dev/null || true)
   i=0
+  # The exclusion publishes THIS script's path, not the watcher's. Publishing
+  # $WATCH here would make the lock's home, executable path, and pid identity all
+  # agree with what a watcher-health check looks for, so for the whole migration
+  # window every caller asking "is this home's watcher healthy?" would be
+  # answered yes and handed a pid that is not a watcher. The migration is not an
+  # arming authority; its lock must not read as one.
   while [ "$i" -lt 100 ]; do
-    if fm_lock_with_owner_seed "$(fm_singleton_seed pr-check-migration "$FM_HOME" "$STATE" "$WATCH" "$migration_identity")" \
+    if fm_lock_with_owner_seed "$(fm_singleton_seed pr-check-migration "$FM_HOME" "$STATE" "$MIGRATE_PATH" "$migration_identity")" \
       fm_lock_try_acquire "$WATCH_LOCK"; then
       lock_held=1
       break

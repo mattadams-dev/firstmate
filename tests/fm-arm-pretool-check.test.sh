@@ -157,6 +157,15 @@ matrix_case K20 deny 'bash -c "kill -TERM 17907"'
 matrix_case K21 deny 'for p in 1; do bin/fm-safe-kill.sh --pid 5; kill 9; done'
 matrix_case K22 deny 'for p in 1; do fm-safe-killall fm-watch; done'
 matrix_case K23 deny 'for p in 1 2; do kill $p; done'
+# The laundering direction for the signal-0 exemption. A probe is exempt in
+# unmodelled grammar; a delivered signal standing next to one, wearing one, or
+# arriving through the probe's own substitution is not.
+matrix_case K24 deny 'if kill -0 5; then kill -9 6; fi'
+matrix_case K25 deny 'for p in 1 2; do kill -0 -TERM $p; done'
+matrix_case K26 deny 'if kill -0"9" 5; then :; fi'
+matrix_case K27 deny 'if kill -0 $(kill -9 6); then :; fi'
+matrix_case K28 deny 'for p in 1 2; do kill -s TERM $p; done'
+matrix_case K29 deny 'while true; do kill -0 5; pkill -f node; done'
 
 # L-series is the mirror image, and it is the half that gets missed: a guard
 # that refuses every kill leaves supervision unrecoverable and every liveness
@@ -183,6 +192,17 @@ matrix_case L14 allow 'if true; then bin/fm-safe-kill.sh --role watcher --pid 5;
 matrix_case L15 allow 'while read p; do bin/fm-safe-kill.sh --role watcher --pid $p; done < list'
 matrix_case L16 allow 'for x in fm-watch-arm; do bin/fm-safe-kill.sh --pid 5 --role watcher; done'
 matrix_case L17 allow 'for f in fm-safe-kill fm-watcher-lock; do bash tests/$f.test.sh; done'
+# The same mirror-image failure, one command over. A liveness probe is written
+# inside an `if` or a loop, which is grammar this parser does not model, so the
+# fallback denied the fleet's most common observation and left `ps | grep` -
+# the census that counted four daemons where zero existed - as the way to ask.
+# Signal 0 delivers nothing, so it is exempt wherever it appears; K24-K29 hold
+# the other side of that boundary.
+matrix_case L18 allow 'if kill -0 "$pid" 2>/dev/null; then echo alive; fi'
+matrix_case L19 allow 'for p in 1 2; do kill -0 $p; done'
+matrix_case L20 allow 'while kill -0 5; do sleep 1; done'
+matrix_case L21 allow 'if kill -s 0 "$pid"; then echo alive; fi'
+matrix_case L22 allow 'until kill -0 5; do sleep 1; done'
 
 matrix_case E01 allow "bin/fm-watch-checkpoint.sh --seconds '180;still-one-arg'"
 matrix_case E02 allow "bin/fm-watch-checkpoint.sh --label 'fm-watch-arm.sh; literal argument'"

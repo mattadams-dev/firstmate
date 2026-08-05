@@ -52,6 +52,10 @@ They are, in the order they sit above the process:
 | `bin/fm-afk-start.sh`, `bin/fm-afk-launch.sh` | away | Start the daemon; they do not arm watchers themselves |
 | `bin/fm-bootstrap.sh`, `bin/fm-spawn.sh`, `bin/fm-pr-check-migrate.sh` | either | Touch watcher state as part of another job; none is an arming authority |
 
+The migration is the one non-authority that takes the watcher lock itself, and its lock says so: it publishes `supervisor-role pr-check-migration` and its OWN executable path, never the watcher's.
+Publishing the watcher's path would make the lock's home, path, and pid identity all agree with what `fm_watcher_lock_matches_pid` looks for, so for the length of the migration this home's watcher-health check would answer yes and name a process that is not a watcher.
+An entry in this table that is not an arming authority must not be able to impersonate one.
+
 Exactly one is authoritative per mode: the primary harness's own continuity adapter in normal mode, and the away-mode daemon while `state/.afk` exists.
 Every other caller defers **through the lock**, never through its own judgment about whether a peer exists - and that is now literally true rather than a convention, because `fm_supervisor_singleton_acquire` is the only way into either loop and it decides from the lock alone.
 A caller that believes it should arm therefore cannot be wrong in a way that produces a second supervisor; the worst it can do is start a process that immediately stands down.

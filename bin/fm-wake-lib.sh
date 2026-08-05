@@ -91,15 +91,26 @@ fm_path_age() {
   echo $(( $(date +%s) - m ))
 }
 
+# Is the watcher lock's published holder THIS home's live watcher? The lock is
+# also held, briefly, by holders that are not watchers - the PR-check migration
+# takes it as an exclusion - so the published role is part of the answer, not
+# only the executable path. A holder that publishes no role at all predates the
+# field and is judged on the remaining evidence; refusing those would leave every
+# pre-upgrade home unable to recognize its own running watcher.
 FM_WATCHER_MATCHED_IDENTITY=
 fm_watcher_lock_matches_pid() {
-  local state=$1 watch_path=$2 pid=$3 home=${4:-$FM_HOME} lockdir lock_home lock_path lock_identity current_identity
+  local state=$1 watch_path=$2 pid=$3 home=${4:-$FM_HOME} lockdir lock_home lock_path lock_role lock_identity current_identity
   FM_WATCHER_MATCHED_IDENTITY=
   lockdir="$state/.watch.lock"
   lock_home=$(cat "$lockdir/fm-home" 2>/dev/null || true)
   lock_path=$(cat "$lockdir/watcher-path" 2>/dev/null || true)
+  lock_role=$(cat "$lockdir/supervisor-role" 2>/dev/null || true)
   lock_identity=$(cat "$lockdir/pid-identity" 2>/dev/null || true)
   [ "$lock_home" = "$home" ] || return 1
+  case "$lock_role" in
+    ''|watcher) ;;
+    *) return 1 ;;
+  esac
   [ "$lock_path" = "$watch_path" ] || return 1
   [ -n "$lock_identity" ] || return 1
   current_identity=$(fm_pid_identity "$pid") || return 1
@@ -578,8 +589,14 @@ FM_SINGLETON_REASON=
 # identical home while watching entirely different state directories - which is
 # exactly what makes a process-table census read them as duplicates of one
 # another. The supervised fleet is the state directory; the lock now says so.
+# The field is `supervisor-role`, not `role`. `role` already belongs to
+# fm_lock_set_role's validated autoarm|terminal-check enum on
+# state/.claude-autoarm.lock, and these values (watcher, supervise-daemon,
+# pr-check-migration) are not in it. One field name with two owners and two
+# vocabularies reads correctly right up until a lock is handed to the wrong
+# reader.
 fm_singleton_seed() {
-  printf 'role %s\nfm-home %s\nstate %s\nwatcher-path %s\npid-identity %s\n' \
+  printf 'supervisor-role %s\nfm-home %s\nstate %s\nwatcher-path %s\npid-identity %s\n' \
     "$1" "$2" "$3" "$4" "$5"
 }
 

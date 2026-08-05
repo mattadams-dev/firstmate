@@ -31,16 +31,20 @@ run_safe_kill() {  # <state> <args...>
 # Publish a role lock naming <pid>, exactly as a real supervisor's
 # singleton-at-birth acquisition would.
 publish_role_lock() {  # <state> <lockname> <role> <pid> [home]
-  local state=$1 lockname=$2 role=$3 pid=$4 owner home identity
+  local state=$1 lockname=$2 role=$3 pid=$4 owner home identity exec_path
   home=${5:-$state/..}
   owner="$state/$lockname.owner.test"
   identity=$(FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_pid_identity "$2"' _ "$ROOT/bin/fm-wake-lib.sh" "$pid")
+  case "$role" in
+    supervise-daemon) exec_path="$ROOT/bin/fm-supervise-daemon.sh" ;;
+    *) exec_path="$ROOT/bin/fm-watch.sh" ;;
+  esac
   mkdir -p "$owner"
   printf '%s\n' "$pid" > "$owner/pid"
-  printf '%s\n' "$role" > "$owner/role"
+  printf '%s\n' "$role" > "$owner/supervisor-role"
   printf '%s\n' "$home" > "$owner/fm-home"
   printf '%s\n' "$state" > "$owner/state"
-  printf '%s\n' "$ROOT/bin/fm-watch.sh" > "$owner/watcher-path"
+  printf '%s\n' "$exec_path" > "$owner/watcher-path"
   printf '%s\n' "$identity" > "$owner/pid-identity"
   ln -sfn "$owner" "$state/$lockname"
 }

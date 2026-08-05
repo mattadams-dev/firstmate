@@ -152,6 +152,13 @@ Denying those would make the guard the mirror image of the failure it prevents: 
 Quoted text such as `echo 'kill -TERM 17907'` remains data, and a standalone read-only `pgrep` remains allowed.
 Unsupported compound grammar containing a kill verb fails closed, exactly as it does for protected executions.
 
+Signal 0 is the one exception to that fail-closed rule, and it is exactly one signal wide.
+`if kill -0 "$pid"; then` is how liveness is written in shell, and the loops and conditionals it is written in are grammar this parser does not model, so the fallback denied the fleet's most common probe and left `ps | grep` as the only remaining way to ask.
+That road is already recorded: a pattern census counted four supervise daemons where zero existed.
+So a signal-0 probe is allowed in every grammar position, and nothing else is: `kill -0` inside a loop is allowed, while `kill -9`, a bare `kill <pid>`, `kill -0 -9 <pid>`, a probe whose signal comes out of a substitution, and every pattern-kill form stay denied there.
+`kill -l` and job specs keep the narrower rule - allowed only where the grammar is modelled - because neither is load-bearing for liveness.
+The exemption also does not reach `broad-watcher-kill` or `pattern-kill`: the modelled path denies a kill that names a watcher pid at any signal, and the fallback is never more permissive than the grammar it stands in for.
+
 ## Stable reason codes
 
 Every semantic deny includes one stable code in square brackets before its prose reason.
@@ -165,7 +172,7 @@ Every semantic deny includes one stable code in square brackets before its prose
 | `watcher-nested` | A wrapper, group, substitution, nested shell, `eval`, or constructed dynamic payload executes the protected command. |
 | `broad-watcher-kill` | An actual broad process kill targets the watcher. |
 | `pattern-kill` | A termination selects its target by matching process text. |
-| `unverified-kill` | A termination by pid; use `bin/fm-safe-kill.sh`, which takes its authority from the lock naming the target. |
+| `unverified-kill` | A termination by pid; use `bin/fm-safe-kill.sh`, which takes its authority from the lock naming the target. A signal-0 probe is not a termination and is never denied by this code. |
 | `unclassifiable-protected-command` | Malformed or unsupported syntax contains a protected command and cannot be safely classified. |
 | `watcher-direct` | A direct `bin/fm-watch.sh` execution; the watcher must be reached through `bin/fm-watch-arm.sh` or `bin/fm-watch-checkpoint.sh`. |
 

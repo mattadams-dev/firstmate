@@ -139,7 +139,7 @@ test_a_starting_watcher_never_evicts_the_incumbent() {
 # tick. A lock that intermittently fails to recognize its holder is a duplication
 # generator that reproduces roughly never in testing.
 test_lock_publishes_its_real_holder_identity() {
-  local dir state fakebin watcher published actual i
+  local dir state fakebin watcher published actual peer_role i
   dir=$(make_case identity-at-birth)
   state="$dir/state"
   fakebin="$dir/fakebin"
@@ -158,13 +158,75 @@ test_lock_publishes_its_real_holder_identity() {
   [ -n "$published" ] || fail "the lock published no holder identity"
   [ "$published" = "$actual" ] \
     || fail "the lock published an identity that is not its holder's (published '$published' vs actual '$actual')"
-  [ "$(cat "$state/.watch.lock/role" 2>/dev/null || true)" = watcher \
-    ] || fail "the lock did not publish its role"
+  # supervisor-role, not role: `role` belongs to the autoarm lock's own
+  # validated enum, and these values are not in it.
+  [ "$(cat "$state/.watch.lock/supervisor-role" 2>/dev/null || true)" = watcher \
+    ] || fail "the lock did not publish its supervisor role"
+  peer_role=$(FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_singleton_holder_verified "$2" && printf "%s\n" "$FM_SINGLETON_PEER_ROLE"' _ "$LIB" "$state/.watch.lock")
+  [ "$peer_role" = watcher ] \
+    || fail "a verified holder did not report its role to the reader that documents it (got '$peer_role')"
   [ "$(cat "$state/.watch.lock/state" 2>/dev/null || true)" = "$state" ] \
     || fail "the lock did not publish the state directory it supervises"
   kill "$watcher" 2>/dev/null || true
   wait "$watcher" 2>/dev/null || true
   pass "a supervision lock publishes its real holder identity, role, and supervised state directory"
+}
+
+# The PR-check migration holds the watcher lock as an exclusion and is NOT a
+# watcher. If that lock publishes the watcher's executable path, the home, the
+# path, and the pid identity all agree with what a watcher-health check looks
+# for, so for the whole migration window every caller asking "is this home's
+# watcher healthy?" is answered yes and handed a pid that is not a watcher.
+#
+# The verdict is taken WHILE the real migration holds the lock, from inside a
+# `stat` shim the migration itself invokes on its first act after acquiring, and
+# it is the production predicate that answers. Asserting afterwards would pass
+# for the wrong reason - the holder is gone by then, so the health check fails on
+# liveness and never reaches the question this case exists to ask. The beacon is
+# seeded fresh for the same reason: a watcher that was just paused leaves one.
+test_migration_exclusion_never_reads_as_a_healthy_watcher() {
+  local dir state fakebin verdict real_stat snapshot
+  dir=$(make_case migration-not-a-watcher)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  snapshot="$dir/held-lock-verdict"
+  real_stat=$(command -v stat) || { pass "stat not available, skipping"; return; }
+
+  cat > "$fakebin/stat" <<SH
+#!/usr/bin/env bash
+if [ ! -e "$snapshot" ] && [ -s "$state/.watch.lock/pid" ]; then
+  FM_HOME="$dir" FM_STATE_OVERRIDE="$state" bash -c '
+    . "\$1"
+    lock="\$2/.watch.lock"
+    printf "holder=%s role=%s path=%s\n" \\
+      "\$(cat "\$lock/pid" 2>/dev/null || true)" \\
+      "\$(cat "\$lock/supervisor-role" 2>/dev/null || true)" \\
+      "\$(cat "\$lock/watcher-path" 2>/dev/null || true)"
+    if fm_watcher_healthy "\$2" "\$3" 300 "\$4"; then
+      printf "verdict=healthy-watcher reported=%s\n" "\$FM_WATCHER_HEALTHY_PID"
+    else
+      printf "verdict=no-healthy-watcher\n"
+    fi
+  ' _ "$LIB" "$state" "$ROOT/bin/fm-watch.sh" "$dir" > "$snapshot" 2>/dev/null
+fi
+exec "$real_stat" "\$@"
+SH
+  chmod +x "$fakebin/stat"
+
+  : > "$state/.last-watcher-beat"
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" \
+    "$ROOT/bin/fm-pr-check-migrate.sh" > "$dir/migrate.out" 2>&1 || true
+
+  [ -s "$snapshot" ] \
+    || fail "the migration's own exclusion window was never observed, so this case proved nothing"
+  grep -q '^holder=[0-9]' "$snapshot" \
+    || fail "the observed lock named no holder: $(tr '\n' '|' < "$snapshot")"
+  grep -q 'role=pr-check-migration' "$snapshot" \
+    || fail "the exclusion did not publish itself as the migration: $(tr '\n' '|' < "$snapshot")"
+  verdict=$(sed -n 's/^verdict=\([^ ]*\).*/\1/p' "$snapshot")
+  [ "$verdict" = no-healthy-watcher ] \
+    || fail "the migration's exclusion read as this home's healthy watcher: $(tr '\n' '|' < "$snapshot")"
+  pass "the PR-check migration's exclusion never reads as this home's healthy watcher"
 }
 
 # A lock held by a live process that publishes NO identity cannot be judged
@@ -1382,6 +1444,7 @@ test_msys_pid_identity_uses_proc
 test_stale_watch_lock_reclaimed
 test_a_starting_watcher_never_evicts_the_incumbent
 test_lock_publishes_its_real_holder_identity
+test_migration_exclusion_never_reads_as_a_healthy_watcher
 test_unidentifiable_live_lock_refuses_loudly
 test_wedged_incumbent_is_loud_from_the_arm_layer
 test_guard_warnings

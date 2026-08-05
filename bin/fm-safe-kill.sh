@@ -85,7 +85,7 @@ WAIT_SECS=${FM_SAFE_KILL_WAIT:-5}
 STATE_ARG=
 
 usage() {
-  sed -n '2,72p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+  sed -n '2,68p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
 }
 
 while [ "$#" -gt 0 ]; do
