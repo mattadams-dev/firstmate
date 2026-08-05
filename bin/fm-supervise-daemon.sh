@@ -194,6 +194,11 @@ STALE_ESCALATE_SECS_DEFAULT=240
 ESCALATE_BATCH_SECS_DEFAULT=90
 HEARTBEAT_SCAN_SECS_DEFAULT=300
 HOUSEKEEPING_TICK_DEFAULT=15
+# How often a rebirth-due home re-reads the pane to ask whether the moment is
+# quiescent yet. Slower than the housekeeping tick on purpose: the answer only
+# changes when a decision closes or a composer clears, and the quiescence read is
+# the one part of housekeeping that touches the pane on every pass.
+REBIRTH_TRY_SECS_DEFAULT=60
 # Max time a buffered escalation may sit undelivered before the daemon retries
 # the normal flush path and, if that cannot confirm a submit, raises a loud wedge
 # alarm. The escape hatch makes a guard false-positive visible instead of silent.
@@ -1199,8 +1204,9 @@ _oldest_line_age() {  # <buf> -> seconds since the oldest buffered item first ar
 #     digest and reset the window (repeating bounded re-surface, never a wedge).
 #  3) heartbeat scan: every HEARTBEAT_SCAN_SECS, grep state/*.status for a
 #     captain-relevant line the per-wake classifier missed and escalate it.
-housekeeping() {  # <state>
-  local state=$1 now due f key task win marker age last max_defer oldest pause_secs
+housekeeping() {  # <state> [backend] [target]
+  local state=$1 backend=${2:-} target=${3:-}
+  local now due f key task win marker age last max_defer oldest pause_secs
   now=$(_now)
   migrate_watcher_pause_markers "$state"
 
@@ -1314,6 +1320,51 @@ housekeeping() {  # <state>
       escalate_add "$state" "$(basename "$f"): $last (catch-all scan)"
       mark_status_seen "$state" "$task" "$last"
     done < <(scan_captain_relevant_statuses "$state")
+  fi
+
+  # (4) session rebirth at a QUIESCENT point.
+  #
+  # The turn-end guard marks a session rebirth-due from its own transcript; this
+  # is the half that decides WHEN. It lands here because quiescence is read from
+  # the exact two things this daemon already owns and already reads every cycle:
+  # whether the supervisor composer is proven empty (the injection boundary
+  # above) and whether any decision is still open (the escalation classifier).
+  # No new watcher, no new poll, no new state file - the question was already
+  # being answered for another reason.
+  #
+  # Gated on away mode for the same reason every injection is: with the captain
+  # present, their session is not something to end from underneath them. While
+  # they are away, a rebirth costs nothing but a fresh session that self-orients
+  # from the records.
+  #
+  # Its own cadence, because the quiescence read is the only part of housekeeping
+  # that touches the pane on every pass, and a home sitting rebirth-due through a
+  # long open decision must not pay for that read fifteen seconds apart forever.
+  if [ "${FM_DAEMON_REBIRTH:-1}" != 0 ] && afk_active "$state" \
+    && [ -f "$state/.rebirth-due" ] \
+    && [ "$(_file_age "$state/.subsuper-last-rebirth")" -ge "${FM_REBIRTH_TRY_SECS:-$REBIRTH_TRY_SECS_DEFAULT}" ]; then
+    _now > "$state/.subsuper-last-rebirth"
+    rebirth_attempt "$state" "$backend" "$target"
+  fi
+}
+
+# rebirth_attempt: hand the decision to its owner and log what it decided.
+#
+# Every refusal is logged with the reason it gave, because "the session was
+# mid-decision" and "the composer could not be read" are different answers, and a
+# home that keeps deferring is only debuggable if the log says which one it was.
+# This never terminates anything: bin/fm-rebirth.sh asks the session to exit
+# through the harness's own exit command, and a session that ignores it produces
+# an expiring record and another attempt, never a kill.
+rebirth_attempt() {  # <state> <backend> <target>
+  local state=$1 backend=$2 target=$3 out rc
+  out=$(FM_STATE_OVERRIDE="$state" "$FM_DAEMON_DIR/fm-rebirth.sh" arm \
+    --backend "$backend" --target "$target" 2>&1) && rc=0 || rc=$?
+  out=$(printf '%s' "$out" | tr '\n' ' ')
+  if [ "$rc" -eq 0 ]; then
+    log "rebirth: $out"
+  else
+    log "rebirth deferred: $out"
   fi
 }
 
@@ -1779,7 +1830,7 @@ fm_super_main() {
     sleep 1
     if [ "$(_file_age "$STATE/.subsuper-last-housekeep")" -ge "${FM_HOUSEKEEPING_TICK:-$HOUSEKEEPING_TICK_DEFAULT}" ]; then
       _now > "$STATE/.subsuper-last-housekeep"
-      housekeeping "$STATE"
+      housekeeping "$STATE" "$BACKEND" "$TARGET"
     fi
   done
 }

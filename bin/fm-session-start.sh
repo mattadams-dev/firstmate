@@ -454,6 +454,49 @@ else
   printf 'Treat it as stale until bin/fm-bridge-render.sh --tick -v explains why.\n'
 fi
 
+# --- 5c. inherited rebirth ---------------------------------------------
+# This session exists because its predecessor was ended on purpose: its context
+# had grown past the point where a fresh session was worth more than its memory.
+# The successor therefore starts with one obligation the digest above cannot
+# discharge for it - noticing what it cannot answer from the records.
+#
+# The inverted acceptance test, and the reason this block exists: a question the
+# successor cannot resolve from the durable record is NOT an inconvenience to
+# route around by asking a human. It is the defect the rebirth exists to detect,
+# and it goes to the Bridge as a records finding naming the specific thing that
+# could not be resolved.
+#
+# The successor's own footprint is NOT asked for here. It is measured and posted
+# automatically when this turn ends, because a rebirth whose premise depends on
+# somebody remembering to check it is a ritual, not a control.
+if [ -f "$STATE/.rebirth-handoff" ]; then
+  section "REBIRTH - THIS SESSION IS A SUCCESSOR"
+  REBIRTH_PREV_TOKENS=$(sed -n 's/^predecessor_tokens=//p' "$STATE/.rebirth-handoff" 2>/dev/null | head -1)
+  REBIRTH_PREV_SESSION=$(sed -n 's/^predecessor_session=//p' "$STATE/.rebirth-handoff" 2>/dev/null | head -1)
+  REBIRTH_ARMED_TS=$(sed -n 's/^armed_ts=//p' "$STATE/.rebirth-handoff" 2>/dev/null | head -1)
+  REBIRTH_THRESHOLD=$(sed -n 's/^threshold=//p' "$STATE/.rebirth-handoff" 2>/dev/null | head -1)
+  printf 'The previous session (%s) reached %s provider tokens against a %s threshold\n' \
+    "${REBIRTH_PREV_SESSION:-unknown}" "${REBIRTH_PREV_TOKENS:-unknown}" "${REBIRTH_THRESHOLD:-unknown}"
+  printf 'and was ended at a quiescent point on %s. You are its successor.\n\n' \
+    "${REBIRTH_ARMED_TS:-an unrecorded time}"
+  cat <<EOF
+Self-orient from the digest above. It is the whole inheritance: there is no
+handoff note to find and no previous conversation to recover, by design.
+
+If something you need to act cannot be answered from these records, that gap is
+the finding. Do not work around it and do not ask the captain for it. Write it
+to the Bridge, naming the specific thing that could not be resolved:
+
+  $FM_ROOT/bin/fm-bridge.sh note --project firstmate \\
+    --title "records gap: <the specific unanswerable thing>" \\
+    --body "<what you needed, where you looked, what the record should have held>"
+
+Your own footprint is measured and posted automatically when this turn ends, so
+the number that justified ending your predecessor is proved smaller without
+anyone having to look.
+EOF
+fi
+
 # --- 6. closing reminder -----------------------------------------------
 section "NEXT STEP"
 if [ "$READ_ONLY" -eq 1 ]; then

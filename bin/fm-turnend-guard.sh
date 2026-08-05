@@ -97,6 +97,7 @@ PAYLOAD=$(cat 2>/dev/null || true)
 # loop-guard field, so we must never block - fail open, not noisy.
 command -v jq >/dev/null 2>&1 || exit 0
 
+SESSION_ID=$(printf '%s' "$PAYLOAD" | jq -r '.session_id // "unknown"' 2>/dev/null || printf 'unknown')
 STOP_HOOK_ACTIVE=$(printf '%s' "$PAYLOAD" | jq -r '
   if type != "object" then error("payload")
   elif has("stopHookActive") then
@@ -106,9 +107,6 @@ STOP_HOOK_ACTIVE=$(printf '%s' "$PAYLOAD" | jq -r '
   else false
   end
 ' 2>/dev/null) || exit 0
-if [ "$CLAUDE_MODE" -eq 0 ] && [ "$STOP_HOOK_ACTIVE" = "true" ]; then
-  exit 0
-fi
 
 # --- scope precisely to a PRIMARY checkout ----------------------------------
 # A genuinely-marked secondmate home runs its OWN primary firstmate session, so
@@ -124,6 +122,45 @@ fi
 # so this exempts them while guarding every real secondmate home.
 fm_primary_scope_matches "$FM_ROOT" "$STATE" || exit 0
 
+# --- the instrument reads ITSELF ---------------------------------------------
+# Every turn end, at a moment this guard already runs, for the cost of reading
+# one file: what has this session's own transcript cost the provider so far, and
+# is it past the line where a fresh session is worth more than this one's memory?
+#
+# This is deliberately the FIRST thing done after scoping, before any supervision
+# predicate, so a reading is taken on every stop this guard sees - including the
+# forced-continuation stops the loop guard allows through below, which are
+# exactly the turns where a session is working hardest and growing fastest.
+#
+# It can never change what this guard does. The reading is recorded and the
+# process is left to the daemon, which owns the timing; a session is not stopped
+# mid-turn over a number, and a failure to read is not a reason to block a turn
+# from ending. Both calls swallow their status for that reason.
+#
+# bin/fm-rebirth-lib.sh owns the reading, the threshold, and the unknown/under/
+# due distinction; docs/session-rebirth.md owns the whole mechanism.
+if [ "${FM_TURNEND_REBIRTH:-1}" != 0 ]; then
+  TRANSCRIPT=$(printf '%s' "$PAYLOAD" | jq -r '.transcript_path // empty' 2>/dev/null || true)
+  if [ -n "$TRANSCRIPT" ]; then
+    # shellcheck source=bin/fm-rebirth-lib.sh
+    . "$SCRIPT_DIR/fm-rebirth-lib.sh"
+    fm_rebirth_record_reading "$STATE" "$SESSION_ID" "$TRANSCRIPT" >/dev/null 2>&1 || true
+    # Part 4: prove the premise. When this session inherited a rebirth, its own
+    # footprint is the first thing it owes - the number that justified ending its
+    # predecessor has to come back smaller, and a rebirth that never checks is a
+    # ritual. The verifier posts the comparison to the Bridge itself, so nobody
+    # has to remember to look.
+    if [ -f "$STATE/.rebirth-handoff" ]; then
+      "$SCRIPT_DIR/fm-rebirth.sh" verify --session "$SESSION_ID" \
+        --transcript "$TRANSCRIPT" >/dev/null 2>&1 || true
+    fi
+  fi
+fi
+
+if [ "$CLAUDE_MODE" -eq 0 ] && [ "$STOP_HOOK_ACTIVE" = "true" ]; then
+  exit 0
+fi
+
 # --- the actual predicate ----------------------------------------------------
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
@@ -133,7 +170,6 @@ BUDGET_LOCK="$STATE/.turnend-claude-blocks.lock"
 OWNER_LOCK="$STATE/.claude-autoarm.lock"
 FAILURE_NOTICE="$STATE/.claude-autoarm-failure-notified"
 FAILURE_ALARM="$STATE/.claude-autoarm-failure-alarmed"
-SESSION_ID=$(printf '%s' "$PAYLOAD" | jq -r '.session_id // "unknown"' 2>/dev/null || printf 'unknown')
 budget_reset() {
   [ "$CLAUDE_MODE" -eq 1 ] || return 0
   fm_lock_try_acquire "$BUDGET_LOCK" || return 0
