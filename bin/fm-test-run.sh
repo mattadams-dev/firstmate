@@ -184,7 +184,7 @@ family_for_basename() {
     fm-update.test.sh)
       printf '%s\n' session-bootstrap
       ;;
-    fm-afk-pi-herdr-return-e2e.test.sh|\
+    fm-afk-pi-herdr-return-e2e.test.sh|fm-bridge-lavish-annotation-live-e2e.test.sh|\
     fm-codex-continuity-live-e2e.test.sh|fm-grok-continuity-live-e2e.test.sh|\
     fm-grok-stop-live-e2e.test.sh|fm-harness-liveness-drift-live-e2e.test.sh|\
     fm-opencode-primary-live-e2e.test.sh|fm-pi-primary-live-e2e.test.sh|\
@@ -930,6 +930,13 @@ families_for_changed_path() {
     bin/fm-primary-scope-lib.sh|bin/fm-project-mode.sh|bin/fm-promote.sh|\
     bin/fm-ff-lib.sh|bin/fm-gotmp*|bin/*pretool*)
       printf '%s\n' pure-contract-unit
+      ;;
+    bin/fm-bridge-render.sh)
+      # The board's markup is authored against Lavish's own annotation rules, so
+      # a render change also selects the live guard that checks those rules
+      # against the installed vendor rather than against our copy of them.
+      printf '%s\n' pure-contract-unit
+      printf '%s\n' live-harness-optin
       ;;
     .agents/skills/quota-array-dispatch/SKILL.md)
       printf '%s\n' pure-contract-unit

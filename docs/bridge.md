@@ -19,7 +19,10 @@ bin/fm-bridge.sh          writer  ->  data/bridge/ledger.jsonl   append-only JSO
                                           (published)     about one id
 ```
 
-Board freshness is supervision freshness: the board is rendered by the supervision cycle, so a stale timestamp on it means the cycle itself has stopped.
+The board dates its content and claims nothing about supervision liveness.
+It once carried a `checked` clock restamped into the file every tick, so a frozen board and a dead cycle would not look the same.
+That cost a write per tick, and a write is what makes Lavish reload the hosted page - discarding whatever ruling the captain was in the middle of annotating (`docs/verification/bridge-hosted-input.md`).
+Refresh yields to composition: liveness is answered by the watcher beacon at `state/.last-watcher-beat` and the guard that alarms on a lapsed chain, which answer it durably and cost the captain nothing.
 
 ## Canonical paths
 
@@ -29,8 +32,8 @@ They resolve per home, so a secondmate reads and writes its own and never the pa
 | What | Path | Notes |
 | --- | --- | --- |
 | Ledger | `$FM_HOME/data/bridge/ledger.jsonl` | append-only, one JSON object per line |
-| Board | `$FM_HOME/data/bridge/bridge.html` | generated; overwritten every tick |
-| Change stamp | `$FM_HOME/state/.bridge-render` | drives skip-when-unchanged |
+| Board | `$FM_HOME/data/bridge/bridge.html` | generated; rewritten only when the ledger content changed |
+| Change stamp | `$FM_HOME/state/.bridge-render` | content digest of the ledger; drives skip-when-unchanged |
 
 Ask the scripts rather than hardcoding: `bin/fm-bridge.sh path ledger` and `bin/fm-bridge.sh path board`.
 
@@ -294,12 +297,33 @@ Zones, in the order the captain reads them:
 Because an ask that scrolls out of view is the failure this surface exists to prevent, the open-ask count rides in the browser tab title and in a counter that travels with the viewport.
 That counter lives in a reserved right-hand gutter, not across the top.
 Chrome that travels with a vertically scrolling page and spans the content column ends up over every row that passes it, and parks an anchor target underneath itself - two browser layout audits proved exactly that, on rows in two different zones.
-A gutter the content is never laid out inside is the one place viewport-fixed chrome cannot come to cover it, so the ruling composer docks there too and widens the gutter instead of covering the board.
+A gutter the content is never laid out inside is the one place viewport-fixed chrome cannot come to cover it, and nothing else is allowed to resize it.
 Asks carry their age, and one older than `FM_BRIDGE_AGING_SECONDS` (default 24h) is flagged: an ask that old is usually one that was already answered and never closed, and nothing about "open" distinguishes those from the rest.
 
-Answer forms are mandatory on asks.
-Clicking one queues a ready-to-paste ruling; several can be queued and copied together.
-There is deliberately **no ack machinery in v1** - no read receipts, no dismissal state, no interactivity beyond those forms.
+Answer forms are mandatory on asks, and they are shown rather than offered as controls: the board has no send of its own, so an option that looked clickable would promise an egress this page does not have.
+There is deliberately **no ack machinery** - no read receipts, no dismissal state, no interactivity at all.
+The board runs no script; the only `<script>` on it is the state document it embeds for audit.
+
+### The input path
+
+The board is a read surface. Rulings come back through Lavish's annotation layer and its conversation panel, and the board says so where the asks are.
+
+That is one owner, not two.
+The board carried a composer of its own until it was removed: a textarea whose only egress was `copy` and `clear`, on a page regenerated underneath it.
+It could not send, and the redraw the captain has to perform to see fresh state wiped whatever they had typed - so a ruling could be believed answered and never heard.
+
+What that leaves is measured, not assumed (`docs/verification/bridge-hosted-input.md`):
+
+- A **queued** ruling survives the board being redrawn and is still delivered on `lavish-axi poll`.
+- A ruling **typed into the annotation box and not queued** is destroyed by the redraw, silently.
+- A delivered ruling still lands on the ask it was placed on, because the annotation is rooted at the per-item anchor `id="item-<id>"` rather than at a position on the page.
+
+Those three facts are what the board's footer states, in the captain's words, and the board promises nothing beyond them.
+They are also why two things are load-bearing markup rather than decoration: the per-item anchors, and the visible ref carried into each answer option (`O1: A: retire it`).
+Strip either and the input path breaks as completely as removing the composer fixed it - which is why both are pinned by `tests/fm-bridge.test.sh`.
+
+Opened as a plain file with no session behind it, the board has no input path at all, and says that too.
+That is honest for a static document: the captain simply tells firstmate directly.
 
 The board embeds the exact state document it was drawn from in `<script type="application/json" id="fm-bridge-state">`, so it can be audited without trusting the renderer, and so `--state` and the board provably cannot diverge.
 
@@ -311,7 +335,11 @@ The board is read inside Lavish, whose annotation layer installs a capture-phase
 This is not a blocker: right-click still opens a link.
 But `data-lavish-action` is Lavish's own pass-through, so making left-click work is a one-attribute authoring fix, and there is no reason to leave it unused.
 It exempts that one anchor from annotation capture and nothing else, so every other element stays annotatable and rulings still queue through the annotation layer.
-Answer forms need nothing: they are `<button>`, already native-exempt.
+
+The same list runs the other way, and that direction is what the board is authored against: a native control, and everything inside it, is invisible to annotation.
+On a surface whose only input path IS annotation, a control is either an input the board cannot send or a dead spot on a row the captain has to rule on.
+So the board renders none - no `button`, no `input`, no `textarea` - and its answer options are plain elements.
+`tests/fm-bridge.test.sh` pins that portably; `tests/fm-bridge-lavish-annotation-live-e2e.test.sh` (opt-in, `FM_BRIDGE_LAVISH_LIVE_E2E=1`) checks the same rules against the INSTALLED lavish-axi and a real hosted session, and fails naming the version if upstream moves them.
 
 Every anchor goes through one `link()` helper in `bin/fm-bridge-render.sh`, which also opens external links with `target="_blank" rel="noopener noreferrer"` - the board is served in an iframe, so a same-tab navigation would replace it.
 External link text is the full URL because that is the most useful label for a pointer, not as a fallback affordance; there is deliberately no second link mechanism.
@@ -330,9 +358,12 @@ Ordinary secondary text, including a record's `note`, is dim rather than accente
 - The renderer is a deterministic script with **zero model involvement**.
   A model is never woken to update the Bridge and never hand-writes the HTML.
 - The supervision cycle owns the tick, every `FM_BRIDGE_INTERVAL` seconds (default 180, inside the captain's 2-5 minute window).
-- When the ledger is unchanged the body is **not** regenerated; only the marked freshness line is restamped.
-- The freshness line keys to the **render clock** and shows two times: `checked` advances every tick, `content as of` advances only when the ledger changed.
-  A frozen board and a dead supervision cycle must not look the same.
+- When the ledger content is unchanged the tick writes **nothing at all** - not a body, not a timestamp, not the same bytes again.
+  The change stamp is a digest of the ledger's content, so a ledger merely touched is not a change.
+- Writing is the cost being avoided, not rendering: Lavish reloads the hosted page on any write to the file, including a byte-identical one, and the reload discards an in-progress annotation.
+  The writer therefore compares before it replaces, and an unchanged board keeps its mtime.
+- The board shows one time, `content as of`, and it moves only when the content did.
+  Supervision liveness is the beacon's and the guard's to answer, not this page's.
 
 ## Checking it
 
@@ -367,3 +398,4 @@ Because the board is a pure function of the ledger, it cannot happen - which is 
 - `bin/fm-bridge-render.sh` - the fold, the query modes, the board, the tick.
 - `bin/fm-bridge.sh --help` - current command syntax.
 - `tests/fm-bridge.test.sh` - the guard-class tests behind every claim above.
+- `docs/verification/bridge-hosted-input.md` - the measured Lavish hosting facts the board and its writer are built on.

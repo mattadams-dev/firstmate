@@ -438,13 +438,16 @@ if [ -z "$BRIDGE_BOARD" ]; then
 elif [ "$READ_ONLY" -eq 1 ]; then
   printf 'Board (not refreshed - this session is read-only): %s\n' "$BRIDGE_BOARD"
 elif FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-bridge-render.sh" --tick >/dev/null 2>&1; then
-  printf 'Board refreshed: %s\n' "$BRIDGE_BOARD"
+  # "current", not "refreshed": when the ledger has not changed the tick
+  # deliberately writes nothing, and saying it rewrote the file would claim work
+  # it did not do.
+  printf 'Board current: %s\n' "$BRIDGE_BOARD"
   printf 'It is generated from %s and is never hand-edited.\n' \
     "$(FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-bridge-render.sh" --ledger-path 2>/dev/null || echo 'the ledger')"
   printf 'Write captain-relevant facts there as they happen with bin/fm-bridge.sh;\n'
   printf 'anything that reaches the captain only through this terminal is a delivery failure.\n'
 else
-  printf 'Board could not be refreshed: %s\n' "$BRIDGE_BOARD"
+  printf 'Board could not be brought up to date: %s\n' "$BRIDGE_BOARD"
   printf 'Treat it as stale until bin/fm-bridge-render.sh --tick -v explains why.\n'
 fi
 
