@@ -11,6 +11,11 @@
 #     test_in_sync_creates_no_task and test_ahead_only_creates_no_task.
 #     "Always warn" is not a way to pass the first pair: a sweep that cries wolf
 #     every run gets ignored, which is the same failure one mirror over.
+#   - The mutant that lets the idempotency guard outlive the episode that created
+#     it breaks exactly test_guard_expires_once_the_fork_is_level_again: the
+#     instrument keeps reading, and stops creating work, which is the same decay
+#     into "merely warning" one indirection down. Its opposite - retiring the
+#     guard on any level reading - breaks test_a_sync_under_way_keeps_its_guard.
 #   - The mutant that collapses a failed reading into either direction breaks the
 #     unknown suite, whose centre is test_outage_and_in_sync_are_distinguishable:
 #     name the two world-states the reading claims to separate, and if a network
@@ -573,6 +578,65 @@ test_configured_extra_fork_outside_enumeration_is_swept() {
   pass "fm-fork-freshness: a configured fork outside the owner's account is swept"
 }
 
+test_registered_project_without_a_clone_is_swept() {
+  local dir out rc=0
+  dir=$(new_case)
+  # A fork this home maintains per its own registry, that the owner enumeration
+  # does not return and that this home has not cloned: covered by no other
+  # source, so without the registry it gets no line, no unknown and no count.
+  repolist "$dir" '[]'
+  printf -- '- widget [no-mistakes] - the widget project (added 2026-07-01)\n' \
+    > "$dir/home/data/projects.md"
+  repo_fixture "$dir" acme/widget true upstream/widget main
+  repo_fixture "$dir" upstream/widget false - main
+  compare_fixture "$dir" upstream/widget main acme main behind 0 12 >/dev/null
+  out=$(run_sweep "$dir" sweep --owner acme) || rc=$?
+
+  expect_code 3 "$rc" "a registered fork that is behind must not exit clean"
+  assert_contains "$out" "acme/widget status=behind behind=12" \
+    "a fork registered in data/projects.md was omitted entirely"
+  assert_present "$dir/home/data/fm-sync-acme-widget/brief.md" \
+    "the registered fork was read but got no sync task"
+  pass "fm-fork-freshness: a fork registered in data/projects.md but not cloned here is swept"
+}
+
+test_registered_local_only_project_is_named_not_read() {
+  local dir out rc=0
+  dir=$(new_case)
+  # A local-only project has no forge repository at all. Reading it would spend
+  # an unknown on it every single sweep, and unknown coverage withholds the
+  # completion stamp - a permanent false unknown the sweep could never clear.
+  repolist "$dir" '[]'
+  printf -- '- lab [local-only] - a local-only lab (added 2026-07-01)\n' \
+    > "$dir/home/data/projects.md"
+  out=$(run_sweep "$dir" sweep --owner acme) || rc=$?
+
+  expect_code 0 "$rc" "a local-only project is not an unreadable fork"
+  assert_contains "$out" "lab status=ignored" \
+    "a registered local-only project must still be named, never dropped"
+  assert_not_contains "$out" "status=unknown" \
+    "a project with no forge repository was read as an unreadable one"
+  assert_present "$dir/home/state/.fork-freshness-last" \
+    "the sweep banked no completion stamp, so it stays due forever over a local-only project"
+  pass "fm-fork-freshness: a registered local-only project is reported by name, not read as unknown"
+}
+
+test_owner_flag_without_a_value_is_refused_loudly() {
+  local dir rc=0
+  dir=$(new_case)
+  one_fork "$dir" identical 0 0
+  run_sweep "$dir" sweep --owner >/dev/null || rc=$?
+
+  expect_code 2 "$rc" "a flag with no value must be refused like every other malformed option"
+  assert_grep "--owner needs a login" "$dir/stderr.log" \
+    "a malformed option exited with no diagnostic at all"
+  rc=0
+  run_sweep "$dir" sweep --owner= >/dev/null || rc=$?
+  expect_code 2 "$rc" \
+    "an empty --owner= must be refused, not silently swept against the default owner"
+  pass "fm-fork-freshness: --owner with no value is refused loudly"
+}
+
 # --- the task the sweep creates ---------------------------------------------
 
 test_same_named_forks_under_two_owners_get_two_tasks() {
@@ -695,6 +759,107 @@ test_interrupted_materialisation_leaves_no_guard() {
   assert_present "$dir/home/state/.wake-queue" \
     "the completing sweep left the task without its wake entry"
   pass "fm-fork-freshness: an interrupted materialisation leaves no guard and the next sweep completes it"
+}
+
+test_guard_expires_once_the_fork_is_level_again() {
+  local dir out rc=0 retired brief
+  dir=$(new_case)
+  brief="$dir/home/data/fm-sync-acme-widget/brief.md"
+  one_fork "$dir" behind 0 3
+  run_sweep "$dir" sweep --owner acme >/dev/null || true
+  assert_present "$brief" "the first episode created no sync task at all"
+
+  # The sync happens and the fork goes level. data/<id>/ is never deleted -
+  # teardown keeps it as the task's evidence custodian - so a guard that means
+  # only "this file exists" outlives the episode that created it, and the
+  # instrument decays back into the warning it replaced.
+  compare_fixture "$dir" upstream/widget main acme main identical 0 0 >/dev/null
+  out=$(run_sweep "$dir" sweep --owner acme) || rc=$?
+
+  expect_code 0 "$rc" "a fork level with its upstream again must read clean"
+  assert_contains "$out" "action=task fm-sync-acme-widget retired" \
+    "the reading that ended the episode did not retire its spent idempotency guard"
+  assert_absent "$brief" \
+    "the spent guard is still in place, so the fork's next episode will report a task nobody created"
+  retired=$(find "$dir/home/data/fm-sync-acme-widget" -name 'brief.retired-*.md' | wc -l)
+  [ "$retired" = 1 ] ||
+    fail "retirement must keep the brief as evidence, not delete it; found $retired retired brief(s)"
+
+  # Weeks later, upstream moves and the same fork is behind again. This is the
+  # episode a lifetime-less guard swallows forever.
+  compare_fixture "$dir" upstream/widget main acme main behind 0 50 >/dev/null
+  rc=0
+  out=$(run_sweep "$dir" sweep --owner acme) || rc=$?
+
+  expect_code 3 "$rc" "the fork is behind again and must not exit clean"
+  assert_contains "$out" "action=task fm-sync-acme-widget queued" \
+    "the fork's second episode created no task"
+  assert_not_contains "$out" "already queued" \
+    "the second episode was reported as already queued over a task that closed with the first"
+  assert_present "$brief" "the second episode left the task without instructions"
+  assert_grep "behind 50, ahead 0" "$brief" \
+    "the second episode's instructions still quote the first episode's reading"
+  pass "fm-fork-freshness: the idempotency guard expires with its episode, so the next one is real"
+}
+
+test_a_sync_under_way_keeps_its_guard() {
+  local dir out rc=0
+  dir=$(new_case)
+  one_fork "$dir" behind 0 3
+  run_sweep "$dir" sweep --owner acme >/dev/null || true
+  fm_write_meta "$dir/home/state/fm-sync-acme-widget.meta" \
+    "window=firstmate:fm-fm-sync-acme-widget" "kind=ship"
+  # The worker has pushed the merge and the fork now reads level, but the task
+  # is still open: retiring here would pull the instructions out from under a
+  # worker still reading them.
+  compare_fixture "$dir" upstream/widget main acme main identical 0 0 >/dev/null
+  out=$(run_sweep "$dir" sweep --owner acme) || rc=$?
+
+  expect_code 0 "$rc" "the fork is level"
+  assert_contains "$out" "action=none" "a sync still under way is nothing to retire"
+  assert_present "$dir/home/data/fm-sync-acme-widget/brief.md" \
+    "a sync still under way had its instructions retired out from under it"
+  pass "fm-fork-freshness: a sync still under way keeps its brief"
+}
+
+test_a_task_that_could_not_be_created_keeps_its_reason() {
+  local dir out rc=0
+  dir=$(new_case)
+  one_fork "$dir" behind 0 3
+  # A directory where the brief belongs: every artifact up to the atomic move
+  # happens, and the move itself cannot. With the backlog write failing too, the
+  # composed line carries both the cause and the MANUAL marker - the two things
+  # a generic "task NOT created" literal would overwrite.
+  mkdir -p "$dir/home/data/fm-sync-acme-widget/brief.md/blocked"
+  out=$(FM_TEST_TASKS_RC=1 run_sweep "$dir" sweep --owner acme) || rc=$?
+
+  expect_code 3 "$rc" "the fork is behind however its task ended"
+  assert_contains "$out" "NOT created: instructions could not be placed" \
+    "the reading dropped the reason its task could not be created"
+  assert_contains "$out" "MANUAL=backlog" \
+    "the reading dropped the marker naming the artifact nobody observed"
+  pass "fm-fork-freshness: a task that could not be created keeps its reason and its MANUAL marker"
+}
+
+test_sync_brief_never_carries_a_remote_credential() {
+  local dir brief
+  dir=$(new_case)
+  one_fork "$dir" behind 0 3
+  # A clone configured with an https token remote. The brief is durable and is
+  # copied into the evidence repository at teardown, so a token interpolated
+  # into it lands in another repository's history.
+  fm_git_init_commit "$dir/home/projects/widget"
+  git -C "$dir/home/projects/widget" remote add origin \
+    'https://x-access-token:ghp_notarealtokenatall@github.com/acme/widget.git'
+  run_sweep "$dir" sweep --owner acme >/dev/null || true
+  brief="$dir/home/data/fm-sync-acme-widget/brief.md"
+
+  assert_present "$brief" "no instructions were written for the sync task"
+  assert_no_grep "ghp_notarealtokenatall" "$brief" \
+    "the brief carries the clone's credential into a durable, travelling artifact"
+  assert_grep "github.com/acme/widget" "$brief" \
+    "the remote hint was dropped entirely instead of being sanitised"
+  pass "fm-fork-freshness: the sync brief carries the remote without its credentials"
 }
 
 test_wake_failure_is_reported_not_swallowed() {
@@ -1016,12 +1181,19 @@ test_cloned_fork_with_a_trailing_slash_origin_is_swept
 test_capped_enumeration_reads_unknown_coverage
 test_full_enumeration_under_the_cap_reads_clean
 test_configured_extra_fork_outside_enumeration_is_swept
+test_registered_project_without_a_clone_is_swept
+test_registered_local_only_project_is_named_not_read
+test_owner_flag_without_a_value_is_refused_loudly
 test_same_named_forks_under_two_owners_get_two_tasks
 test_sync_task_carries_the_proven_procedure
 test_behind_queues_a_wake
 test_repeat_sweep_creates_no_duplicate_task
 test_task_already_under_way_is_left_alone
 test_interrupted_materialisation_leaves_no_guard
+test_guard_expires_once_the_fork_is_level_again
+test_a_sync_under_way_keeps_its_guard
+test_a_task_that_could_not_be_created_keeps_its_reason
+test_sync_brief_never_carries_a_remote_credential
 test_wake_failure_is_reported_not_swallowed
 test_bridge_failure_is_reported_not_swallowed
 test_backlog_failure_is_reported_not_swallowed

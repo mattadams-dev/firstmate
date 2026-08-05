@@ -17,12 +17,17 @@
 # `sweep` covers every maintained fork: every fork owned by the sweep owner
 # (read through the authenticated repo list, which includes private repos - the
 # public users/<login>/repos endpoint sees a subset and would silently truncate),
-# unioned with the origin of every clone under this home's projects/ and every
-# entry in config/maintained-forks, minus config/fork-sweep-ignore. Ignored and
+# unioned with the origin of every clone under this home's projects/, every
+# project registered in this home's data/projects.md, and every entry in
+# config/maintained-forks, minus config/fork-sweep-ignore. Ignored and
 # unreachable candidates are reported, never dropped.
 #
 # `check <owner/repo>` takes one reading. It is silent when the repository is
-# determinately not a fork, and loud when that could not be determined.
+# determinately not a fork, and loud when that could not be determined. It
+# reports and creates work; it never blocks the pull request. It deliberately
+# does not consult config/fork-sweep-ignore: that list scopes the weekly sweep
+# only, because a pull request landing against an ignored fork is exactly the
+# moment the reading is wanted.
 #
 # Output is one line per swept fork plus one coverage line:
 #   FORK_FRESHNESS: <owner/repo> status=<in-sync|behind|ahead|diverged> behind=<n> ahead=<n> upstream=<owner/repo> compare=<fork-branch>...<upstream-branch> action=<...>
@@ -51,7 +56,16 @@
 # that failed prints BACKLOG_MANUAL:, WAKE_MANUAL: or BRIDGE_MANUAL: on stderr
 # (stdout is the reading) and marks the reading itself with
 # MANUAL=<step>[+<step>], because "queued" claims all four artifacts.
-# Re-running never creates a second task for the same fork. --dispatch
+# Re-running never creates a second task for the same fork.
+#
+# The guard has a lifetime, because a guard that never expires turns the
+# instrument back into the warning it replaced: the first reading that comes back
+# behind=0 with no state/<id>.meta in flight retires it - the brief is moved
+# aside to data/<id>/brief.retired-<stamp>.md, keeping the evidence and clearing
+# the guard - so the fork's NEXT episode materialises a real task instead of
+# printing "already queued" over a task that closed weeks ago. A retirement that
+# could not be performed says so (RETIRE_MANUAL: on stderr, action= on the
+# reading) rather than leaving a stale guard silently in place. --dispatch
 # additionally launches the worker through bin/fm-spawn.sh when this home has a
 # clone of that fork and FM_FORK_SYNC_HARNESS or config/fork-sync-harness names
 # the harness to use; without it the task stays queued, because the sync pushes
@@ -260,11 +274,28 @@ clone_dir_for() {
   printf '%s\n' "$dir"
 }
 
+# sanitize_remote_url <url>: the same remote with any credential-bearing userinfo
+# removed. The brief is durable and travels to the evidence repository at
+# teardown, so a clone configured with an https token remote
+# (https://x-access-token:ghp_...@github.com/acme/widget.git) must not write that
+# token into another repository's history. The conventional credential-free ssh
+# user is kept, so the fleet's ssh alias remotes stay copy-pasteable; a scp-like
+# git@alias:owner/repo has no userinfo delimiter to strip and is untouched.
+sanitize_remote_url() {
+  local url=$1
+  case "$url" in
+    ssh://git@*) ;;
+    *://*@*) url=$(printf '%s' "$url" | LC_ALL=C sed 's#://[^/@]*@#://#') ;;
+  esac
+  printf '%s\n' "$url"
+}
+
 write_sync_brief() {
   local path=$1 slug=$2 up=$3 fork_branch=$4 up_branch=$5 behind=$6 ahead=$7 status=$8 taken=$9
   local clone push_hint=""
   if clone=$(clone_dir_for "$slug"); then
     push_hint=$(git -C "$clone" remote get-url origin 2>/dev/null || true)
+    [ -z "$push_hint" ] || push_hint=$(sanitize_remote_url "$push_hint")
   fi
   mkdir -p "$(dirname "$path")"
   {
@@ -428,7 +459,10 @@ ensure_sync_task() {
   }
   [ -z "$manual" ] || manual=" MANUAL=${manual#+}"
 
-  if ! mv -f "$BRIEF_TMP" "$brief" 2>/dev/null; then
+  # The move is checked by its result, not only by its status: mv onto an
+  # existing directory succeeds by moving the file INSIDE it, which would leave
+  # the brief somewhere nobody looks while the reading says queued.
+  if ! mv -f "$BRIEF_TMP" "$brief" 2>/dev/null || [ ! -f "$brief" ]; then
     brief_tmp_cleanup
     printf 'task %s NOT created: instructions could not be placed%s\n' "$id" "$manual"
     return 1
@@ -453,6 +487,39 @@ ensure_sync_task() {
   else
     printf 'task %s queued (worker could not be launched)%s\n' "$id" "$manual"
   fi
+}
+
+# retire_sync_task <slug>
+# The guard's lifetime, and the reason the instrument does not decay into the
+# warning it replaced. data/<id>/ is never removed - teardown keeps it as the
+# task's evidence custodian - so a guard keyed on the brief's mere existence
+# outlives the episode that created it: the fork is synced, the task closes, and
+# months later the same fork falls 50 behind and every sweep prints "already
+# queued" over a backlog item, a wake and a Bridge row that no longer exist.
+#
+# A reading of behind=0 with no state/<id>.meta in flight IS the end of the
+# episode, so that reading retires the guard: the brief is moved aside, not
+# deleted, because it carries the reading that opened the task and the directory
+# is evidence. Prints the action when there was one, nothing when there was
+# nothing to retire, and returns non-zero having printed why when the guard is
+# still standing - a stale guard left silently in place is the same false
+# "already queued" one episode later.
+retire_sync_task() {
+  local slug=$1 id brief stamp
+  id=$(sync_task_id "$slug")
+  brief="$DATA/$id/brief.md"
+  [ -f "$brief" ] || return 0
+  [ ! -f "$STATE/$id.meta" ] || return 0
+
+  stamp=$(date -u -d "@$(now_epoch)" '+%Y%m%dT%H%M%SZ' 2>/dev/null ||
+    date -u '+%Y%m%dT%H%M%SZ')
+  if ! mv -f "$brief" "$DATA/$id/brief.retired-$stamp.md" 2>/dev/null; then
+    printf 'RETIRE_MANUAL: %s is level again but sync task %s still holds data/%s/brief.md; move it aside by hand or the next behind reading will report it queued\n' \
+      "$slug" "$id" "$id" >&2
+    printf 'task %s NOT retired: stale instructions could not be moved aside\n' "$id"
+    return 1
+  fi
+  printf 'task %s retired\n' "$id"
 }
 
 # --- one fork ---------------------------------------------------------------
@@ -511,8 +578,17 @@ read_fork() {
   action=none
   if [ "$behind" -gt 0 ]; then
     BEHIND_COUNT=$((BEHIND_COUNT + 1))
-    action=$(ensure_sync_task "$slug" "$up" "$fork_branch" "$up_branch" \
-      "$behind" "$ahead" "$status") || action="task NOT created"
+    # The function composes its own failure line, naming the cause and carrying
+    # the MANUAL= marker; only an empty capture falls back to the bare literal,
+    # because overwriting a composed reason costs the operator both.
+    if ! action=$(ensure_sync_task "$slug" "$up" "$fork_branch" "$up_branch" \
+      "$behind" "$ahead" "$status"); then
+      [ -n "$action" ] || action="task NOT created"
+    fi
+  elif ! action=$(retire_sync_task "$slug"); then
+    [ -n "$action" ] || action="task NOT retired"
+  else
+    [ -n "$action" ] || action=none
   fi
   printf 'FORK_FRESHNESS: %s status=%s behind=%s ahead=%s upstream=%s compare=%s...%s action=%s\n' \
     "$slug" "$status" "$behind" "$ahead" "$up" "$fork_branch" "$up_branch" "$action"
@@ -537,6 +613,46 @@ qualify() {
     */*) printf '%s\n' "$entry" ;;
     *) printf '%s/%s\n' "$owner" "$entry" ;;
   esac
+}
+
+# registry_candidates <owner>: the fork candidates this home's project registry
+# knows about. data/projects.md is the per-home record of what this home
+# maintains, so a fork registered there but neither owned by the sweep owner nor
+# cloned here would otherwise be omitted entirely - no line, no unknown, no
+# count - which is the silent omission the sweep exists to end.
+#
+# A registered project this home has cloned needs nothing from here: the clone
+# scan already contributes its origin, which is the fork's real identity and
+# beats a name qualified with the wrong owner. One registered local-only is not
+# a forge repository at all, so it is emitted as "!<name>" and reported as
+# ignored: reading it as a 404 would spend an unknown on it every sweep, and
+# unknown coverage withholds the completion stamp, so a permanent false unknown
+# would make the sweep re-run forever without ever banking a clean one.
+registry_candidates() {
+  local owner=$1 reg="$DATA/projects.md" name mode
+  [ -f "$reg" ] || return 0
+  while IFS=$'\t' read -r name mode; do
+    [ -n "$name" ] || continue
+    [ ! -d "$PROJECTS/$name/.git" ] || continue
+    case "$mode" in
+      local-only) printf '!%s\n' "$name" ;;
+      *) qualify "$name" "$owner" ;;
+    esac
+  done <<< "$(
+    awk '
+      $1 == "-" && $2 != "" {
+        mode = "no-mistakes"
+        if ($3 ~ /^\[/) {
+          s = ""
+          for (i = 3; i <= NF; i++) { s = s (s == "" ? "" : " ") $i; if ($i ~ /\]$/) break }
+          gsub(/^\[|\]$/, "", s)
+          split(s, a, " ")
+          if (a[1] != "" && a[1] != "+yolo") mode = a[1]
+        }
+        printf "%s\t%s\n", $2, mode
+      }
+    ' "$reg"
+  )"
 }
 
 is_ignored() {
@@ -597,8 +713,9 @@ cmd_sweep() {
   fi
 
   # Candidates the enumeration cannot see: a clone whose origin belongs to
-  # another account, and any maintained fork with no clone and no owned copy.
-  local extra_rows extra dir
+  # another account, a project this home's registry maintains but has not cloned,
+  # and any maintained fork with no clone and no owned copy.
+  local extra_rows extra dir name
   extra_rows=$(
     if [ -d "$PROJECTS" ]; then
       for dir in "$PROJECTS"/*/; do
@@ -606,6 +723,7 @@ cmd_sweep() {
         origin_slug "${dir%/}"
       done
     fi
+    registry_candidates "$owner"
     config_list maintained-forks | while IFS= read -r extra; do
       [ -n "$extra" ] || continue
       qualify "$extra" "$owner"
@@ -654,6 +772,16 @@ cmd_sweep() {
     case "$seen" in *$'\n'"$slug"$'\n'*) continue ;; esac
     seen="$seen$slug"$'\n'
     repos=$((repos + 1))
+    # A registered local-only project has no forge identity to read, and saying
+    # so out loud is the point: it is accounted for by name, not dropped.
+    case "$slug" in
+      '!'*)
+        name=${slug#'!'}
+        ignored=$((ignored + 1))
+        printf 'FORK_FRESHNESS: %s status=ignored reason=registered local-only in data/projects.md and not cloned here, so it has no forge repository to read\n' "$name"
+        continue
+        ;;
+    esac
     if is_ignored "$slug"; then
       ignored=$((ignored + 1))
       printf 'FORK_FRESHNESS: %s status=ignored reason=listed in config/fork-sweep-ignore\n' "$slug"
@@ -727,8 +855,22 @@ while [ $# -gt 0 ]; do
   case "$1" in
     --if-due) IF_DUE=1 ;;
     --dispatch) DISPATCH=1 ;;
-    --owner) shift; OWNER_ARG=${1:-} ;;
-    --owner=*) OWNER_ARG=${1#--owner=} ;;
+    # A flag whose value is missing must not sweep the default owner and must not
+    # die on the loop's own trailing shift with nothing said: every other
+    # malformed option here exits 2 with a diagnostic, and this one is no
+    # different. A value that looks like the next flag is missing too.
+    --owner)
+      shift
+      case "${1:-}" in
+        ''|-*) printf 'fm-fork-freshness: --owner needs a login\n' >&2; exit 2 ;;
+      esac
+      OWNER_ARG=$1
+      ;;
+    --owner=*)
+      OWNER_ARG=${1#--owner=}
+      [ -n "$OWNER_ARG" ] ||
+        { printf 'fm-fork-freshness: --owner needs a login\n' >&2; exit 2; }
+      ;;
     -*) printf 'fm-fork-freshness: unknown option: %s\n' "$1" >&2; exit 2 ;;
     *) TARGET=$1 ;;
   esac
