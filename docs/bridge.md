@@ -294,10 +294,15 @@ Zones, in the order the captain reads them:
 5. **Notable events** - capped, with a visible overflow pointer to the record.
 6. **Fleet** - one row per task.
 
-Because an ask that scrolls out of view is the failure this surface exists to prevent, the open-ask count rides in the browser tab title and in a counter that travels with the viewport.
-That counter lives in a reserved right-hand gutter, not across the top.
+Because an ask that scrolls out of view is the failure this surface exists to prevent, the open-ask count rides in the browser tab title, and again in the page header beside the other tallies.
+
+**Nothing on the board is out of flow.**
 Chrome that travels with a vertically scrolling page and spans the content column ends up over every row that passes it, and parks an anchor target underneath itself - two browser layout audits proved exactly that, on rows in two different zones.
-A gutter the content is never laid out inside is the one place viewport-fixed chrome cannot come to cover it, and nothing else is allowed to resize it.
+That was answered for a while by a reserved right-hand gutter no content was ever laid out inside, which viewport-fixed chrome could occupy without covering anything.
+Once the ruling composer was removed, the only thing left in that gutter was a number - and the tab title already carries the count, from a place that cannot cover a row and does not scroll at all, including when the board is behind another window.
+So the gutter went too.
+The header count is an ordinary tally that jumps to the asks index, which is the one thing a bare number would have lost, and the rule the gutter existed to satisfy is now kept by having nothing viewport-fixed left to place.
+`tests/fm-bridge.test.sh` parses the emitted stylesheet and fails on any `fixed`, `absolute`, or `sticky` rule, and on a reserved gutter with nothing to put in it.
 Asks carry their age, and one older than `FM_BRIDGE_AGING_SECONDS` (default 24h) is flagged: an ask that old is usually one that was already answered and never closed, and nothing about "open" distinguishes those from the rest.
 
 Answer forms are mandatory on asks, and they are shown rather than offered as controls: the board has no send of its own, so an option that looked clickable would promise an egress this page does not have.

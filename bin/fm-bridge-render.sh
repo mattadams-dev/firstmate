@@ -1114,11 +1114,15 @@ h2 {
    captain cannot annotate, on the surface whose whole input path is
    annotation. Measured, both directions:
    docs/verification/bridge-hosted-input.md. */
-.answers { margin-top:.6rem; display:flex; gap:.4rem; flex-wrap:wrap; align-items:center; }
-.answers .lbl { color:var(--tn-muted); font-size:.74rem; margin-right:.15rem; }
+/* Listed, not offered. A bordered box in a row reads as a button even when it
+   is inert, and a button on this board would promise a send the page does not
+   have. One option per line, marked like a quotation, reads as "these are the
+   choices" - which is what they are. */
+.answers { margin-top:.6rem; display:flex; flex-direction:column; gap:.2rem; align-items:flex-start; }
+.answers .lbl { color:var(--tn-muted); font-size:.74rem; }
 .answers .ans {
-  font-size:.82rem; color:var(--tn-fg); background:var(--tn-deep);
-  border:1px solid var(--tn-line); border-radius:.3rem; padding:.25rem .55rem;
+  font-size:.82rem; color:var(--tn-fg); padding-left:.55rem;
+  border-left:2px solid var(--tn-line); overflow-wrap:anywhere;
 }
 
 .checkline { margin-top:.5rem; font-size:.76rem; color:var(--tn-muted); overflow-x:auto; }
@@ -1178,36 +1182,19 @@ h3.projhead .refs {
 }
 .local-terms { margin:0 0 .8rem; font-size:.79rem; line-height:1.5; color:var(--tn-dim); border-left:2px solid var(--tn-line); padding-left:.6rem; }
 
-/* THE RAIL. The ask counter has to travel with the viewport so an open ask
-   cannot be scrolled past - and it must never cover the board to do it.
-   Chrome that travels with a vertically scrolling page ALWAYS ends up over the
-   content when it sits across the top: every row passes behind it on the way
-   past, and an anchor jump parks its target underneath it. A browser layout
-   audit proved exactly that, twice, on rows in two different zones - the row
-   was never the problem, the bar above it was.
-   So the chrome moves out of the content column entirely. The page reserves a
-   right-hand gutter, no content is ever laid out inside it, and everything
-   viewport-fixed lives there. Scrolling is vertical, so a column the content
-   never enters is the one place fixed chrome cannot come to cover it. */
-:root { --rail:3.6rem; }
-body { padding-right:var(--rail); }
-#rail {
-  position:fixed; top:0; right:0; bottom:0; width:var(--rail); z-index:6;
-  display:flex; flex-direction:column; gap:.5rem; padding:.5rem .4rem;
-  background:var(--tn-deep); border-left:1px solid var(--tn-line);
-  overflow-y:auto; overflow-x:hidden;
-}
-#pin { flex:none; }
-#pin a, #pin .clear {
-  display:block; text-align:center; text-decoration:none; border-radius:.4rem;
-  padding:.45rem .2rem; font-size:.62rem; text-transform:uppercase;
-  letter-spacing:.05em; line-height:1.3; white-space:nowrap;
-}
-#pin a { background:#3d2430; color:var(--tn-red); }
-#pin a:hover { outline:1px solid var(--tn-red); }
-#pin .clear { background:var(--tn-panel); color:var(--tn-dim); }
-#pin b { display:block; font-size:1.35rem; letter-spacing:0; }
-#pin .since { display:block; color:var(--tn-muted); margin-top:.15rem; }
+/* NOTHING ON THIS PAGE IS OUT OF FLOW. That is a hard rule, and it was earned:
+   chrome that travels with a vertically scrolling page ends up over the content
+   it announces - every row passes behind it, and an anchor jump parks its
+   target underneath it. A browser layout audit proved exactly that, twice, on
+   rows in two different zones; the row was never the problem, the bar above it
+   was.
+   The answer used to be a reserved right-hand gutter that fixed chrome could
+   live in without covering anything. With the ruling composer gone, that whole
+   column existed to hold one number - and the count already rides somewhere
+   that can never cover a row and never scrolls away at all: the tab title.
+   So the gutter went with it, the count sits in the page's own header beside
+   the other tallies, and the rule that made the gutter necessary is kept by
+   leaving nothing viewport-fixed to place. */
 
 ol.asks { list-style:none; margin:0; padding:0; counter-reset:ask; }
 ol.asks li { border-bottom:1px solid rgba(59,66,97,.4); }
@@ -1240,6 +1227,10 @@ ol.asks li.aging .age { color:var(--tn-orange); }
   margin:.2rem 0 .9rem; font-size:.82rem; line-height:1.5; color:var(--tn-dim);
   border-left:2px solid var(--tn-blue); padding-left:.6rem;
 }
+
+a.tally { text-decoration:none; }
+a.tally:hover { outline:1px solid var(--tn-red); }
+.tally .since { display:block; color:var(--tn-muted); font-size:.7rem; margin-top:.1rem; }
 
 .legend { display:flex; flex-wrap:wrap; gap:.9rem; font-size:.76rem; color:var(--tn-dim); margin-top:.6rem; }
 .legend span::before {
@@ -1285,9 +1276,11 @@ def link(href, label=None, external=None):
     authoring fix rather than something to route around.
 
     It exempts that anchor from annotation capture and nothing else: every other
-    element stays annotatable and rulings still queue through the annotation
-    layer. The answer-form buttons need nothing, because `button` is already on
-    the native list.
+    element stays annotatable, which is the whole input path this board has.
+    This is the ONLY place the attribute is used, and a link is the only thing
+    that earns it - an anchor's own job is to navigate, so trading its
+    annotatability for a working left-click is a fair trade nothing else on the
+    board can make.
 
     External links open in a new tab because the board is served in an iframe,
     and a same-tab navigation would replace the board with the PR.
@@ -1469,28 +1462,6 @@ def render_html(doc):
         % ("Bridge - %d need you" % len(asks) if asks else "Bridge - clear"))
     add("<style>%s</style></head><body>" % CSS)
 
-    # Fixed to the viewport and OUTSIDE the content column: an ask cannot be
-    # scrolled past, and the counter that guarantees it never covers a row to
-    # do so. Everything in here lives in the gutter the page reserves for it.
-    add('<aside id="rail">')
-    if asks:
-        # The genuinely longest-waiting ask, not the first row of a
-        # severity-sorted list. Calling the top row "oldest" would be a claim
-        # the ordering does not support.
-        longest = max(asks, key=lambda k: items[k]["age_seconds"] or 0)
-        add('<div id="pin"><a href="#waiting" data-lavish-action '
-            'title="%d waiting on you, longest %s">'
-            "<b>%d</b>asks"
-            '<span class="since">%s</span></a></div>'
-            % (len(asks), esc(items[longest]["age_label"]), len(asks),
-               esc(items[longest]["age_label"])))
-    else:
-        add('<div id="pin"><div class="clear" '
-            'title="0 waiting on you, the queue is clear">'
-            "<b>0</b>clear</div></div>")
-
-    add("</aside>")
-
     add('<header class="top"><div class="wrap">')
     add('<h1>Bridge<span class="sub">fleet state, generated from the ledger</span></h1>')
     add(freshness_html(doc["folded_at"]))
@@ -1501,8 +1472,24 @@ def render_html(doc):
     # is always a chip they can find in a tally.
     total = counts["board_items"]
     add('<div class="tallies">')
-    add('<div class="tally ask" title="asks: someone owes a decision AND the '
-        'work is still live"><b>%d</b>waiting on you</div>' % len(asks))
+    # The count, in normal flow, where it cannot come to cover a row. It jumps
+    # to the index rather than only reporting a number, which is the one thing
+    # the retired gutter counter did that a tally does not - and it carries the
+    # longest wait, because "3 waiting" and "3 waiting, oldest 2 days" are
+    # different facts and only the second one is alarming.
+    if asks:
+        # The genuinely longest-waiting ask, not the first row of a
+        # severity-sorted list. Calling the top row "oldest" would be a claim
+        # the ordering does not support.
+        longest = max(asks, key=lambda k: items[k]["age_seconds"] or 0)
+        add('<a class="tally ask" href="#waiting" data-lavish-action '
+            'title="asks: someone owes a decision AND the work is still live">'
+            "<b>%d</b>waiting on you"
+            '<span class="since">longest %s</span></a>'
+            % (len(asks), esc(items[longest]["age_label"])))
+    else:
+        add('<div class="tally ask" title="asks: someone owes a decision AND the '
+            'work is still live"><b>%d</b>waiting on you</div>' % len(asks))
     if doc["cocaptain_asks"]:
         add('<div class="tally co"><b>%d</b>with the co-captain</div>'
             % len(doc["cocaptain_asks"]))
