@@ -34,16 +34,35 @@ compare() {  # <prev> <cur>
 # process whose CPU genuinely advances. That is the difference between this and
 # the version the review found vacuous, where a fake backend made the evidence
 # unreadable and every assertion passed for a reason unrelated to its subject.
+# The pane a driver observes. Each test picks the process that matches what it
+# claims to be observing, because "frozen" and "advancing" must be properties of
+# the subject rather than of how loaded the host happens to be.
+#
+# This defaulted to the test shell itself, which is a live process doing work:
+# the frozen-pane assertions then passed only while the harness happened to burn
+# less than one clock tick between two calls, and failed under a full-suite
+# sweep. A test whose verdict depends on ambient load is not measuring what it
+# says it measures.
+PANE_PID=
 BURNER_PID=
-start_cpu_burner() {
+IDLE_PID=
+start_panes() {
   bash -c 'while :; do :; done' >/dev/null 2>&1 &
   BURNER_PID=$!
+  sleep 600 >/dev/null 2>&1 &
+  IDLE_PID=$!
+  PANE_PID=$IDLE_PID
 }
-stop_cpu_burner() {
-  [ -n "$BURNER_PID" ] || return 0
-  kill "$BURNER_PID" 2>/dev/null || true
-  wait "$BURNER_PID" 2>/dev/null || true
+stop_panes() {
+  local p
+  for p in "$BURNER_PID" "$IDLE_PID"; do
+    [ -n "$p" ] || continue
+    kill "$p" 2>/dev/null || true
+    wait "$p" 2>/dev/null || true
+  done
   BURNER_PID=
+  IDLE_PID=
+  PANE_PID=
 }
 
 # run_reset_driver <dir> <state> <win> <key> <rendered>
@@ -62,7 +81,7 @@ health_evidence_reset "$win" "\$1" "$state/.stale-since-$key" "$state/.wedge-esc
 printf 'rc=%s\n' "\$?"
 DRIVER
   chmod +x "$dir/reset-driver.sh"
-  FM_TEST_PANE_PID="${BURNER_PID:-$$}" "$dir/reset-driver.sh" "$rendered"
+  FM_TEST_PANE_PID="$PANE_PID" "$dir/reset-driver.sh" "$rendered"
 }
 
 # run_timer_driver <dir> <state> <win> <key> <subject> <rendered>
@@ -86,7 +105,7 @@ wedge_timer_check "$win" "$state/.stale-since-$key" test-label "$state/.wedge-es
 printf 'rc=%s\n' "\$?"
 DRIVER
   chmod +x "$dir/timer-driver.sh"
-  FM_TEST_PANE_PID="${BURNER_PID:-$$}" "$dir/timer-driver.sh" "$subject" "$rendered"
+  FM_TEST_PANE_PID="$PANE_PID" "$dir/timer-driver.sh" "$subject" "$rendered"
 }
 
 # --- health resets: each signal on its own -----------------------------------
@@ -163,6 +182,7 @@ test_ratchet_resets_and_logs_the_transition() {
   mkdir -p "$state"
   win='lab:w1:p1'
   key=$(printf '%s' "$win" | tr ':/.' '___')
+  PANE_PID=$IDLE_PID   # a genuinely frozen pane: alive, consuming no CPU
   printf '9\n' > "$state/.wedge-escalations-$key"
   printf '1000\n' > "$state/.stale-since-$key"
 
@@ -209,6 +229,7 @@ test_the_two_resets_do_not_touch_each_others_state() {
   mkdir -p "$state"
   win='lab:w1:p1'
   key=$(printf '%s' "$win" | tr ':/.' '___')
+  PANE_PID=$BURNER_PID
 
   # Both alarms raised at once.
   printf '4\n' > "$state/.wedge-escalations-$key"
@@ -257,6 +278,7 @@ test_a_busy_pane_still_escalates_while_its_cpu_advances() {
   mkdir -p "$state"
   win='lab:w2:p2'
   key=$(printf '%s' "$win" | tr ':/.' '___')
+  PANE_PID=$BURNER_PID   # a genuinely busy pane: CPU advances between samples
 
   # A readable, advancing process signal - the exact evidence that would reset a
   # liveness alarm - with the rendered pane frozen.
@@ -287,13 +309,13 @@ test_a_busy_pane_still_escalates_while_its_cpu_advances() {
   pass "movement resets the liveness alarm and never the busy turn-completion alarm"
 }
 
+start_panes
 test_each_signal_alone_proves_health
 test_the_measured_specimen_reads_as_health
 test_a_frozen_lane_is_never_pardoned
 test_a_receding_counter_is_not_health
 test_unreadable_signals_are_unknown
 test_ratchet_resets_and_logs_the_transition
-start_cpu_burner
 test_the_two_resets_do_not_touch_each_others_state
 test_a_busy_pane_still_escalates_while_its_cpu_advances
-stop_cpu_burner
+stop_panes
