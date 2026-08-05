@@ -119,7 +119,7 @@ state/               volatile runtime signals; gitignored
   .afk               durable away-mode flag; present = sub-supervisor may inject escalations (set by /afk, cleared on user return)
   .watch.lock .wake-queue.lock watcher singleton and queue serialization locks
   .claude-autoarm.lock .claude-autoarm-epoch .claude-autoarm-failure-notified .claude-autoarm-failure-alarmed .turnend-claude-blocks .turnend-claude-blocks.lock   Claude Stop auto-arm single-flight, epoch, failure-episode, attended-alarm, guard-budget, and budget-lock records; never touch
-  .hash-* .count-* .stale-* .stale-since-* .paused-* .wedge-escalations-* .health-sample-* .seen-* .hb-surfaced-* .last-* .heartbeat-streak .watch-successor-output.* .watch-deliveries.*   watcher internals; never touch
+  .hash-* .count-* .stale-* .stale-since-* .paused-* .wedge-escalations-* .health-sample-* .step-evidence-* .seen-* .hb-surfaced-* .last-* .heartbeat-streak .watch-successor-output.* .watch-deliveries.*   watcher internals; never touch
   .safe-kill.log     durable record of every termination bin/fm-safe-kill.sh performed or refused, with the reason it was given
   .watch-triage.log  watcher's absorbed-wake debug log (size-capped); never relied on, safe to delete
   .last-watcher-beat watcher liveness beacon, touched every poll (including while absorbing benign wakes); guard scripts read it

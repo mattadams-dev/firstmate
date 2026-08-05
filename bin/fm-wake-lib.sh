@@ -499,6 +499,11 @@ fm_lock_release() {
 #     state     .wedge-escalations-<key>, .stale-since-<key>
 #     evidence  that pane's own rendered output, process-tree CPU, or live
 #               descendants, compared across two samples.
+#     sibling   step_evidence_reset (same file) answers the SAME subject from a
+#               second evidence source - a step this lane's own run record
+#               marks completed since the previous escalation. A recorded
+#               outcome, not a sample, and still an event rather than an
+#               interval, so the never-by-elapsed-time rule holds unchanged.
 #
 # THE BOUNDARY: neither reset may touch the other's state. A healthy watcher is
 # no evidence that crewmate X is unstuck, and a computing crewmate is no evidence

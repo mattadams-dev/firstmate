@@ -64,7 +64,7 @@ The 2026-08-04 arms are consistent with that inventory: `state/.claude-autoarm-e
 A forked session does not hold `state/.lock` - the pre-fork session still does - so its hook is inert by design, and the arms came from the manual and adapter paths instead.
 That the auto-arm refused is correct behavior, not the defect.
 
-## One alarm-reset rule, two applications
+## One alarm-reset rule, three applications
 
 This seam raises two alarms, and they share one rule:
 
@@ -73,16 +73,19 @@ This seam raises two alarms, and they share one rule:
 Elapsed time is forbidden because a time-based amnesty pardons precisely the slow failure an alarm exists to catch, and does it silently.
 Unknown clears nothing and accelerates nothing.
 
-The rule is stated once, in `bin/fm-wake-lib.sh` above `fm_failure_episode_reset`, and has exactly two applications:
+The rule is stated once, in `bin/fm-wake-lib.sh` above `fm_failure_episode_reset`, and has three applications across two subjects:
 
 | | subject | state cleared | evidence |
 | --- | --- | --- | --- |
 | `fm_failure_episode_reset` | the home's supervision chain - is anything supervising at all? | `.turnend-claude-blocks`, `.claude-autoarm-failure-notified`, `.claude-autoarm-failure-alarmed` | `fm_watcher_healthy`: a verified live identity-matched watcher with a fresh beacon |
 | `health_evidence_reset` | one crewmate's pane - is that worker wedged? | `.wedge-escalations-<key>`, `.stale-since-<key>` | that pane's own rendered output, process-tree CPU, or live descendants, compared across two samples |
+| `step_evidence_reset` | the same pane, same question | the same state | a step this lane's own no-mistakes run record marks completed since the previous escalation |
 
-They are deliberately two functions rather than one.
+The first two are deliberately separate functions rather than one.
 A single reset spanning both would dispatch on subject into branches sharing no evidence and no state - two mechanisms wearing one name, which hides the boundary instead of making it checkable.
 Neither signal can answer the other's question: a healthy watcher is no evidence that a given crewmate is unstuck, and a computing crewmate is no evidence that the home is supervised.
+
+The third shares the second's subject and state, because it answers the same question from a different kind of evidence - see "Two kinds of evidence for the pane alarm" below.
 
 A beacon *freshness* requirement is not a time-based amnesty.
 Requiring recent positive evidence is the opposite of pardoning elapsed silence, and the two must not be confused when reading `fm_watcher_healthy` as an evidence source.
@@ -108,6 +111,24 @@ An alarm that can never sound is the mirror image of a guard that refuses everyt
 
 This is a different question from busy state, and does not cross that boundary: `bin/fm-busy-lib.sh` still owns the semantic turn lifecycle and still excludes CPU and child processes as state signals.
 Busy state answers whether a turn is in progress; this answers whether anything moved.
+
+### Two kinds of evidence for the pane alarm
+
+The three sampled signals all require catching the lane in the act, and a test-heavy validation step is the one shape they are worst at: it burns CPU while emitting nothing.
+Measured 2026-08-05 on one lane, the escalation counter reached 6 while that lane completed three validation steps in sequence - review completed with one info finding, test completed green, document then started.
+
+A completed step is a *recorded outcome* rather than a sample.
+The pipeline durably wrote down that a unit of work finished, so the evidence survives however sparsely it is read, it needs no sampling window, and a wedged process cannot produce it.
+It was already sitting in the run record while the alarm counted up across two of them.
+
+`step_evidence_reset` reads it through `bin/fm-crew-state.sh --steps`, which already owns attributing a run to a crew by branch and code identity - evidence attributed to the wrong run would be worse than no evidence.
+Only a step the record marks `completed` is ever listed, so a running, pending, or gate-parked step never becomes grounds to clear an alarm.
+Two records from different runs are not comparable and read as unknown.
+The read happens at most once per escalation interval, at the moment the ratchet would turn, so the bounded pipeline call stays off the per-poll path.
+
+The baseline it compares against is recorded at each escalation attempt, so "since" is measured in escalations, not in polls or seconds.
+That keeps the reset an *event* - one more step finished than last time - and never an interval, so the never-by-elapsed-time prohibition holds unchanged.
+Turning this check into a timer, or letting it decay into one by resetting on the age of a record or of a step, would pardon exactly the slow wedge the mechanism exists to catch.
 
 ## Ownership
 

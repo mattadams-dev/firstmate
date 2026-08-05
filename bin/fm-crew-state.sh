@@ -49,6 +49,14 @@
 #
 # Read-only and side-effect free. Always exits 0 on a successful read regardless
 # of state; exit 2 only on a usage error (no id).
+#
+# `--steps` answers a DIFFERENT question off the same run lookup: not "what is
+# this crew doing now?" but "which steps of its run have finished?", printed as
+#   run=<run-id> completed=<step,step,...>     (completed=- when none yet)
+# and EMPTY when no run is attributable to this crew. It lives here because
+# steps 1-2 above already own run attribution - branch match plus code identity -
+# and a completed-step list attributed to the wrong run is worse than none.
+# Only a step the run record marks `completed` is ever listed.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -66,7 +74,13 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 . "$SCRIPT_DIR/fm-busy-lib.sh"
 
 ID=${1:-}
-[ -n "$ID" ] || { echo "usage: fm-crew-state.sh <id>" >&2; exit 2; }
+[ -n "$ID" ] || { echo "usage: fm-crew-state.sh <id> [--steps]" >&2; exit 2; }
+MODE=state
+case "${2:-}" in
+  '')      ;;
+  --steps) MODE=steps ;;
+  *)       echo "usage: fm-crew-state.sh <id> [--steps]" >&2; exit 2 ;;
+esac
 
 META="$STATE/$ID.meta"
 LOG="$STATE/$ID.status"
@@ -81,7 +95,12 @@ case "$FM_CREW_STATE_RUNS_LIMIT" in ''|*[!0-9]*) FM_CREW_STATE_RUNS_LIMIT=200 ;;
 SEP=' · '
 
 # Emit the one canonical line and exit 0. Detail is optional.
+# In --steps mode there is no current-state line to print: every early exit that
+# routes through here (missing meta, torn-down worktree, no attributable run)
+# means "no readable run record", which the caller must read as unknown. Printing
+# nothing is how that is said.
 emit() {  # <state> <source> [detail]
+  [ "$MODE" = steps ] && exit 0
   local line="state: $1${SEP}source: $2"
   [ -n "${3:-}" ] && line="$line${SEP}$3"
   printf '%s\n' "$line"
@@ -260,6 +279,32 @@ nm_gate_findings_count() {
   case "$rest" in ''|*[!0-9]*) return 0 ;; esac
   printf '%s' "$rest"
 }
+# The completed-step evidence line for --steps. Only rows the run record marks
+# `completed` are listed: a running, pending, or gate-parked step is work in
+# progress, and counting one as a finished unit of work would hand the watcher
+# an alarm reset for a lane that may be wedged inside that very step.
+# A findings row cannot collide - its second field is a severity, never
+# "completed" - and the `steps[N]{...}` table header carries a bracket, so
+# neither matches the row pattern.
+emit_completed_steps() {
+  local id list
+  [ "$HAVE_RUN" = 1 ] || return 0
+  # A coarse runs-list hit carries a status word and nothing else, so it can
+  # neither confirm nor deny that a step finished.
+  [ "$RUN_SOURCE" = full ] || return 0
+  id=$(strip_quotes "$(nm_field id)")
+  [ -n "$id" ] || return 0
+  list=$(printf '%s\n' "$RUN_OUT" | awk '
+    /^[[:space:]]*[A-Za-z][A-Za-z0-9_-]*,[[:space:]]*"?completed"?[[:space:]]*,/ {
+      split($0, f, ",")
+      gsub(/[[:space:]"]/, "", f[1])
+      out = (out == "" ? f[1] : out "," f[1])
+    }
+    END { print out }
+  ')
+  printf 'run=%s completed=%s\n' "$id" "${list:--}"
+}
+
 log_reports_ci_ready() {
   [ "$LOG_VERB" = "done" ] || return 1
   case "$(status_line_note "$LOG_LINE")" in
@@ -451,6 +496,15 @@ if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && command -v no-mistakes >/dev/n
       fi
     fi
   fi
+fi
+
+# --- completed-step evidence (--steps) --------------------------------------
+# Answered from the attributed run alone, before any current-state
+# interpretation: which steps have finished is a property of the record, not of
+# what the crew is doing at this instant.
+if [ "$MODE" = steps ]; then
+  emit_completed_steps
+  exit 0
 fi
 
 # --- run-step authoritative path -------------------------------------------
