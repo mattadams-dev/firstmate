@@ -73,6 +73,9 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-afk-return.sh`       | Own deterministic return shutdown, catch-up evidence, and the firstmate-actionable blocker gate |
 | `fm-supervisor-target-lib.sh` | Resolve the shared supervisor target and backend for the daemon and launcher       |
 | `fm-supervise-daemon.sh` | Presence-gated away-mode sub-supervisor: self-handle routine wakes, guard injection by the detected primary harness, escalate batched digests, alert on failed delivery |
+| `fm-rebirth.sh`          | Command surface over session rebirth: record a footprint reading, report status, test quiescence, ask the session to exit, claim, and verify the premise (docs/session-rebirth.md) |
+| `fm-rebirth-lib.sh`      | The single owner of the context-footprint reading, the token threshold, and the quiescence boundary |
+| `fm-session-launch.sh`   | Launch wrapper that relaunches a primary session fresh when it ends because a rebirth was armed; terminates nothing |
 | `fm-crew-state.sh`       | Print one deterministic current-state line for a crew                                |
 | `fm-bridge.sh`           | Write, route, and lint the captain-facing records in the Bridge ledger (docs/bridge.md) |
 | `fm-bridge-render.sh`    | The one fold over that ledger: folded state, lifecycle answers, and the generated board |
