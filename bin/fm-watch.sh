@@ -289,11 +289,26 @@ recorded_windows() {
 # below).
 FM_WEDGE_DEMAND_INSPECT_COUNT=${FM_WEDGE_DEMAND_INSPECT_COUNT:-3}
 
+# The escalation count and the step-evidence baseline are ONE piece of state.
+# The baseline means "what this lane's run record said at the escalation this
+# count is measured from", so a baseline that outlives its count describes an
+# alarm window that has already ended, and pre-window evidence would then pardon
+# a fresh wedge - the eager direction, which is the dangerous one. Every site
+# that drops the count drops the baseline with it, through here.
+# step_evidence_reset is the one exception, and only because it rewrites the
+# baseline to the current reading before it drops the count: that baseline
+# belongs to the window the reset opens, not to the one it closes.
+clear_wedge_escalation() {  # <key>
+  rm -f "$STATE/.wedge-escalations-$1" "$STATE/.step-evidence-$1"
+}
+
 # Repeat-poll wedge-timer bookkeeping for an already-classified stale hash
 # absorbed as provably-working - repairs a missing/corrupt timer (self-heals a
 # watcher restart between recording the hash and recording the timer), or
-# escalates once STALE_ESCALATE_SECS have elapsed. Never re-reads the crew
-# state (the costly check already ran once, at classification time). Shared by
+# escalates once STALE_ESCALATE_SECS have elapsed. Re-reads the crew state only
+# at the moment the ratchet would turn, at most once per escalation interval
+# (see step_evidence_reset); the per-poll path never re-reads it, because the
+# costly classification check already ran once, at classification time. Shared by
 # both places a hash can be absorbed this way: the plain non-terminal path,
 # and the stale_is_terminal-overridden path (a captain-relevant status-log
 # line that an active run/busy pane outranked).
@@ -321,11 +336,92 @@ health_evidence_reset() {  # <window> <rendered-hash> <since-file> <escalation-c
   [ "$verdict" -eq 0 ] || return 1
   n=$(cat "$escalation_file" 2>/dev/null || echo 0)
   case "$n" in ''|*[!0-9]*) n=0 ;; esac
-  rm -f "$since_file" "$escalation_file"
+  rm -f "$since_file"
+  clear_wedge_escalation "$key"
   # Logged as a transition, not merely dropped, so the alarm history stays
   # reconstructable: a count that silently vanishes is indistinguishable from
   # one that was never raised.
   triage_log "wedge escalation reset by proven health: $win (escalation $n -> 0, advanced: ${FM_HEALTH_ADVANCED:-none})"
+  return 0
+}
+
+# --- the second evidence source for the SAME alarm: a completed step ---------
+#
+# The three sampled signals above all require catching the lane in the act, and
+# a test-heavy validation step is precisely the shape that burns CPU while
+# emitting nothing - the shape they are worst at. Measured 2026-08-05: one
+# lane's escalation counter reached 6 while that lane completed three
+# validation steps in sequence.
+#
+# A completed step is a RECORDED OUTCOME, not a sample. The pipeline durably
+# wrote down that a unit of work finished, so the evidence survives however
+# sparsely this is read, needs no sampling window, and cannot be produced by a
+# wedged process. It was already sitting in the run record while the alarm
+# counted up across two of them.
+#
+# STILL NEVER TIME. This is an EVENT - one more step finished than last time -
+# not an interval, so it does not weaken the standing prohibition one line of
+# code above it. Do NOT "simplify" this into a timer, and do not let it decay
+# into one by resetting on the age of the record, the age of a step, or how
+# long a step has been running. A time-based amnesty pardons exactly the slow
+# wedge this whole mechanism exists to catch, and it does it silently.
+#
+# fm-crew-state.sh --steps owns the read, because it already owns attributing a
+# run to this crew by branch AND code identity. Evidence attributed to the
+# wrong run would be worse than no evidence.
+FM_STEP_GAINED=
+step_evidence_advanced() {  # <previous-evidence> <current-evidence>
+  local prev=$1 cur=$2 prev_run cur_run prev_list cur_list step gained=
+  FM_STEP_GAINED=
+  [ -n "$prev" ] && [ -n "$cur" ] || return 2
+  prev_run=$(evidence_field "$prev" run); cur_run=$(evidence_field "$cur" run)
+  [ -n "$prev_run" ] && [ -n "$cur_run" ] || return 2
+  # Two records from different runs are not comparable: the later one says
+  # nothing about what happened between these two escalations. Not comparable
+  # is unknown, and unknown clears no alarm.
+  [ "$prev_run" = "$cur_run" ] || return 2
+  prev_list=$(evidence_field "$prev" completed)
+  cur_list=$(evidence_field "$cur" completed)
+  [ -n "$cur_list" ] || return 2
+  for step in $(printf '%s' "$cur_list" | tr ',' ' '); do
+    [ "$step" = '-' ] && continue
+    case ",$prev_list," in
+      *",$step,"*) continue ;;
+    esac
+    gained="$gained $step"
+  done
+  [ -n "$gained" ] || return 1
+  FM_STEP_GAINED=${gained# }
+  return 0
+}
+
+evidence_field() {  # <evidence-line> <key>
+  printf '%s\n' "$1" | tr ' ' '\n' | sed -n "s/^$2=//p" | head -1
+}
+
+# 0 when this lane's run record shows a step completed SINCE THE PREVIOUS
+# ESCALATION, having cleared the escalation count. The baseline is recorded at
+# each escalation attempt, so "since" is measured in escalations rather than in
+# polls or seconds.
+step_evidence_reset() {  # <window> <escalation-count-file>
+  local win=$1 escalation_file=$2 key task evidence_file prev cur n
+  task=$(window_to_task "$win" "$STATE")
+  [ -n "$task" ] || return 1
+  cur=$("$FM_CREW_STATE_BIN" "$task" --steps 2>/dev/null) || true
+  # No readable run record is unknown, not health: leave the alarm untouched.
+  [ -n "$cur" ] || return 1
+  key=$(printf '%s' "$win" | tr ':/.' '___')
+  evidence_file="$STATE/.step-evidence-$key"
+  prev=$(cat "$evidence_file" 2>/dev/null || true)
+  printf '%s\n' "$cur" > "$evidence_file" 2>/dev/null || true
+  step_evidence_advanced "$prev" "$cur" || return 1
+  n=$(cat "$escalation_file" 2>/dev/null || echo 0)
+  case "$n" in ''|*[!0-9]*) n=0 ;; esac
+  rm -f "$escalation_file"
+  # Logged as a transition with the evidence that caused it, the same contract
+  # health_evidence_reset follows: a count that silently vanishes is
+  # indistinguishable from one that was never raised.
+  triage_log "wedge escalation reset by completed pipeline step: $win (escalation $n -> 0, completed: $FM_STEP_GAINED)"
   return 0
 }
 
@@ -364,6 +460,17 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-file> 
     *)
       age=$(( $(date +%s) - since ))
       if [ "$age" -ge "$STALE_ESCALATE_SECS" ]; then
+        # Last chance before the ratchet turns: did this lane's own run record
+        # finish a step since the previous escalation? That is a recorded
+        # outcome the sampled signals above cannot see through a static,
+        # silent, test-heavy step. Read only here, at most once per escalation
+        # interval, so the bounded pipeline call stays off the per-poll path.
+        # Liveness only: the busy alarm's counterpart is a completed TURN, not
+        # a completed pipeline step.
+        if [ "$subject" = liveness ] && step_evidence_reset "$win" "$escalation_file"; then
+          date +%s > "$since_file"
+          return 0
+        fi
         n=$(( $(cat "$escalation_file" 2>/dev/null || echo 0) + 1 ))
         echo "$n" > "$escalation_file"
         reason="stale: $win (idle ${age}s, possible wedge, escalation $n)"
@@ -410,7 +517,8 @@ handle_paused_stale() {  # <window> <task> <hash>
   key=$(printf '%s' "$win" | tr ':/.' '___')
   printf '%s' "$h" > "$STATE/.stale-$key"
   : > "$STATE/.paused-$key"
-  rm -f "$STATE/.stale-since-$key" "$STATE/.wedge-escalations-$key" "$STATE/.health-sample-$key"
+  rm -f "$STATE/.stale-since-$key" "$STATE/.health-sample-$key"
+  clear_wedge_escalation "$key"
   statusf="$STATE/$task.status"
   mtime=$(stat_mtime "$statusf")
   case "$mtime" in ''|*[!0-9]*) mtime=$(date +%s) ;; esac
@@ -480,7 +588,8 @@ clear_pause_tracking() {  # <window>
   key=${key//\//_}
   key=${key//./_}
   clear_pause_state "$win"
-  rm -f "$STATE/.stale-$key" "$STATE/.stale-since-$key" "$STATE/.wedge-escalations-$key" "$STATE/.health-sample-$key"
+  rm -f "$STATE/.stale-$key" "$STATE/.stale-since-$key" "$STATE/.health-sample-$key"
+  clear_wedge_escalation "$key"
 }
 
 # Reconcile a declared pause or captain-held status with authoritative crew state.
@@ -1249,7 +1358,8 @@ EOF
         if [ "$busy_now" -eq 0 ] && busy_turn_over_age "$task"; then
           wedge_timer_check "$w" "$ssf" "busy (no completed turn)" "$ewf" turn-completion
         else
-          rm -f "$ssf" "$ewf"
+          rm -f "$ssf"
+          clear_wedge_escalation "$key"
         fi
         if [ -e "$pf" ] && { [ "$n" -ge 2 ] || ! status_is_paused_or_captain_held "$(last_status_line "$STATE/$(window_to_task "$w" "$STATE").status")"; }; then
           clear_pause_tracking "$w"
@@ -1261,7 +1371,8 @@ EOF
       if [ "$busy_now" -eq 0 ] && busy_turn_over_age "$task"; then
         wedge_timer_check "$w" "$ssf" "busy (no completed turn)" "$ewf" turn-completion
       else
-        rm -f "$ssf" "$ewf"
+        rm -f "$ssf"
+        clear_wedge_escalation "$key"
       fi
       task=$(window_to_task "$w" "$STATE")
       if ! afk_present && status_is_paused_or_captain_held "$(last_status_line "$STATE/$task.status")" && [ "$busy_now" -ne 0 ]; then

@@ -76,6 +76,7 @@ STATE="$state"
 window_backend() { printf 'none\n'; }
 fm_health_target_pid() { printf '%s\n' "\$FM_TEST_PANE_PID"; }
 triage_log() { printf '%s\n' "\$*" >> "$state/.watch-triage.log"; }
+$(sed -n '/^clear_wedge_escalation()/,/^}/p' "$ROOT/bin/fm-watch.sh")
 $(sed -n '/^health_evidence_reset()/,/^}/p' "$ROOT/bin/fm-watch.sh")
 health_evidence_reset "$win" "\$1" "$state/.stale-since-$key" "$state/.wedge-escalations-$key"
 printf 'rc=%s\n' "\$?"
@@ -99,6 +100,7 @@ fm_health_target_pid() { printf '%s\n' "\$FM_TEST_PANE_PID"; }
 triage_log() { printf '%s\n' "\$*" >> "$state/.watch-triage.log"; }
 fm_wake_append() { return 0; }
 wake() { printf 'woke: %s\n' "\$1"; }
+$(sed -n '/^clear_wedge_escalation()/,/^}/p' "$ROOT/bin/fm-watch.sh")
 $(sed -n '/^health_evidence_reset()/,/^}/p' "$ROOT/bin/fm-watch.sh")
 $(sed -n '/^wedge_timer_check()/,/^}/p' "$ROOT/bin/fm-watch.sh")
 wedge_timer_check "$win" "$state/.stale-since-$key" test-label "$state/.wedge-escalations-$key" "\$1" "\$2"
@@ -185,6 +187,11 @@ test_ratchet_resets_and_logs_the_transition() {
   PANE_PID=$IDLE_PID   # a genuinely frozen pane: alive, consuming no CPU
   printf '9\n' > "$state/.wedge-escalations-$key"
   printf '1000\n' > "$state/.stale-since-$key"
+  # The step-evidence baseline is measured FROM this count, so it must live and
+  # die with it: a baseline that outlived the count would describe an alarm
+  # window that has already closed, and evidence from a closed window would then
+  # pardon the next wedge.
+  printf 'run=01RUN completed=intent,review\n' > "$state/.step-evidence-$key"
 
   # First look: no predecessor sample, so the comparison is unknown and the
   # escalation count must survive untouched.
@@ -199,12 +206,16 @@ test_ratchet_resets_and_logs_the_transition() {
   [ "$rc" = 1 ] || fail "a frozen lane reported a reset (rc=$rc)"
   [ "$(cat "$state/.wedge-escalations-$key")" = 9 ] \
     || fail "a frozen lane cleared the escalation count"
+  [ -e "$state/.step-evidence-$key" ] \
+    || fail "a frozen lane dropped the step-evidence baseline its count is measured from"
 
   # Third look, rendered output advanced: proven health resets the ratchet.
   rc=$(run_reset_driver "$dir" "$state" "$win" "$key" hash-two | sed -n 's/^rc=//p')
   [ "$rc" = 0 ] || fail "advancing output did not reset the ratchet (rc=$rc)"
   [ ! -e "$state/.wedge-escalations-$key" ] || fail "the escalation count survived proven health"
   [ ! -e "$state/.stale-since-$key" ] || fail "the wedge timer survived proven health"
+  [ ! -e "$state/.step-evidence-$key" ] \
+    || fail "the step-evidence baseline outlived the alarm window it was recorded in"
 
   log=$(cat "$state/.watch-triage.log" 2>/dev/null || true)
   case "$log" in

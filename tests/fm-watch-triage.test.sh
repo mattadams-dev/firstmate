@@ -1246,6 +1246,236 @@ test_wedge_escalation_resets_when_pane_becomes_active() {
   pass "a pane becoming active again resets the consecutive wedge-escalation counter"
 }
 
+# --- a COMPLETED pipeline step clears the wedge escalation counter -----------
+# Measured 2026-08-05 on one lane: the escalation counter reached 6 while that
+# lane completed three validation steps in sequence (review completed with one
+# info finding, test completed green, document then started). The sampled
+# health signals cannot see that: a test-heavy step burns CPU while emitting
+# nothing, which is the exact shape rendered output, CPU ticks, and live
+# descendants are worst at catching. A completed step is a RECORDED OUTCOME -
+# durably written down by the pipeline itself, needing no sampling window and
+# impossible for a wedged process to produce - and it was already sitting in the
+# run record while the alarm counted up across two of them.
+#
+# These four cases pin the property in both directions, because a reset that
+# fires too eagerly pardons a real wedge and is the more dangerous failure:
+#   1. a newly completed step since the previous escalation CLEARS the counter;
+#   2. an unchanged run record does NOT (the mirror mutant: any transition
+#      resets);
+#   3. a different run's record does NOT (evidence from another run is not
+#      evidence about this one);
+#   4. a step completed BEFORE the counter was last cleared does NOT (evidence
+#      from a closed alarm window is not evidence about the next one).
+
+# Shared fixture: a lane whose pane has been static for minutes while its
+# pipeline runs, already classified as provably working, with the wedge timer
+# armed. Sets LANE_DIR / LANE_STATE / LANE_FAKEBIN / LANE_OUT / LANE_KEY.
+arm_stepping_lane() {  # <case-name> <task>
+  local name=$1 task=$2 dir capture_file window pane_hash sig pid
+  dir=$(make_case "$name"); LANE_DIR="$dir"; LANE_STATE="$dir/state"; LANE_FAKEBIN="$dir/fakebin"
+  LANE_OUT="$dir/watch.out"; capture_file="$dir/pane.txt"
+  window="test:fm-$task"
+  printf 'running the test step, no output for minutes' > "$capture_file"
+  printf 'window=%s\nkind=ship\n' "$window" > "$LANE_STATE/$task.meta"
+  printf 'working: validating\n' > "$LANE_STATE/$task.status"
+  sig=$(seen_sig "$LANE_STATE/$task.status"); printf '%s' "$sig" > "$LANE_STATE/.seen-${task}_status"
+  LANE_KEY=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "running the test step, no output for minutes")
+  printf '%s' "$pane_hash" > "$LANE_STATE/.hash-$LANE_KEY"
+  printf '1\n' > "$LANE_STATE/.count-$LANE_KEY"
+  FM_FAKE_TMUX_WINDOW="$window"
+  FM_FAKE_TMUX_CAPTURE="$capture_file"
+  export FM_FAKE_TMUX_WINDOW FM_FAKE_TMUX_CAPTURE
+  # Priming round: first sighting classifies and absorbs this stale hash,
+  # establishing .stale-$key and starting the wedge timer without going through
+  # wedge_timer_check at all (mirrors the existing wedge tests' Phase A).
+  watch_bg "$LANE_STATE" "$LANE_FAKEBIN" "$LANE_OUT" env FM_STALE_ESCALATE_SECS=999
+  pid=$!
+  wait_live "$pid" 30 || { reap "$pid"; fail "watcher exited on the priming round: $(cat "$LANE_OUT")"; }
+  reap "$pid"
+}
+
+# Drive one wedge round on the armed lane: backdate the timer past the threshold
+# and run the watcher until it either escalates (exits) or absorbs (stays
+# alive). Sets WEDGE_VERDICT to "escalated" or "absorbed".
+wedge_round() {
+  local pid
+  echo $(( $(date +%s) - 500 )) > "$LANE_STATE/.stale-since-$LANE_KEY"
+  : > "$LANE_OUT"
+  watch_bg "$LANE_STATE" "$LANE_FAKEBIN" "$LANE_OUT" env FM_STALE_ESCALATE_SECS=240
+  pid=$!
+  if wait_live "$pid" 40; then
+    reap "$pid"
+    WEDGE_VERDICT=absorbed
+    return 0
+  fi
+  wait "$pid" 2>/dev/null || true
+  WEDGE_VERDICT=escalated
+}
+
+clear_step_fixture_env() {
+  unset FM_FAKE_CREW_STATE FM_FAKE_CREW_STEPS FM_FAKE_TMUX_WINDOW FM_FAKE_TMUX_CAPTURE
+}
+
+# Point the health-evidence CPU channel at a pane process this test controls.
+# The pid must be REAL and live: fm_health_tree_pids walks the actual process
+# table and reports nothing for a pid that is not in it. A childless sleep gives
+# a tree of exactly one, so the children channel holds still and only the ticks
+# below move - the one way a lane can prove health while its pane stays static,
+# which is the state this case needs.
+arm_lane_cpu_channel() {  # <live-pid>
+  LANE_PANE_PID=$1
+  LANE_PROC="$LANE_DIR/proc"
+  export FM_FAKE_TMUX_PANE_PID="$LANE_PANE_PID" FM_PROC_ROOT_OVERRIDE="$LANE_PROC"
+}
+
+# One /proc/<pid>/stat line whose utime+stime is <ticks>; fm_health_tree_cpu
+# reads exactly those two fields.
+set_lane_cpu() {  # <ticks>
+  mkdir -p "$LANE_PROC/$LANE_PANE_PID"
+  printf '%s (sleep) S 0 0 0 0 0 0 0 0 0 0 %s 0\n' "$LANE_PANE_PID" "$1" \
+    > "$LANE_PROC/$LANE_PANE_PID/stat"
+}
+
+test_completed_step_transition_clears_wedge_escalation() {
+  export FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
+  export FM_FAKE_CREW_STEPS='run=01RUN completed=intent,review'
+  arm_stepping_lane wedge-step-reset stepping
+
+  # Round 1: nothing to compare against yet, so this escalates and records the
+  # lane's run record as the baseline for the next round.
+  wedge_round
+  [ "$WEDGE_VERDICT" = escalated ] || fail "round 1 did not escalate: $(cat "$LANE_OUT")"
+  grep -F "escalation 1" "$LANE_OUT" >/dev/null || fail "round 1 did not report escalation 1: $(cat "$LANE_OUT")"
+
+  # Round 2: the test step COMPLETED between the two escalations. The lane is
+  # demonstrably producing results, so the counter must clear instead of
+  # ratcheting to 2.
+  export FM_FAKE_CREW_STEPS='run=01RUN completed=intent,review,test'
+  wedge_round
+  [ "$WEDGE_VERDICT" = absorbed ] || fail "a completed step still escalated: $(cat "$LANE_OUT")"
+  [ ! -e "$LANE_STATE/.wedge-escalations-$LANE_KEY" ] \
+    || fail "a completed step did not clear the escalation counter (still $(cat "$LANE_STATE/.wedge-escalations-$LANE_KEY"))"
+  grep -F "wedge escalation reset by completed pipeline step" "$LANE_STATE/.watch-triage.log" >/dev/null \
+    || fail "the reset transition was not logged with its evidence: $(cat "$LANE_STATE/.watch-triage.log" 2>/dev/null)"
+  grep -E "wedge escalation reset by completed pipeline step.*completed: test" "$LANE_STATE/.watch-triage.log" >/dev/null \
+    || fail "the reset log did not name the step that completed"
+
+  # Round 3, no further step completed: the reset cleared the alarm, it did not
+  # disable it. A lane that finishes one step and then wedges inside the next
+  # must still escalate, so the baseline has to advance with each reading -
+  # otherwise every later round would keep comparing against the pre-reset
+  # record and pardon the lane forever.
+  wedge_round
+  [ "$WEDGE_VERDICT" = escalated ] || fail "the lane never escalated again after a reset: $(cat "$LANE_OUT")"
+  grep -F "escalation 1" "$LANE_OUT" >/dev/null \
+    || fail "the escalation after a reset did not restart the count: $(cat "$LANE_OUT")"
+
+  clear_step_fixture_env
+  pass "a completed pipeline step clears the wedge escalation counter without disabling the alarm"
+}
+
+test_unchanged_run_record_does_not_clear_wedge_escalation() {
+  export FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
+  export FM_FAKE_CREW_STEPS='run=01RUN completed=intent,review'
+  arm_stepping_lane wedge-step-no-reset stalled
+
+  wedge_round
+  [ "$WEDGE_VERDICT" = escalated ] || fail "round 1 did not escalate: $(cat "$LANE_OUT")"
+  grep -F "escalation 1" "$LANE_OUT" >/dev/null || fail "round 1 did not report escalation 1: $(cat "$LANE_OUT")"
+
+  # Round 2 with the SAME run record: no step completed, so nothing was
+  # produced and the alarm must keep climbing. A reset here would pardon a lane
+  # that is genuinely wedged inside a step.
+  wedge_round
+  [ "$WEDGE_VERDICT" = escalated ] || fail "an unchanged run record absorbed the wedge round: $(cat "$LANE_OUT")"
+  grep -F "escalation 2" "$LANE_OUT" >/dev/null \
+    || fail "an unchanged run record cleared the escalation counter instead of advancing it: $(cat "$LANE_OUT")"
+
+  clear_step_fixture_env
+  pass "an unchanged run record leaves the wedge escalation counter climbing"
+}
+
+test_other_run_step_evidence_does_not_clear_wedge_escalation() {
+  export FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
+  export FM_FAKE_CREW_STEPS='run=01RUN completed=intent,review'
+  arm_stepping_lane wedge-step-other-run switched
+
+  wedge_round
+  [ "$WEDGE_VERDICT" = escalated ] || fail "round 1 did not escalate: $(cat "$LANE_OUT")"
+
+  # A DIFFERENT run, whose completed steps say nothing about what this lane did
+  # between the two escalations. Two records that are not comparable are
+  # unknown, and unknown never clears an alarm.
+  export FM_FAKE_CREW_STEPS='run=02OTHER completed=intent,review,test,document'
+  wedge_round
+  [ "$WEDGE_VERDICT" = escalated ] || fail "another run's completed steps absorbed the wedge round: $(cat "$LANE_OUT")"
+  grep -F "escalation 2" "$LANE_OUT" >/dev/null \
+    || fail "another run's completed steps cleared the escalation counter: $(cat "$LANE_OUT")"
+
+  clear_step_fixture_env
+  pass "completed steps belonging to another run never clear this lane's escalation counter"
+}
+
+# The escalation count and the step-evidence baseline are one piece of state:
+# the baseline only means "what the run record said at the escalation this count
+# is measured from". Clearing the count on proven health ENDS that alarm window,
+# so a baseline that survived it would let a step completed while the lane was
+# demonstrably fine pardon the wedge that came after - the eager direction, and
+# the more dangerous one, because a pardoned wedge presents as a working alarm.
+# The lane here proves its health through the CPU channel rather than rendered
+# output, which is what a real static test-heavy pane does and what keeps this
+# on the same-hash path where the baseline could survive.
+test_health_reset_drops_the_step_evidence_baseline() {
+  export FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
+  export FM_FAKE_CREW_STEPS='run=01RUN completed=intent,review'
+  local pane_pid
+  sleep 300 &
+  pane_pid=$!
+  arm_stepping_lane wedge-step-window-boundary healthy-then-wedged
+  arm_lane_cpu_channel "$pane_pid"
+  set_lane_cpu 100
+
+  # Round 1: escalation 1, recording 'intent,review' as the baseline this count
+  # is measured from.
+  wedge_round
+  [ "$WEDGE_VERDICT" = escalated ] || { reap "$pane_pid"; fail "round 1 did not escalate: $(cat "$LANE_OUT")"; }
+  grep -F 'completed=intent,review' "$LANE_STATE/.step-evidence-$LANE_KEY" >/dev/null \
+    || { reap "$pane_pid"; fail "round 1 recorded no step-evidence baseline"; }
+
+  # The lane then proves its health the sampled way - its process tree consumes
+  # CPU while the pane renders nothing new - which clears the counter and with
+  # it closes the window the baseline above belongs to.
+  set_lane_cpu 500
+  wedge_round
+  [ "$WEDGE_VERDICT" = absorbed ] || { reap "$pane_pid"; fail "proven health did not absorb the round: $(cat "$LANE_OUT")"; }
+  grep -F "wedge escalation reset by proven health" "$LANE_STATE/.watch-triage.log" >/dev/null \
+    || { reap "$pane_pid"; fail "the health reset this case depends on never fired: $(cat "$LANE_STATE/.watch-triage.log" 2>/dev/null)"; }
+  [ ! -e "$LANE_STATE/.wedge-escalations-$LANE_KEY" ] \
+    || { reap "$pane_pid"; fail "proven health did not clear the escalation counter"; }
+
+  # The test step completes while the lane is demonstrably healthy. That
+  # outcome belongs to the window that just closed.
+  export FM_FAKE_CREW_STEPS='run=01RUN completed=intent,review,test'
+
+  # The lane now genuinely hangs inside the next step. Nothing has completed
+  # since this alarm was raised, so it must escalate: pre-window evidence is
+  # not evidence about this wedge.
+  wedge_round
+  reap "$pane_pid"
+  [ "$WEDGE_VERDICT" = escalated ] \
+    || fail "a step completed before the health reset pardoned a later wedge: $(cat "$LANE_OUT")"
+  grep -F "escalation 1" "$LANE_OUT" >/dev/null \
+    || fail "the wedge after a health reset did not restart the count: $(cat "$LANE_OUT")"
+  if grep -F "wedge escalation reset by completed pipeline step" "$LANE_STATE/.watch-triage.log" >/dev/null; then
+    fail "a step from before the health reset was logged as clearing this alarm"
+  fi
+
+  unset FM_FAKE_TMUX_PANE_PID FM_PROC_ROOT_OVERRIDE
+  clear_step_fixture_env
+  pass "a step completed before the counter was last cleared never pardons the next wedge"
+}
+
 # --- busy pane duration bound: a completed-turn age gate on top of busy -----
 # 2026-07 hibit-agent-focus-nonsteal-r1 incident: a busy pane (herdr "working"
 # and/or the harness's rendered busy footer) is unconditional, unbounded proof
@@ -2043,6 +2273,10 @@ test_stale_terminal_status_overridden_by_active_run
 test_nonterminal_stale_provably_working_absorbed_then_escalated
 test_wedge_escalation_marks_demand_deep_inspection_after_threshold
 test_wedge_escalation_resets_when_pane_becomes_active
+test_completed_step_transition_clears_wedge_escalation
+test_unchanged_run_record_does_not_clear_wedge_escalation
+test_other_run_step_evidence_does_not_clear_wedge_escalation
+test_health_reset_drops_the_step_evidence_baseline
 test_busy_pane_below_turn_age_bound_is_absorbed
 test_busy_pane_stable_hash_escalates_past_turn_age_bound
 test_busy_pane_changing_hash_escalates_past_turn_age_bound

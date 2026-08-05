@@ -268,12 +268,19 @@ test_handle_wake_terminal_signal_clears_pause_tracking() {
   : > "$state/.paused-$watcher_key"
   : > "$state/.stale-$watcher_key"
   : > "$state/.wedge-escalations-$watcher_key"
+  # The step-evidence baseline only means "what the run record said at the
+  # escalation this count is measured from", so it must die with the count here
+  # too: a baseline the daemon left behind would describe an alarm window that
+  # has already ended, and pre-window evidence would pardon the next wedge.
+  printf 'run=01RUN completed=intent,review\n' > "$state/.step-evidence-$watcher_key"
   FM_STATE_OVERRIDE="$state" handle_wake "signal: $state/held-w10-terminal.status" "$state"
   [ ! -e "$state/.subsuper-paused-$key" ] || fail "terminal signal retained the daemon pause marker"
   [ ! -e "$state/.subsuper-stale-$key" ] || fail "terminal signal retained daemon stale tracking"
   [ ! -e "$state/.paused-$watcher_key" ] || fail "terminal signal retained watcher pause tracking"
   [ ! -e "$state/.stale-$watcher_key" ] || fail "terminal signal retained watcher stale tracking"
   [ ! -e "$state/.wedge-escalations-$watcher_key" ] || fail "terminal signal retained watcher wedge tracking"
+  [ ! -e "$state/.step-evidence-$watcher_key" ] \
+    || fail "terminal signal left the step-evidence baseline behind the count it is measured from"
   FM_STATE_OVERRIDE="$state" handle_wake "stale: $win" "$state"
   [ ! -e "$state/.subsuper-stale-$key" ] || fail "terminal stale dedupe restored daemon stale tracking"
   pass "a terminal signal clears pause and stale tracking across both supervisors"
