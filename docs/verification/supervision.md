@@ -579,6 +579,43 @@ tests/fixtures/supervisor-singleton/h2-release-by-path.sh .
 tests/fixtures/supervisor-singleton/h3-prelock-evicts.sh .
 ```
 
+## Step-transition wedge-alarm reset
+
+Verified 2026-08-05.
+The pane wedge alarm gained a second kind of evidence: a step this lane's own no-mistakes run record marks completed since the previous escalation.
+Both directions are mandatory here, and the mirror is the dangerous one.
+A completed step that fails to reset restores the ratchet that put a healthy lane under permanent deep inspection; a reset that fires on anything at all pardons a lane wedged inside a step, and that direction presents as working.
+
+The defect fixture was written before the fix and run against the unmodified default branch, which failed it:
+
+```text
+not ok - a completed step still escalated: stale: test:fm-stepping (idle 500s, possible wedge, escalation 2)
+```
+
+The lane's run record showed the test step completed between the two escalations and the counter still climbed 1 to 2, which is the shape measured on the live fleet.
+
+One mutation per protection, each applied to its own extracted copy of the tree, never to a working checkout.
+Baselines read against: `tests/fm-watch-triage.test.sh` 53 `ok -` lines, `tests/fm-crew-state.test.sh` 53, both exiting 0.
+A failing case aborts its suite, so each mutation was run again with the killed case's invocation removed.
+
+| Mutation | Direction | Cases killed, in the order the suite reaches them | Tail |
+| --- | --- | --- | --- |
+| A completed step no longer clears the ratchet - the shipped defect | refuses too much | `test_completed_step_transition_clears_wedge_escalation` | 52 clean |
+| Any readable run record clears the ratchet, completed step or not | permits too much | `test_completed_step_transition_clears_wedge_escalation` at its first escalation, then `test_unchanged_run_record_does_not_clear_wedge_escalation` | not chased to a clean suite |
+| The evidence baseline is recorded once and never advances | permits too much | `test_completed_step_transition_clears_wedge_escalation` at its post-reset round | 52 clean |
+| Every step row counts as completed, not only a `completed` one | permits too much | `test_steps_lists_only_completed_steps`, then `test_steps_excludes_uncompleted_steps` | crew-state suite |
+
+The baseline-never-advances mutation is the one worth recording in its own right.
+It clears the alarm correctly the first time and then pardons the lane on every later escalation, so the alarm reads as working while it can no longer sound.
+Nothing in the suite caught it until the reset case was extended to run one more round with no further step completed, which is the property that separates clearing an alarm from disabling it.
+
+Deterministic entry points for this contract:
+
+```sh
+tests/fm-watch-triage.test.sh
+tests/fm-crew-state.test.sh
+```
+
 ## Wedge-alarm channels
 
 The two real notification channels were bounded manually on 2026-07-10 on macOS 26.5.2 with Herdr 0.7.3.
