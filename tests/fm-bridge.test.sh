@@ -66,6 +66,13 @@ new_home() {  # -> a fresh isolated FM_HOME
 
 ledger_of() { printf '%s/data/bridge/ledger.jsonl' "$1"; }
 
+# Whether the board file was WRITTEN, which is the question the hosted page
+# answers to - Lavish reloads on the write, not on a diff. Portable across the
+# two stat dialects rather than assuming GNU.
+board_mtime() {  # <path> -> mtime in seconds
+  stat -c %Y "$1" 2>/dev/null || stat -f %m "$1"
+}
+
 # Read one jq-ish field out of --state without a second parser of our own.
 state_query() {  # <home> <python-expression over `d`>
   FM_HOME=$1 "$RENDER" --state | python3 -c "
@@ -257,23 +264,27 @@ grep -q '"state":"needs-captain"' "$(ledger_of "$HOME4")" \
   || fail "disposition: the writer left state implicit in the raw record"
 pass "the writer records disposition explicitly in the raw stream"
 
-# The ask is countable, findable, and cannot be scrolled past.
+# The ask is countable and findable: counted where the board is read, and one
+# click from the index that lists it.
 asks=$(state_query "$HOME4" 'len(d["asks"])')
 [ "$asks" = 3 ] || fail "asks: expected 3 open asks, got $asks"
 boardhtml=$(cat "$TMP_ROOT/mode-board.html")
+# THE COUNT IS RENDERED CONTENT, in normal flow with the other tallies. That is
+# the only surface on a hosted board a redraw is guaranteed to refresh: the tab
+# title is propagated into the hosting page once, at load (section 29), and
+# unlike anything that travels with the viewport a tally cannot come to cover a
+# row.
 case "$boardhtml" in
-  *"<title>Bridge - 3 need you</title>"*) : ;;
-  *) fail "asks: the tab title does not carry the open-ask count" ;;
+  *'<b>3</b>waiting on you'*) : ;;
+  *) fail "asks: the board's own header does not carry the open-ask count" ;;
 esac
+# It still reaches the index in one click, which is the one thing a bare number
+# would have lost.
 case "$boardhtml" in
-  *'<div id="pin">'*) : ;;
-  *) fail "asks: the board has no viewport-fixed ask counter" ;;
+  *'class="tally ask" href="#waiting"'*) : ;;
+  *) fail "asks: the count does not jump to the asks index" ;;
 esac
-case "$boardhtml" in
-  *'title="3 waiting on you'*) : ;;
-  *) fail "asks: the counter does not carry the open-ask count" ;;
-esac
-pass "the open-ask count rides in the tab title and a counter that travels with the viewport"
+pass "the open-ask count is rendered in the board's own header, in normal flow"
 
 # Resolving must clear the ask, and must carry a pointer to the outcome.
 FM_HOME=$HOME4 "$BRIDGE" resolve -q --id o-one \
@@ -451,11 +462,17 @@ case "$(FM_HOME=$HOME10 "$RENDER" --html)" in
 esac
 pass "a missing ledger renders as explicitly empty, not as a quiet all-clear"
 
-# --- 11. the tick: cheap when nothing changed, honest about both clocks -----
+# --- 11. the tick: it writes only when the ledger content changed -----------
 #
-# Board freshness IS supervision freshness, so a frozen clock and a dead
-# supervision cycle must not look the same. The tick therefore skips the BODY
-# when the ledger is unchanged, but never skips saying when it last checked.
+# THE WRITE IS THE COST. Lavish hosts this board and reloads the page on any
+# write to the file, which silently destroys a ruling the captain is part-way
+# through annotating - and it reloads on a byte-identical rewrite too, because
+# the reload keys on the write and not on a diff. Both measured:
+# docs/verification/bridge-hosted-input.md.
+#
+# So the guard is writer-side and it is about the FILE, not about the bytes: an
+# unchanged ledger must leave the board's mtime alone. Refresh yields to
+# composition; supervision liveness is the beacon's and the guard's job.
 
 HOME11=$(new_home)
 FM_HOME=$HOME11 "$BRIDGE" ask -q --id tick-one --project orca \
@@ -469,15 +486,25 @@ FM_BRIDGE_NOW=2026-07-31T12:00:00Z FM_HOME=$HOME11 "$RENDER" --tick \
 pass "the first tick renders the board and records a change stamp"
 
 cp "$BOARD" "$TMP_ROOT/before-skip.html"
+before_mtime=$(board_mtime "$BOARD")
+sleep 1
 FM_BRIDGE_NOW=2026-07-31T12:03:00Z FM_HOME=$HOME11 "$RENDER" --tick \
   || fail "tick: skip path failed"
-diff <(grep -v 'FM-FRESH' "$TMP_ROOT/before-skip.html") <(grep -v 'FM-FRESH' "$BOARD") \
-  >/dev/null || fail "tick: an unchanged ledger regenerated the board body"
-grep -q 'checked <span class="clock">2026-07-31T12:03:00Z' "$BOARD" \
-  || fail "tick: the skip path did not advance the checked clock"
+diff "$TMP_ROOT/before-skip.html" "$BOARD" >/dev/null \
+  || fail "tick: an unchanged ledger changed the board's bytes"
+[ "$(board_mtime "$BOARD")" = "$before_mtime" ] \
+  || fail "tick: an unchanged ledger rewrote the board file, which reloads it out from under an open annotation"
+pass "an unchanged ledger leaves the board file untouched, not rewritten with a copy of itself"
+
+# The clock that used to be restamped in is gone with it. A board that printed
+# a "checked" time nothing advances would be an instrument reporting a liveness
+# it never observed - the exact failure the restamp existed to avoid, arrived at
+# from the other side.
 grep -q 'content as of <span class="clock">2026-07-31T12:00:00Z' "$BOARD" \
-  || fail "tick: the skip path moved the content clock, which did not change"
-pass "an unchanged ledger restamps only the freshness line, advancing checked but not content"
+  || fail "tick: the board does not say when its content is from"
+grep -q 'checked <span class="clock"' "$BOARD" \
+  && fail "tick: the board still claims a checked time nothing advances"
+pass "the board dates its content and claims no supervision liveness of its own"
 
 FM_HOME=$HOME11 "$BRIDGE" note -q --project orca --title "a new fact" >/dev/null
 FM_BRIDGE_NOW=2026-07-31T12:06:00Z FM_HOME=$HOME11 "$RENDER" --tick \
@@ -485,7 +512,37 @@ FM_BRIDGE_NOW=2026-07-31T12:06:00Z FM_HOME=$HOME11 "$RENDER" --tick \
 grep -q 'content as of <span class="clock">2026-07-31T12:06:00Z' "$BOARD" \
   || fail "tick: a changed ledger did not advance the content clock"
 grep -q 'a new fact' "$BOARD" || fail "tick: a changed ledger did not pick up the new record"
-pass "a changed ledger re-renders the body and advances both clocks"
+pass "a changed ledger re-renders the body and re-dates the content"
+
+# A ledger touched without changing content is not a change. The signature reads
+# CONTENT for this reason: an mtime-shaped signature would rewrite the board,
+# and the rewrite is what costs the captain their open ruling.
+touch "$(FM_HOME=$HOME11 "$RENDER" --ledger-path)"
+before_mtime=$(board_mtime "$BOARD")
+sleep 1
+FM_BRIDGE_NOW=2026-07-31T12:07:00Z FM_HOME=$HOME11 "$RENDER" --tick \
+  || fail "tick: failed after the ledger was touched"
+[ "$(board_mtime "$BOARD")" = "$before_mtime" ] \
+  || fail "tick: touching the ledger rewrote the board"
+pass "touching the ledger without changing it does not rewrite the board"
+
+# The backstop under the tick's own skip: whatever asks for a write, a render
+# that comes out byte-identical to the board already on disk must not replace
+# it. An explicit --write at a fixed clock is that case, and it is the only
+# rewrite path the tick's signature does not already stand in front of.
+before_mtime=$(board_mtime "$BOARD")
+sleep 1
+FM_BRIDGE_NOW=2026-07-31T12:09:00Z FM_HOME=$HOME11 "$RENDER" --write >/dev/null \
+  || fail "write: explicit write failed"
+first_write=$(board_mtime "$BOARD")
+[ "$first_write" != "$before_mtime" ] \
+  || fail "write: an explicit write at a new clock did not rewrite the board, so this guard proves nothing"
+sleep 1
+FM_BRIDGE_NOW=2026-07-31T12:09:00Z FM_HOME=$HOME11 "$RENDER" --write >/dev/null \
+  || fail "write: repeat write failed"
+[ "$(board_mtime "$BOARD")" = "$first_write" ] \
+  || fail "write: a byte-identical render replaced the board file anyway, which reloads the hosted page for nothing"
+pass "a byte-identical render never replaces the board file"
 
 # The board is generated. A hand edit is not a place to put facts, and the next
 # tick says so by overwriting it.
@@ -494,6 +551,183 @@ FM_HOME=$HOME11 "$BRIDGE" note -q --project orca --title "yet another fact" >/de
 FM_BRIDGE_NOW=2026-07-31T12:09:00Z FM_HOME=$HOME11 "$RENDER" --tick >/dev/null
 grep -q 'hand edit' "$BOARD" && fail "tick: a hand edit to the generated board survived"
 pass "a hand edit to the board is overwritten by the next tick"
+
+# --- 11b. a board that stopped rendering alarms, and says why ---------------
+#
+# A board rendering fine and a board whose render has been failing for an hour
+# look IDENTICAL to the reader: the content clock says an older time, which is
+# also what a quiet fleet looks like. Silence here is a stale surface wearing a
+# freshness promise, so the tick counts its own consecutive failures.
+#
+# Three directions, because each one is a different lie:
+#   - three in a row passing quietly is the missed alarm,
+#   - one transient failure alarming is the false alarm that trains the reader
+#     to ignore the real one,
+#   - an alarm that does not carry the reason is a content-free alarm: it sends
+#     the reader off to reproduce what the tick already observed.
+# And the reset is evidence-based: a render that LANDS clears the count; the
+# passage of time never does.
+
+HOME11B=$(new_home)
+FM_HOME=$HOME11B "$BRIDGE" ask -q --id alarm-one --project orca \
+  --title "something to render" --answer "A" >/dev/null
+
+# A FILE where the board's directory would have to be, so the write fails the
+# same way on every run and for every user, root included.
+BLOCKED="$HOME11B/blocked"
+: > "$BLOCKED"
+FAILURES="$HOME11B/state/.bridge-tick-failures"
+TICKLOG="$HOME11B/state/.bridge-tick.log"
+
+failing_tick() {  # -> the tick's stderr; the tick itself fails
+  { FM_BRIDGE_BOARD="$BLOCKED/bridge.html" FM_HOME=$HOME11B "$RENDER" --tick >/dev/null; } 2>&1
+}
+
+first=$(failing_tick)
+case "$first" in
+  *bridge-alarm:*) fail "tick: a single transient render failure raised the alarm; the next tick retries by itself" ;;
+esac
+[ "$(cut -f1 "$FAILURES" 2>/dev/null)" = 1 ] \
+  || fail "tick: the first render failure was not recorded, so nothing can count to three"
+second=$(failing_tick)
+case "$second" in
+  *bridge-alarm:*) fail "tick: two render failures raised the alarm; the threshold is three" ;;
+esac
+[ "$(cut -f1 "$FAILURES" 2>/dev/null)" = 2 ] || fail "tick: the second consecutive failure was not counted"
+pass "one and two failed renders stay quiet, and both are counted"
+
+# Quiet is about the ALARM, not about the reason. Only the prefix that wakes
+# somebody waits for the threshold; what failed is printed at every count,
+# because bin/fm-session-start.sh runs this same tick and prints whatever it
+# says. Withhold the reason below three and the captain's first two failures
+# read as "could not be brought up to date" and nothing else.
+case "$first" in
+  *"$BLOCKED"*) : ;;
+  *) fail "tick: the first failure never said what failed, so session start has nothing to print: $first" ;;
+esac
+case "$second" in
+  *"$BLOCKED"*) : ;;
+  *) fail "tick: the second failure never said what failed: $second" ;;
+esac
+pass "a below-threshold failure still names its reason; only the alarm prefix waits for the threshold"
+
+third=$(failing_tick)
+case "$third" in
+  *bridge-alarm:*) : ;;
+  *) fail "tick: three consecutive failed renders raised no alarm at all: $third" ;;
+esac
+case "$third" in
+  *"3 times in a row"*) : ;;
+  *) fail "tick: the alarm does not say how long the board has been failing: $third" ;;
+esac
+case "$third" in
+  *"$BLOCKED"*) : ;;
+  *) fail "tick: the alarm names no reason, so it only says a failure happened: $third" ;;
+esac
+pass "the third consecutive failure alarms, and the alarm carries what actually failed"
+
+grep -q 'render FAILED (3 in a row)' "$TICKLOG" \
+  || fail "tick: the failures are not in the log, so the episode cannot be reconstructed"
+
+# Evidence of health, not the passage of time, is what clears an alarm.
+FM_HOME=$HOME11B "$RENDER" --tick >/dev/null 2>&1 \
+  || fail "tick: the render did not recover once the board path was writable again"
+[ -f "$FAILURES" ] && fail "tick: a successful render left the failure count standing"
+grep -q 'render RECOVERED after 3 consecutive failures' "$TICKLOG" \
+  || fail "tick: the reset was not logged, so the alarm history stops being reconstructable"
+pass "a render that lands resets the count and logs the transition"
+
+fourth=$(failing_tick)
+case "$fourth" in
+  *bridge-alarm:*) fail "tick: a failure after a recovery alarmed immediately; the reset did not really restart the count" ;;
+esac
+[ "$(cut -f1 "$FAILURES" 2>/dev/null)" = 1 ] || fail "tick: the count did not restart at one after the recovery"
+pass "after a recovery the count restarts, so the next alarm needs three fresh failures"
+
+# --- 11c. what a skip is, and what it is measured against -------------------
+#
+# A SKIP IS NEUTRAL. Only a landed render resets the consecutive-failure count
+# and only a failed render increments it; a tick with nothing to render did not
+# observe whether the renderer works, so it may neither clear an alarm a real
+# failure earned nor manufacture one.
+#
+# And "unchanged ledger" means UNCHANGED SINCE THE LAST SUCCESSFUL RENDER, never
+# unchanged since the last tick. Compare tick-to-tick and the failure is silent:
+# two renders fail, the ledger then goes quiet, and every later tick sees "same
+# as last time" and skips forever - the count frozen below the threshold, the
+# board stale, the alarm never earned. A skip is only a skip when there is
+# genuinely nothing owed to the surface.
+
+HOME11C=$(new_home)
+FM_HOME=$HOME11C "$BRIDGE" ask -q --id owed-one --project orca \
+  --title "something to render" --answer "A" >/dev/null
+BOARD11C=$(FM_HOME=$HOME11C "$RENDER" --path)
+BOARDDIR11C=$(dirname "$BOARD11C")
+FAILURES11C="$HOME11C/state/.bridge-tick-failures"
+
+FM_HOME=$HOME11C "$RENDER" --tick >/dev/null 2>&1 \
+  || fail "owed: the first render failed, so this fixture proves nothing"
+[ -f "$BOARD11C" ] || fail "owed: the first render wrote no board"
+
+# The ledger moves on, and the render starts failing with the board file STILL
+# IN PLACE - so the skip's board-exists clause cannot stand in for the stamp and
+# mask the question this fixture asks. The directory is only unwritable for the
+# duration of each attempt, so a failed assertion still leaves a removable tree.
+FM_HOME=$HOME11C "$BRIDGE" note -q --project orca \
+  --title "a fact the board never got" >/dev/null
+attempt_11c() {  # one tick against an unwritable board directory
+  chmod 500 "$BOARDDIR11C"
+  { FM_HOME=$HOME11C "$RENDER" --tick >/dev/null; } 2>&1
+  chmod 700 "$BOARDDIR11C"
+}
+
+owed=$(attempt_11c)
+[ "$(cut -f1 "$FAILURES11C" 2>/dev/null)" = 1 ] \
+  || fail "owed: the first failing render was not counted: $owed"
+
+# FROM HERE THE LEDGER IS QUIET. A tick-to-tick baseline would call this
+# unchanged and skip; the last-successful-render baseline still owes the surface
+# a render, so the tick must keep attempting.
+owed=$(attempt_11c)
+[ "$(cut -f1 "$FAILURES11C" 2>/dev/null)" = 2 ] \
+  || fail "owed: with the ledger quiet the tick stopped attempting, so the count froze at one: $owed"
+owed=$(attempt_11c)
+case "$owed" in
+  *bridge-alarm:*) : ;;
+  *) fail "owed: a quiet ledger let a broken board skip its way past the alarm: $owed" ;;
+esac
+pass "an unrendered delta stays owed while the ledger is quiet, so a failing board still reaches its alarm"
+
+# Reaching a GENUINE skip with a failure already on the record needs a failure
+# from BEFORE the render - the fold itself refusing - because a failed write
+# leaves the delta owed and the next tick re-renders rather than skipping.
+HOME11D=$(new_home)
+FM_HOME=$HOME11D "$BRIDGE" ask -q --id neutral-one --project orca \
+  --title "something to render" --answer "A" >/dev/null
+FAILURES11D="$HOME11D/state/.bridge-tick-failures"
+FM_HOME=$HOME11D "$RENDER" --tick >/dev/null 2>&1 \
+  || fail "neutral: the first render failed, so this fixture proves nothing"
+
+STUBBIN="$TMP_ROOT/fold-refuses"
+mkdir -p "$STUBBIN"
+cat > "$STUBBIN/python3" <<'STUB'
+#!/usr/bin/env bash
+printf 'python3 refused to run the fold\n' >&2
+exit 1
+STUB
+chmod +x "$STUBBIN/python3"
+PATH="$STUBBIN:$PATH" FM_HOME=$HOME11D "$RENDER" --tick >/dev/null 2>&1
+[ "$(cut -f1 "$FAILURES11D" 2>/dev/null)" = 1 ] \
+  || fail "neutral: a fold that refused to run was not counted as a failed render"
+
+# The fold works again, and the ledger has not moved since the last SUCCESSFUL
+# render - so this tick genuinely has nothing to do. It observed nothing about
+# the renderer, so it must leave the count exactly where it found it.
+FM_HOME=$HOME11D "$RENDER" --tick >/dev/null 2>&1 \
+  || fail "neutral: the tick failed once the fold worked again"
+[ "$(cut -f1 "$FAILURES11D" 2>/dev/null)" = 1 ] \
+  || fail "neutral: a tick with nothing to render moved the failure count to $(cut -f1 "$FAILURES11D" 2>/dev/null)"
+pass "a tick with nothing to render is neutral: it neither clears the count nor adds to it"
 
 # --- 12. caps overflow to the record; they never truncate in silence --------
 
@@ -609,16 +843,12 @@ pass "routing sets the owner to the reader the item was addressed to"
 # The captain-facing surface must not count it ANYWHERE.
 routed=$(FM_HOME=$HOME15 "$RENDER" --html)
 case "$routed" in
-  *"<title>Bridge - 1 need you</title>"*) : ;;
-  *) fail "routing: the tab title counts co-captain items as captain asks" ;;
-esac
-case "$routed" in
-  *'title="1 waiting on you'*) : ;;
-  *) fail "routing: the viewport counter counts co-captain items as captain asks" ;;
+  *'<b>1</b>waiting on you'*) : ;;
+  *) fail "routing: the header count counts co-captain items as captain asks" ;;
 esac
 tally=$(state_query "$HOME15" 'd["summary"]["needs-captain"]')
 [ "$tally" = 1 ] || fail "routing: the captain tally counts $tally instead of 1"
-pass "co-captain items are absent from the tab title, the sticky counter, and the captain tally"
+pass "co-captain items are absent from the header count and the captain tally"
 
 # But they are neither hidden from the captain nor lost: visible as routed, and
 # a first-class list for the reader who actually owns them.
@@ -647,7 +877,7 @@ pass "routing refuses an unknown reader"
 # like a board that failed to load.
 allclear=$(FM_HOME=$HOME15 "$RENDER" --html)
 case "$allclear" in
-  *"the queue is clear"*) : ;;
+  *"Nothing is waiting on you"*) : ;;
   *) fail "routing: with all asks routed away the board does not report a clear queue" ;;
 esac
 pass "with every ask routed away the captain's queue reads as clear, not as empty"
@@ -676,6 +906,7 @@ FM_HOME=$HOME16 "$BRIDGE" task -q --id l-pr --project orca --phase pr-open \
 FM_HOME=$HOME16 "$BRIDGE" ask -q --id l-co --project machine --title "a routed ask" \
   --answer "A" --to cocaptain >/dev/null
 FM_HOME=$HOME16 "$RENDER" --html > "$TMP_ROOT/links.html"
+FM_HOME=$HOME16 "$RENDER" --state > "$TMP_ROOT/links-state.json"
 
 python3 - "$TMP_ROOT/links.html" <<'LINKCHECK' || fail "links: see the reported anchor"
 import re, sys
@@ -686,6 +917,17 @@ if not anchors:
 for tag in anchors:
     if "data-lavish-action" not in tag:
         sys.exit("anchor without Lavish pass-through, unclickable for the captain: %s" % tag)
+# The other half of the same rule. The attribute buys a working left-click by
+# spending the element's annotatability, and annotation is the board's ONLY
+# input path - so an anchor, whose own job is to navigate, is the one thing that
+# can afford the trade. On anything else it would silently create a dead spot
+# the captain cannot rule on.
+for tag in re.findall(r"<[a-zA-Z][^>]*>", html):
+    if "data-lavish-action" not in tag:
+        continue
+    if not re.match(r"<a[ >]", tag):
+        sys.exit("data-lavish-action on a non-anchor makes it un-annotatable, "
+                 "and annotation is the only way the captain answers: %s" % tag)
 external = [t for t in anchors if 'href="http' in t]
 if not external:
     sys.exit("no external link in the fixture, so the pass-through guard proves nothing")
@@ -707,18 +949,125 @@ sys.exit(0)
 LINKCHECK
 pass "every link carries Lavish's pass-through, opens safely, and reads as its own URL"
 
-# The answer forms must keep working under the same layer. They are <button>,
-# which Lavish already treats as native, so this checks the form was not
-# "improved" into an anchor at some point.
-python3 - "$TMP_ROOT/links.html" <<'FORMCHECK' \
-  || fail "links: the answer forms are no longer native controls under Lavish"
+# --- 16b. the board takes no input, and everything on it can be annotated ---
+#
+# The board's input path is Lavish's annotation layer and its conversation
+# panel. Nothing else. It used to carry a composer of its own - a textarea with
+# copy and clear and no send - which could not reach anybody and was wiped by
+# the next redraw, so a captain who typed a ruling into it believed they had
+# answered and the fleet never heard it.
+#
+# That makes two properties guard-class, and they fail in opposite directions:
+#   1. the board must offer NO input affordance of its own, and
+#   2. everything the captain must annotate must actually BE annotatable.
+# Lavish skips native controls and everything inside them when deciding what can
+# be annotated, so the same list settles both: a control on this board is either
+# an input path it does not have, or a dead spot on a row the captain must rule
+# on. Measured, both directions, against real hosting:
+# docs/verification/bridge-hosted-input.md.
+
+python3 - "$TMP_ROOT/links.html" <<'INPUTCHECK' \
+  || fail "input path: see the reported element"
 import re, sys
 html = open(sys.argv[1]).read()
-if not re.search(r'<button class="ans"', html):
-    sys.exit("answer forms are not <button>, so Lavish will swallow their clicks")
+# Markup only. Stylesheet text and the embedded state document are not elements,
+# and a rule or a record that merely mentions a tag name is not one.
+markup = re.sub(r"<(style|script)\b[^>]*>.*?</\1>", "", html, flags=re.S | re.I)
+
+# Lavish's own exclusion list, from its artifact SDK. Anything matching it - or
+# nested inside something matching it - is invisible to annotation.
+NATIVE = ("button", "input", "select", "textarea", "option", "optgroup",
+          "label", "summary")
+
+for tag in NATIVE:
+    for found in re.finditer(r"<%s\b[^>]*>" % tag, markup, re.I):
+        sys.exit("the board renders a native control, which is either an input "
+                 "it cannot send or a spot the captain cannot annotate: %s"
+                 % found.group(0))
+if re.search(r'contenteditable=["\']?(?!false)', markup, re.I):
+    sys.exit("the board renders a contenteditable element")
+
+# The composer specifically, by every name it went under.
+for dead in ("queue-text", "queue-copy", "queue-clear", "queued rulings",
+             "dock-open"):
+    if dead in html:
+        sys.exit("the retired ruling composer is still on the board: %r" % dead)
 sys.exit(0)
-FORMCHECK
-pass "answer forms stay native controls, so rulings still queue through annotation"
+INPUTCHECK
+pass "the board renders no control of its own: nothing to type into, nothing that cannot be annotated"
+
+# The other half, and the reason the first half is safe: the ask rows still
+# carry what an annotation needs to identify. An annotation arrives as the
+# anchor it was rooted at plus the text it was placed on, so stripping either
+# the per-item anchors or the visible refs would trade one broken input path
+# for another - silently, since the board would still look right.
+python3 - "$TMP_ROOT/links.html" "$TMP_ROOT/links-state.json" <<'ANCHORCHECK' \
+  || fail "annotation anchors: see the reported ask"
+import json, re, sys
+html = open(sys.argv[1]).read()
+doc = json.load(open(sys.argv[2]))
+asks = doc["asks"]
+if not asks:
+    sys.exit("no asks in the fixture, so this guard proves nothing")
+
+options = re.findall(r'<span class="ans">([^<]*)</span>', html)
+if not options:
+    sys.exit("no answer options rendered, so this guard proves nothing")
+
+def where_it_lands(key):
+    """The ask's OWN card or row, not the whole page.
+
+    An annotation is rooted where it was placed, so what identifies it has to be
+    there. Checking the document would pass a board whose refs live only in the
+    index at the top - which is exactly what an annotation on the card never
+    sees.
+    """
+    anchor = 'id="item-%s"' % key
+    if anchor not in html:
+        return None
+    rest = html.split(anchor, 1)[1]
+    return re.split(r'id="item-|</section>|</table>', rest, maxsplit=1)[0]
+
+for key in asks:
+    item = doc["items"][key]
+    landing = where_it_lands(key)
+    if landing is None:
+        sys.exit("ask %s has no per-item anchor, so an annotation on it cannot "
+                 "say which ask it meant" % key)
+    label = item["ref"] or item["id"]
+    if item["answers"]:
+        for answer in item["answers"]:
+            wanted = "%s: %s" % (label, answer)
+            if wanted not in landing:
+                sys.exit("ask %s renders an answer that does not name its own "
+                         "ask where the annotation lands: expected %r"
+                         % (key, wanted))
+    if item["ref"] and ('<span class="ref">%s</span>' % item["ref"]) not in landing:
+        sys.exit("ask %s renders no visible ref, so an annotation on it arrives "
+                 "unquotable" % key)
+sys.exit(0)
+ANCHORCHECK
+pass "every ask keeps its per-item anchor, its visible ref, and answers that name their own ask"
+
+# And the board says where the input actually is, rather than leaving the
+# captain to infer it from the absence of a box.
+python3 - "$TMP_ROOT/links.html" <<'SIGNPOSTCHECK' \
+  || fail "signpost: see the reported gap"
+import sys
+html = open(sys.argv[1]).read()
+if "annotate" not in html.lower():
+    sys.exit("the board never names annotation as the way to rule")
+if "conversation panel" not in html.lower():
+    sys.exit("the board never names where an annotated ruling is sent from")
+if "no input path at all" not in html.lower():
+    sys.exit("the board does not say what it is when opened as a plain file, "
+             "which is the one case where there is no input path")
+if "not saved anywhere" not in html.lower():
+    sys.exit("the board does not warn that an unqueued annotation is lost on "
+             "the next redraw, which is measured behaviour")
+sys.exit(0)
+SIGNPOSTCHECK
+pass "the board states its input path, and states plainly what it does not promise"
 
 # --- 17. ledger text cannot break out of the embedded state document -------
 #
@@ -939,14 +1288,20 @@ FM_HOME=$HOME20 "$BRIDGE" lint >/dev/null 2>&1 \
   || fail "lint: a readable, clean record no longer exits 0"
 pass "a readable clean record still lints clean"
 
-# --- 21. every out-of-flow element is confined to a column the page reserves --
+# --- 21. nothing on this board is out of flow -------------------------------
 #
 # Two browser audits proved text on this board fully occluded, on rows in two
 # different zones. The rows were never the cause: chrome that travels with a
 # vertically scrolling page and sits across the top ends up over every row that
-# passes it, and parks an anchor target underneath itself. What replaced it is
-# geometric - the page reserves a column, no content is laid out inside it, and
-# everything out of flow lives there.
+# passes it, and parks an anchor target underneath itself.
+#
+# That was answered for a while by a reserved gutter no content was laid out
+# inside, which fixed chrome could occupy without covering anything. Once the
+# ruling composer was removed, the only thing left in that gutter was a number,
+# and a number that links to the asks index does not need chrome of its own. So
+# the gutter went, the count moved into the page's own header, and what is
+# pinned now is the stronger and simpler property: there is nothing out of flow
+# to place.
 #
 # A shell suite cannot measure geometry, so this does NOT claim the page has no
 # overlap; a browser audit is what says that. It pins the structural property
@@ -954,7 +1309,7 @@ pass "a readable clean record still lints clean"
 # rather than matching how it happens to be written, so reformatting the CSS
 # cannot break the guard and cannot quietly satisfy it either.
 
-python3 - "$TMP_ROOT/links.html" <<'RAIL' || fail "rail: see the reported rule"
+python3 - "$TMP_ROOT/links.html" <<'RAIL' || fail "layout: see the reported rule"
 import re, sys
 
 html = open(sys.argv[1]).read()
@@ -1012,38 +1367,31 @@ rules = parse(re.sub(r"/\*.*?\*/", " ", sheet.group(1), flags=re.S))
 
 out_of_flow = sorted(selector for selector, declarations in rules.items()
                      if declarations.get("position") in ("fixed", "absolute", "sticky"))
-if out_of_flow != ["#rail"]:
-    sys.exit("out-of-flow elements other than the reserved column exist: %s"
-             % out_of_flow)
+if out_of_flow:
+    sys.exit("something on the board is out of flow and can therefore come to "
+             "cover the rows it sits over: %s" % out_of_flow)
 
-rail_width = rules["#rail"].get("width", "")
-reserved = rules.get("body", {}).get("padding-right", "")
-variable = re.search(r"var\((--[a-z-]+)\)", rail_width)
-if variable is None:
-    sys.exit("the fixed column has no stated width to reserve: %r" % rail_width)
-if variable.group(1) not in reserved:
-    sys.exit("the page reserves %r, which is not the fixed column's width %r"
-             % (reserved, rail_width))
-if rules["#rail"].get("right") != "0":
-    sys.exit("the fixed column is not pinned to the edge it reserves")
+# And the page reserves no gutter for chrome that no longer exists - a reserved
+# column with nothing in it is a stripe of dead space on every screen.
+for edge in ("padding-right", "padding-left"):
+    reserved = rules.get("body", {}).get(edge, "0")
+    if reserved not in ("", "0", "0px", "0rem"):
+        sys.exit("the page still reserves %s: %r, with nothing out of flow to "
+                 "put there" % (edge, reserved))
 
-# Opening the ruling composer must widen that same reserved column rather than
-# introduce a second out-of-flow element over the board.
-docked = [selector for selector in rules if "dock-open" in selector]
-if not docked:
-    sys.exit("nothing widens the reserved column, so the composer must cover content")
-if not any(variable.group(1) in declarations
-           for selector, declarations in rules.items() if "dock-open" in selector):
-    sys.exit("the composer does not widen the reserved column: %s" % docked)
 sys.exit(0)
 RAIL
-pass "the only out-of-flow element is the column the page reserves for it"
+pass "nothing on the board is out of flow, and no gutter is reserved for chrome that is gone"
 
+# The job the retired gutter counter did is still done by a count in the header
+# that reaches the asks index in one click - the one thing a bare number would
+# have lost, and the reason a count that does not follow the viewport is still
+# enough.
 case "$(cat "$TMP_ROOT/links.html")" in
-  *'<aside id="rail">'*'<div id="pin">'*) : ;;
-  *) fail "rail: the ask counter is not inside the reserved column" ;;
+  *'class="tally ask" href="#waiting"'*) : ;;
+  *) fail "layout: the header count no longer reaches the asks index" ;;
 esac
-pass "the ask counter travels with the viewport from inside that column"
+pass "the count reaches the index from the header, with no travelling chrome"
 
 # --- 22. two axes: who owes it, and how it ended ---------------------------
 #
@@ -1210,12 +1558,8 @@ pass "an item nobody owes is not an ask even while the work is still live"
 FM_HOME=$HOME23 "$RENDER" --html > "$TMP_ROOT/discard-ask.html"
 askboard=$(cat "$TMP_ROOT/discard-ask.html")
 case "$askboard" in
-  *"<title>Bridge - 1 need you</title>"*) : ;;
-  *) fail "asks: the tab title still counts work that ended as needing the captain" ;;
-esac
-case "$askboard" in
-  *'title="1 waiting on you'*) : ;;
-  *) fail "asks: the rail badge still counts work that ended" ;;
+  *'<b>1</b>waiting on you'*) : ;;
+  *) fail "asks: the header count still counts work that ended" ;;
 esac
 # An override's provenance carries the accent; an ordinary note does not, so a
 # routine event never reads as a problem on a board where orange means one thing.
@@ -1561,5 +1905,113 @@ if "d-fine" in lint:
 sys.exit(0)
 POINTER
 pass "the board and the linter read one pointer rule and name the axis that triggered it"
+
+# --- 29. the count lives in rendered content, and the tab title says only what
+#         it can keep ---------------------------------------------------------
+#
+# INHERITED MEASUREMENT, recorded in docs/verification/bridge-hosted-input.md
+# and deliberately not re-derived here: Lavish copies the artifact's <title>
+# into the HOSTING page's title at page load, and does not re-propagate it when
+# the tick rewrites the board and the artifact frame live-reloads.
+#
+# The earlier measurement checked the title at load, after scrolling and after
+# backgrounding - never across a COUNT CHANGE, which is the one event that moves
+# the count AND the one event that redraws the board without re-propagating the
+# title. So a count carried in the tab title is stale exactly when it changes,
+# which is the only time anybody needs it.
+#
+# The fix is where the count lives, not a fresher title. Rendered content
+# survives a redraw by construction, because the redraw is what produces it. So
+# the count change is the fixture, and it pins both directions: the rendered
+# count must MOVE with the ledger, and the tab title must not carry a number a
+# redraw would leave standing.
+
+HOME29=$(new_home)
+FM_HOME=$HOME29 "$BRIDGE" ask -q --id count-first --project orca \
+  --title "the first ask" --answer "A: yes" >/dev/null
+FM_HOME=$HOME29 "$RENDER" --html > "$TMP_ROOT/count-before.html"
+FM_HOME=$HOME29 "$BRIDGE" ask -q --id count-second --project orca \
+  --title "the second ask" --answer "A: yes" >/dev/null
+FM_HOME=$HOME29 "$RENDER" --html > "$TMP_ROOT/count-after.html"
+
+python3 - "$TMP_ROOT/count-before.html" "$TMP_ROOT/count-after.html" <<'COUNT' || fail "count: see the reported surface"
+import re, sys
+
+before = open(sys.argv[1]).read()
+after = open(sys.argv[2]).read()
+
+def rendered_count(html, which):
+    body = html.find("<body")
+    if body < 0:
+        sys.exit("the %s board has no body at all" % which)
+    seen = [(match.start(), match.group(1))
+            for match in re.finditer(r"<b>(\d+)</b>waiting on you", html)]
+    if not seen:
+        sys.exit("the %s board renders no open-ask count at all, so the count "
+                 "has nowhere left to live that survives a redraw" % which)
+    if len({value for _, value in seen}) != 1:
+        sys.exit("the %s board renders disagreeing open-ask counts: %r"
+                 % (which, [value for _, value in seen]))
+    if seen[0][0] < body:
+        sys.exit("the %s board's open-ask count is not in rendered content" % which)
+    return seen[0][1]
+
+# The ledger gained an ask, so the rendered count has to have gained one too.
+# A count read off the tab title instead of the fold cannot do this: the title
+# is identical across the change.
+one, two = rendered_count(before, "one-ask"), rendered_count(after, "two-ask")
+if (one, two) != ("1", "2"):
+    sys.exit("the rendered count read %s then %s across a change from one open "
+             "ask to two - it does not track the ledger" % (one, two))
+
+def tab_title(html, which):
+    match = re.search(r"<title>(.*?)</title>", html, re.S)
+    if match is None:
+        sys.exit("the %s board carries no <title> at all" % which)
+    return match.group(1)
+
+first, second = tab_title(before, "one-ask"), tab_title(after, "two-ask")
+if first != second:
+    sys.exit("the tab title changed from %r to %r across a count change, but "
+             "Lavish propagates it at page load only - a hosted board would go "
+             "on showing the old one" % (first, second))
+if re.search(r"\d", first):
+    sys.exit("the tab title carries a number (%r) that a redraw cannot refresh "
+             "in the hosting page" % first)
+sys.exit(0)
+COUNT
+pass "a count change moves the rendered count, and leaves the tab title untouched"
+
+# The documentation may not promise what the tab cannot keep either - the
+# affordance rule reaches browser chrome. A line that names the tab title as
+# where the count lives is the retired claim coming back.
+python3 - "$ROOT/docs/verification/bridge-hosted-input.md" "$ROOT/docs/bridge.md" <<'TABDOC' || fail "docs: see the reported claim"
+import re, sys
+
+SURFACE = re.compile(r"tab title|browser tab|hosting page's title|page's title|page title")
+CLAIM = re.compile(r"carr(y|ies|ied) the (open-ask )?count|count rides|rides in the|"
+                   r"count stays|keeps the count|already carries")
+# A sentence that DENIES the claim is the correction, not the defect. The docs
+# here are one sentence per line, so a line is the unit.
+DENIAL = re.compile(r"\bnot\b|\bnever\b|\bno longer\b|\bstops\b|\bused to\b|\bwould\b")
+
+for path in sys.argv[1:]:
+    for number, line in enumerate(open(path), 1):
+        if SURFACE.search(line) and CLAIM.search(line) and not DENIAL.search(line):
+            sys.exit("%s:%d claims the tab title is where the open-ask count "
+                     "lives, which Lavish propagates only at page load:\n  %s"
+                     % (path, number, line.strip()))
+
+record = open(sys.argv[1]).read()
+if not re.search(r"at page load", record):
+    sys.exit("%s no longer records that the artifact title is propagated at "
+             "page load, which is the whole limit the count was moved for"
+             % sys.argv[1])
+if not re.search(r"re-propagat", record):
+    sys.exit("%s no longer records that the hosting page's title is not "
+             "re-propagated when the board is redrawn" % sys.argv[1])
+sys.exit(0)
+TABDOC
+pass "the documentation states the title is propagated at load, and promises no freshness past it"
 
 echo "all bridge ledger and fold tests passed"

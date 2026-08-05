@@ -12,7 +12,7 @@
 #   fm-bridge-render.sh --ledger-path      print the canonical ledger path
 #
 # --out PATH sends any output shape to a file instead of stdout, and --verbose
-# (-v) makes --tick report whether it re-rendered or only restamped.
+# (-v) makes --tick report whether it re-rendered the board or left it alone.
 #
 # ONE FOLD, MANY CONSUMERS
 # The fold is not logic buried in a renderer. It is a published interface with
@@ -32,7 +32,7 @@
 #
 # HOW THE MODES ARE PROVEN NOT TO DIVERGE
 # The fold runs ONCE per invocation, IN-PROCESS, and every output shape consumes
-# that one result: `render_html(doc, checked_at)` is handed the fold's return
+# that one result: `render_html(doc)` is handed the fold's return
 # value and takes no ledger path, so it cannot re-read or re-parse the stream.
 # The board then embeds the exact state document it was drawn from in a
 # <script type="application/json" id="fm-bridge-state"> block, so those bytes
@@ -89,20 +89,17 @@ hands that one result to whatever shapes it:
 
   state     <ledger> <folded-at> [id]      the fold, whole or narrowed to one item
   lifecycle <ledger> <folded-at> <id>      typed answer about one item's lifecycle
-  html      <ledger> <folded-at> <checked-at>
-                                           folds once, then render_html(doc, ...)
-  restamp   <board-path> <checked-at>      rewrites only the marked freshness line
-  signature <ledger>                       cheap change signature for the tick
+  html      <ledger> <folded-at>           folds once, then render_html(doc)
+  signature <ledger>                       content signature of the ledger, for the tick
 
 render_html takes the fold's RETURN VALUE and no ledger path, so the drawing
 half cannot re-read or re-parse the stream.
 """
+import hashlib
 import html as _html
 import json
 import os
-import stat
 import sys
-import tempfile
 
 # `steering` is the second producer's kind (see docs/bridge.md "Second
 # producer"). It is substrate, not a captain-facing zone: it never renders as a
@@ -995,21 +992,28 @@ def lifecycle(doc, item_id):
 
 
 def signature(path):
-    """Cheap change signature for the skip-when-unchanged tick."""
+    """Change signature for the skip-when-unchanged tick, over CONTENT.
+
+    Size and mtime would be cheaper and would answer a different question. A
+    ledger rewritten to the same bytes, or merely touched, changes mtime without
+    changing anything the board would show - and rewriting the board is what
+    reloads it out from under a ruling the captain is annotating. The digest
+    costs one read of a file the fold is about to read anyway.
+    """
     try:
-        info = os.stat(path)
+        with open(path, "rb") as handle:
+            digest = hashlib.sha256()
+            for block in iter(lambda: handle.read(1 << 16), b""):
+                digest.update(block)
     except OSError:
         return "absent"
-    return "%d:%d" % (info.st_size, int(info.st_mtime))
+    return digest.hexdigest()
 
 
 # --- board -----------------------------------------------------------------
 #
 # Everything below draws. It is handed the state document and nothing else - it
 # has no ledger path and never opens a file.
-
-FRESH_OPEN = "<!--FM-FRESH-->"
-FRESH_CLOSE = "<!--/FM-FRESH-->"
 
 # The tokyonight-storm token block from the canonical scaffold in
 # ~/code/personal/dotfiles/docs/labs/. The scaffold's DaisyUI/Tailwind CDN layer
@@ -1038,8 +1042,6 @@ h1 { margin:0; font-size:1.5rem; letter-spacing:.02em; }
 h1 .sub { color:var(--tn-dim); font-weight:400; font-size:.85rem; margin-left:.6rem; }
 .fresh { margin-top:.5rem; font-size:.82rem; color:var(--tn-dim); }
 .fresh .clock { color:var(--tn-fg); }
-.fresh.stale { color:var(--tn-orange); }
-.fresh.stale .clock { color:var(--tn-orange); }
 
 .tallies { display:flex; flex-wrap:wrap; gap:.5rem; margin-top:.75rem; }
 .tally {
@@ -1106,15 +1108,22 @@ h2 {
 .pointer { margin-top:.4rem; font-size:.82rem; overflow-wrap:anywhere; }
 .pointer .lbl { color:var(--tn-muted); margin-right:.35rem; }
 
-.answers { margin-top:.6rem; display:flex; gap:.4rem; flex-wrap:wrap; align-items:center; }
-.answers .lbl { color:var(--tn-muted); font-size:.74rem; margin-right:.15rem; }
-button.ans {
-  font:inherit; font-size:.82rem; cursor:pointer; color:var(--tn-fg);
-  background:var(--tn-deep); border:1px solid var(--tn-line);
-  border-radius:.3rem; padding:.25rem .55rem; text-align:left;
+/* The answer options are deliberately NOT controls. Lavish excludes native
+   controls, and everything inside them, from its annotation capture - so an
+   option rendered as a control would be the one element on an ask row the
+   captain cannot annotate, on the surface whose whole input path is
+   annotation. Measured, both directions:
+   docs/verification/bridge-hosted-input.md. */
+/* Listed, not offered. A bordered box in a row reads as a button even when it
+   is inert, and a button on this board would promise a send the page does not
+   have. One option per line, marked like a quotation, reads as "these are the
+   choices" - which is what they are. */
+.answers { margin-top:.6rem; display:flex; flex-direction:column; gap:.2rem; align-items:flex-start; }
+.answers .lbl { color:var(--tn-muted); font-size:.74rem; }
+.answers .ans {
+  font-size:.82rem; color:var(--tn-fg); padding-left:.55rem;
+  border-left:2px solid var(--tn-line); overflow-wrap:anywhere;
 }
-button.ans:hover { border-color:var(--tn-red); color:var(--tn-red); }
-button.ans.picked { border-color:var(--tn-red); color:var(--tn-red); background:rgba(247,118,142,.12); }
 
 .checkline { margin-top:.5rem; font-size:.76rem; color:var(--tn-muted); overflow-x:auto; }
 .checkline code { color:var(--tn-cyan); }
@@ -1173,36 +1182,20 @@ h3.projhead .refs {
 }
 .local-terms { margin:0 0 .8rem; font-size:.79rem; line-height:1.5; color:var(--tn-dim); border-left:2px solid var(--tn-line); padding-left:.6rem; }
 
-/* THE RAIL. The ask counter has to travel with the viewport so an open ask
-   cannot be scrolled past - and it must never cover the board to do it.
-   Chrome that travels with a vertically scrolling page ALWAYS ends up over the
-   content when it sits across the top: every row passes behind it on the way
-   past, and an anchor jump parks its target underneath it. A browser layout
-   audit proved exactly that, twice, on rows in two different zones - the row
-   was never the problem, the bar above it was.
-   So the chrome moves out of the content column entirely. The page reserves a
-   right-hand gutter, no content is ever laid out inside it, and everything
-   viewport-fixed lives there. Scrolling is vertical, so a column the content
-   never enters is the one place fixed chrome cannot come to cover it. */
-:root { --rail:3.6rem; }
-body { padding-right:var(--rail); }
-#rail {
-  position:fixed; top:0; right:0; bottom:0; width:var(--rail); z-index:6;
-  display:flex; flex-direction:column; gap:.5rem; padding:.5rem .4rem;
-  background:var(--tn-deep); border-left:1px solid var(--tn-line);
-  overflow-y:auto; overflow-x:hidden;
-}
-#pin { flex:none; }
-#pin a, #pin .clear {
-  display:block; text-align:center; text-decoration:none; border-radius:.4rem;
-  padding:.45rem .2rem; font-size:.62rem; text-transform:uppercase;
-  letter-spacing:.05em; line-height:1.3; white-space:nowrap;
-}
-#pin a { background:#3d2430; color:var(--tn-red); }
-#pin a:hover { outline:1px solid var(--tn-red); }
-#pin .clear { background:var(--tn-panel); color:var(--tn-dim); }
-#pin b { display:block; font-size:1.35rem; letter-spacing:0; }
-#pin .since { display:block; color:var(--tn-muted); margin-top:.15rem; }
+/* NOTHING ON THIS PAGE IS OUT OF FLOW. That is a hard rule, and it was earned:
+   chrome that travels with a vertically scrolling page ends up over the content
+   it announces - every row passes behind it, and an anchor jump parks its
+   target underneath it. A browser layout audit proved exactly that, twice, on
+   rows in two different zones; the row was never the problem, the bar above it
+   was.
+   The answer used to be a reserved right-hand gutter that fixed chrome could
+   live in without covering anything. With the ruling composer gone, that whole
+   column existed to hold one number, so the gutter went with it and the count
+   sits in the page's own header beside the other tallies, in normal flow. It
+   is the FIRST thing on the page and it links to the asks index, so an ask is
+   one click from anywhere - and unlike anything viewport-fixed, it cannot come
+   to cover a row. The rule that made the gutter necessary is kept by leaving
+   nothing viewport-fixed to place at all. */
 
 ol.asks { list-style:none; margin:0; padding:0; counter-reset:ask; }
 ol.asks li { border-bottom:1px solid rgba(59,66,97,.4); }
@@ -1229,26 +1222,16 @@ ol.asks li.aging .age { color:var(--tn-orange); }
 .card.aging { box-shadow:inset 3px 0 0 var(--tn-orange); }
 .chip.aging { color:var(--tn-orange); }
 .allclear { color:var(--tn-green); font-size:.9rem; }
+/* The input path, stated where the asks are. Blue: this is firstmate's side of
+   the surface talking, not an ask and not a warning. */
+.howto {
+  margin:.2rem 0 .9rem; font-size:.82rem; line-height:1.5; color:var(--tn-dim);
+  border-left:2px solid var(--tn-blue); padding-left:.6rem;
+}
 
-/* The ruling composer docks in the same gutter. Opening it WIDENS the gutter
-   rather than covering the page: the board reflows to the narrower column and
-   every row stays fully readable beside it. */
-body.dock-open { --rail:min(21rem,42vw); }
-#queue { display:none; flex:1 1 auto; min-height:0; flex-direction:column; gap:.45rem; }
-body.dock-open #queue { display:flex; }
-#queue .lbl { font-size:.6rem; text-transform:uppercase; letter-spacing:.08em; color:var(--tn-muted); }
-#queue .inner { display:flex; flex-direction:column; gap:.45rem; flex:1 1 auto; min-height:0; }
-#queue textarea {
-  flex:1 1 auto; min-width:0; min-height:6rem; resize:vertical; font-family:ui-monospace,monospace;
-  font-size:.78rem; background:var(--tn-deep); color:var(--tn-fg);
-  border:1px solid var(--tn-line); border-radius:.4rem; padding:.45rem .55rem;
-}
-#queue .buttons { display:flex; gap:.4rem; flex-wrap:wrap; }
-#queue button {
-  font:inherit; font-size:.78rem; cursor:pointer; border-radius:.35rem; padding:.35rem .6rem;
-  border:1px solid var(--tn-red); background:transparent; color:var(--tn-red); flex:none;
-}
-#queue button.clear { border-color:var(--tn-line); color:var(--tn-dim); }
+a.tally { text-decoration:none; }
+a.tally:hover { outline:1px solid var(--tn-red); }
+.tally .since { display:block; color:var(--tn-muted); font-size:.7rem; margin-top:.1rem; }
 
 .legend { display:flex; flex-wrap:wrap; gap:.9rem; font-size:.76rem; color:var(--tn-dim); margin-top:.6rem; }
 .legend span::before {
@@ -1261,6 +1244,10 @@ body.dock-open #queue { display:flex; }
 
 footer { margin-top:2.5rem; border-top:1px solid var(--tn-line); padding-top:1rem;
          font-size:.78rem; color:var(--tn-muted); }
+.promises { margin:0 0 1rem; padding-left:.6rem; border-left:2px solid var(--tn-blue);
+            color:var(--tn-dim); font-size:.8rem; line-height:1.5; }
+.promises div { margin:.25rem 0; }
+.promises b { color:var(--tn-fg); }
 footer code { color:var(--tn-cyan); }
 footer .row { margin:.3rem 0; overflow-x:auto; white-space:nowrap; }
 .banner {
@@ -1271,61 +1258,6 @@ footer .row { margin:.3rem 0; overflow-x:auto; white-space:nowrap; }
 .empty { color:var(--tn-muted); font-size:.85rem; font-style:italic; }
 """
 
-JS = """
-(function () {
-  var picks = [];
-  var out = document.getElementById('queue-text');
-  // Opening the composer widens the reserved gutter instead of covering the
-  // board, so the page reflows beside it and no row is ever hidden behind it.
-  function redraw() {
-    if (!picks.length) {
-      document.body.classList.remove('dock-open');
-      out.value = '';
-      return;
-    }
-    document.body.classList.add('dock-open');
-    out.value = picks.join('\\n');
-  }
-  document.addEventListener('click', function (event) {
-    var button = event.target.closest ? event.target.closest('button.ans') : null;
-    if (!button) { return; }
-    var line = button.getAttribute('data-line');
-    var index = picks.indexOf(line);
-    if (index >= 0) { picks.splice(index, 1); button.classList.remove('picked'); }
-    else { picks.push(line); button.classList.add('picked'); }
-    redraw();
-  });
-  var copy = document.getElementById('queue-copy');
-  if (copy) {
-    copy.addEventListener('click', function () {
-      out.select();
-      try { document.execCommand('copy'); } catch (err) { /* selection still works */ }
-      copy.textContent = 'copied';
-      setTimeout(function () { copy.textContent = 'copy'; }, 1200);
-    });
-  }
-  var clear = document.getElementById('queue-clear');
-  if (clear) {
-    clear.addEventListener('click', function () {
-      picks = [];
-      var picked = document.querySelectorAll('button.ans.picked');
-      for (var i = 0; i < picked.length; i++) { picked[i].classList.remove('picked'); }
-      redraw();
-    });
-  }
-  // Board freshness IS supervision freshness, so an old check has to look old.
-  var fresh = document.getElementById('fm-fresh');
-  if (fresh) {
-    var checked = Date.parse(fresh.getAttribute('data-checked'));
-    if (!isNaN(checked)) {
-      var mins = Math.floor((Date.now() - checked) / 60000);
-      var rel = document.getElementById('fm-fresh-rel');
-      if (rel) { rel.textContent = mins < 1 ? 'just now' : mins + ' min ago'; }
-      if (mins >= 10) { fresh.className = 'fresh stale'; }
-    }
-  }
-})();
-"""
 
 
 def esc(text):
@@ -1345,9 +1277,15 @@ def link(href, label=None, external=None):
     authoring fix rather than something to route around.
 
     It exempts that anchor from annotation capture and nothing else: every other
-    element stays annotatable and rulings still queue through the annotation
-    layer. The answer-form buttons need nothing, because `button` is already on
-    the native list.
+    element stays annotatable, which is the whole input path this board has.
+    ANCHORS ARE THE ONLY THING ON THIS BOARD THAT CARRY THE ATTRIBUTE, and an
+    anchor is the only thing that earns it - an anchor's own job is to navigate,
+    so trading its annotatability for a working left-click is a fair trade
+    nothing else on the board can make. A few anchors with structured inner
+    markup are emitted by hand rather than through here (the header tally and
+    the two index lists); they are still anchors, and the guard suite pins both
+    halves of the rule - every anchor carries the attribute, and nothing that is
+    not an anchor does.
 
     External links open in a new tab because the board is served in an iframe,
     and a same-tab navigation would replace the board with the PR.
@@ -1429,20 +1367,33 @@ def pointer_line(item):
 
 
 def answer_forms(item):
-    """The mandatory answer forms. Clicking queues a ready-to-paste ruling."""
+    """The mandatory answer forms: the options the captain is choosing between.
+
+    They are shown, not offered as controls. The board has no send of its own -
+    the captain rules by annotating the row in Lavish and sending from the
+    conversation panel - so an option that looked clickable would be promising
+    an egress this page does not have.
+
+    Every option therefore renders as a plain element, which is also what keeps
+    it annotatable: Lavish's annotation layer skips native controls and
+    everything inside them, so a <button> option would be the one part of an ask
+    the captain could not annotate (docs/verification/bridge-hosted-input.md).
+    """
     # The same conjunction the ask queues use, for the same reason: a form is
     # offered when someone owes a decision AND the work is still live. Nobody
     # can rule on work that ended, and nobody needs to rule on what is settled.
     if owed_by(item) == "resolved" or ended(item) or not item["answers"]:
         return ""
     label = item["ref"] or item["id"]
-    buttons = []
+    options = []
     for answer in item["answers"]:
-        line = "%s: %s" % (label, answer)
-        buttons.append('<button class="ans" type="button" data-line="%s">%s</button>'
-                       % (esc(line), esc(answer)))
+        # The ref rides on the option itself. An annotation carries the text of
+        # what it was placed on, so an option that named only its own words
+        # would arrive saying "retire it" with nothing saying which ask.
+        options.append('<span class="ans">%s</span>'
+                       % esc("%s: %s" % (label, answer)))
     return ('<div class="answers"><span class="lbl">answer</span>%s</div>'
-            % "".join(buttons))
+            % "".join(options))
 
 
 def check_line(item):
@@ -1478,19 +1429,25 @@ def card(item, pinned=False):
     return "".join(part for part in parts if part)
 
 
-def freshness_html(checked_at, content_at):
-    """One physical line, delimited by markers, so the skip path can restamp it
-    without regenerating - and without touching - the body."""
-    return ("%s<div class=\"fresh\" id=\"fm-fresh\" data-checked=\"%s\" data-content=\"%s\">"
-            "checked <span class=\"clock\">%s</span> "
-            "(<span id=\"fm-fresh-rel\">-</span>)"
-            "<span class=\"sep\"> &middot; </span>content as of "
-            "<span class=\"clock\">%s</span></div>%s"
-            % (FRESH_OPEN, esc(checked_at), esc(content_at),
-               esc(checked_at), esc(content_at), FRESH_CLOSE))
+def freshness_html(content_at):
+    """WHEN THIS BOARD'S CONTENT IS FROM, and nothing more.
+
+    It once also carried a `checked` clock that advanced on every supervision
+    tick, so a frozen board and a dead cycle would not look the same. That clock
+    cost a file write every tick, and a write is what makes Lavish reload the
+    hosted page - silently destroying whatever ruling the captain was in the
+    middle of annotating (docs/verification/bridge-hosted-input.md).
+
+    Liveness is not this page's to prove. The watcher's beacon and the guard
+    that reads it own it, they answer it durably, and they cost the captain's
+    open annotation nothing. What is left here is the one time this page can
+    state from its own content: when the ledger it was drawn from last changed.
+    """
+    return ('<div class="fresh">content as of '
+            '<span class="clock">%s</span></div>' % esc(content_at))
 
 
-def render_html(doc, checked_at):
+def render_html(doc):
     items = doc["items"]
     zones = doc["zones"]
     caps = doc["caps"]
@@ -1504,44 +1461,26 @@ def render_html(doc, checked_at):
     add('<html lang="en"><head><meta charset="utf-8">')
     add('<meta name="viewport" content="width=device-width,initial-scale=1">')
     asks = doc.get("asks", [])
-    # The tab title is the one part of this board that stays visible when the
-    # captain has scrolled away, switched apps, or left it open for a day.
-    add("<title>%s</title>"
-        % ("Bridge - %d need you" % len(asks) if asks else "Bridge - clear"))
+    # THE TITLE NAMES THE BOARD AND COUNTS NOTHING. It used to carry the open-ask
+    # count, on the reasoning that a tab stays visible when the captain has
+    # scrolled away or switched apps. Measured, that reasoning holds only until
+    # the count changes: Lavish copies the artifact's <title> into the HOSTING
+    # page's title at page load and does not re-propagate it when the tick
+    # rewrites the board and the frame live-reloads, so the tab went on
+    # reporting "1 need you" while the page underneath it showed two
+    # (docs/verification/bridge-hosted-input.md). A count change is the only
+    # event that moves the number and is exactly the event that leaves the tab
+    # stale, so the tab was wrong precisely when it mattered.
+    # The count therefore lives in rendered content instead - the header tally
+    # below, drawn from the fold on every render, which a redraw cannot leave
+    # standing because the redraw is what produces it. A tab title Lavish
+    # propagates once may not promise a freshness it cannot keep.
+    add("<title>Bridge</title>")
     add("<style>%s</style></head><body>" % CSS)
-
-    # Fixed to the viewport and OUTSIDE the content column: an ask cannot be
-    # scrolled past, and the counter that guarantees it never covers a row to
-    # do so. Everything in here lives in the gutter the page reserves for it.
-    add('<aside id="rail">')
-    if asks:
-        # The genuinely longest-waiting ask, not the first row of a
-        # severity-sorted list. Calling the top row "oldest" would be a claim
-        # the ordering does not support.
-        longest = max(asks, key=lambda k: items[k]["age_seconds"] or 0)
-        add('<div id="pin"><a href="#waiting" data-lavish-action '
-            'title="%d waiting on you, longest %s">'
-            "<b>%d</b>asks"
-            '<span class="since">%s</span></a></div>'
-            % (len(asks), esc(items[longest]["age_label"]), len(asks),
-               esc(items[longest]["age_label"])))
-    else:
-        add('<div id="pin"><div class="clear" '
-            'title="0 waiting on you, the queue is clear">'
-            "<b>0</b>clear</div></div>")
-
-    add('<div id="queue"><div class="lbl">queued rulings</div><div class="inner">')
-    add('<textarea id="queue-text" spellcheck="false" '
-        'aria-label="queued rulings"></textarea>')
-    add('<div class="buttons">')
-    add('<button id="queue-copy" type="button">copy</button>')
-    add('<button id="queue-clear" class="clear" type="button">clear</button>')
-    add("</div></div></div>")
-    add("</aside>")
 
     add('<header class="top"><div class="wrap">')
     add('<h1>Bridge<span class="sub">fleet state, generated from the ledger</span></h1>')
-    add(freshness_html(checked_at, doc["folded_at"]))
+    add(freshness_html(doc["folded_at"]))
     # THREE GROUPS, AND TWO OF THEM ADD UP. The ask count is the conjunction -
     # owed AND still live - and is labelled as its own number rather than being
     # blended into either axis. Below it each axis partitions the SAME items, so
@@ -1549,8 +1488,27 @@ def render_html(doc, checked_at):
     # is always a chip they can find in a tally.
     total = counts["board_items"]
     add('<div class="tallies">')
-    add('<div class="tally ask" title="asks: someone owes a decision AND the '
-        'work is still live"><b>%d</b>waiting on you</div>' % len(asks))
+    # THE OPEN-ASK COUNT LIVES HERE, and nowhere else. In normal flow, where it
+    # cannot come to cover a row, and in rendered content, which is the only
+    # surface on a hosted board that a redraw is guaranteed to refresh - the tab
+    # title is not, and that is why it stopped carrying this number. It jumps to
+    # the index rather than only reporting a number, which is the one thing the
+    # retired gutter counter did that a tally does not - and it carries the
+    # longest wait, because "3 waiting" and "3 waiting, oldest 2 days" are
+    # different facts and only the second one is alarming.
+    if asks:
+        # The genuinely longest-waiting ask, not the first row of a
+        # severity-sorted list. Calling the top row "oldest" would be a claim
+        # the ordering does not support.
+        longest = max(asks, key=lambda k: items[k]["age_seconds"] or 0)
+        add('<a class="tally ask" href="#waiting" data-lavish-action '
+            'title="asks: someone owes a decision AND the work is still live">'
+            "<b>%d</b>waiting on you"
+            '<span class="since">longest %s</span></a>'
+            % (len(asks), esc(items[longest]["age_label"])))
+    else:
+        add('<div class="tally ask" title="asks: someone owes a decision AND the '
+            'work is still live"><b>%d</b>waiting on you</div>' % len(asks))
     if doc["cocaptain_asks"]:
         add('<div class="tally co"><b>%d</b>with the co-captain</div>'
             % len(doc["cocaptain_asks"]))
@@ -1631,6 +1589,15 @@ def render_html(doc, checked_at):
     if asks:
         add('<p class="zone-note">Every open ask, oldest first. Nothing else on '
             "this page is an ask.</p>")
+        # WHERE THE RULING GOES. The board had its own composer here once, with
+        # copy and clear and no send - a visible input that could not reach
+        # anybody. It is gone rather than disabled, because the defect was the
+        # affordance itself. Saying where the input actually is costs one line
+        # and turns an implied path into a stated one.
+        add('<p class="howto">To rule: select the ask or the answer you want, '
+            "annotate it, and send from the conversation panel. Queue it before "
+            "you move on - a ruling still open in the annotation box is not "
+            "saved anywhere.</p>")
         add('<ol class="asks">')
         for key in asks:
             item = items[key]
@@ -1658,8 +1625,8 @@ def render_html(doc, checked_at):
     add("</section>")
 
     # Routed elsewhere, and shown so the captain can see it is routed rather
-    # than wonder. Deliberately BELOW their own asks, out of the tab title, and
-    # out of the sticky counter: the point of the routing class is that these
+    # than wonder. Deliberately BELOW their own asks and out of the open-ask
+    # count in the header: the point of the routing class is that these
     # never spend captain attention. The co-captain does not read this board at
     # all - they read the same items out of the ledger through --state - so this
     # section exists to reassure, not to deliver.
@@ -1895,8 +1862,28 @@ def render_html(doc, checked_at):
             "<code>bin/fm-bridge-render.sh --lifecycle &lt;id&gt;</code>.</div>"
             % (steering["items"], stages.get("sent", 0),
                stages.get("delivered", 0), stages.get("consumed", 0)))
-    add("<div class=\"row\">This page is generated. Edits to it are overwritten on "
-        "the next tick; facts belong in the ledger.</div>")
+    # WHAT THIS SURFACE PROMISES, AND WHAT IT DOES NOT. Every line here is a
+    # measured verdict, not a design intention - the measurements and their
+    # exact output are in docs/verification/bridge-hosted-input.md. A reader who
+    # trusts the wrong half of this loses a ruling and does not find out, which
+    # is why the half that does not hold is stated as plainly as the half that
+    # does.
+    add('<div class="promises">')
+    add("<div><b>What this page does, and does not.</b></div>")
+    add("<div>It shows fleet state, and it takes no input of its own. A ruling "
+        "reaches firstmate by annotation: select the ask, or the answer you "
+        "want, say what you decided, and send it from the conversation "
+        "panel.</div>")
+    add("<div>A ruling you have queued survives this page being redrawn, and "
+        "still points at the ask you placed it on.</div>")
+    add("<div>A ruling still sitting in the annotation box does not. This page "
+        "is rewritten whenever the ledger changes, and an unqueued annotation "
+        "goes with it, silently. Queue it, then keep reading.</div>")
+    add("<div>Opened as a plain file with nothing behind it, this page has no "
+        "input path at all. Tell firstmate directly.</div>")
+    add("</div>")
+    add("<div class=\"row\">This page is generated. Edits to it are overwritten "
+        "the next time the ledger changes; facts belong in the ledger.</div>")
     add("</footer></div>")
 
     # The exact state document this board was drawn from rides along, so the
@@ -1904,7 +1891,6 @@ def render_html(doc, checked_at):
     add('<script type="application/json" id="fm-bridge-state">')
     add(state_json(doc))
     add("</script>")
-    add("<script>%s</script>" % JS)
     add("</body></html>")
     return "\n".join(out) + "\n"
 
@@ -1926,56 +1912,6 @@ def state_json(doc):
                       ensure_ascii=False).replace("<", "\\u003c")
 
 
-def restamp(board_path, checked_at):
-    """Skip path: rewrite ONLY the marked freshness line, leaving every other
-    byte of the board untouched."""
-    with open(board_path, "r", encoding="utf-8") as handle:
-        lines = handle.readlines()
-    hit = False
-    for index, line in enumerate(lines):
-        if FRESH_OPEN not in line:
-            continue
-        content_at = ""
-        marker = 'data-content="'
-        start = line.find(marker)
-        if start >= 0:
-            start += len(marker)
-            end = line.find('"', start)
-            if end > start:
-                content_at = _html.unescape(line[start:end])
-        newline = "\n" if line.endswith("\n") else ""
-        lines[index] = freshness_html(checked_at, content_at) + newline
-        hit = True
-        break
-    if not hit:
-        return 1
-    # A unique temp name, like write_board's. Two ticks against one FM_HOME is
-    # the ordinary case, not a race to be hoped away: a session start and the
-    # watcher's interval tick are separate processes, and a shared temp path
-    # lets them interleave each other's bytes into the board that survives.
-    handle_fd, tmp = tempfile.mkstemp(prefix=".bridge-restamp.",
-                                      dir=os.path.dirname(board_path) or ".")
-    try:
-        with os.fdopen(handle_fd, "w", encoding="utf-8") as handle:
-            handle.writelines(lines)
-        # mkstemp creates 0600 and os.replace carries that mode onto the board,
-        # so without this the board's permissions flip on every skip tick and
-        # then flip back on the next full render. Which path ran last is not
-        # supposed to be readable from the file's mode.
-        try:
-            os.chmod(tmp, stat.S_IMODE(os.stat(board_path).st_mode))
-        except OSError:
-            pass
-        os.replace(tmp, board_path)
-    except BaseException:
-        try:
-            os.unlink(tmp)
-        except OSError:
-            pass
-        raise
-    return 0
-
-
 def main(argv):
     mode = argv[1]
     if mode == "state":
@@ -1994,10 +1930,8 @@ def main(argv):
         # directly. It is handed no path and opens no file, so the drawing half
         # cannot become a second reader of the stream.
         doc = fold(argv[2], argv[3])
-        sys.stdout.write(render_html(doc, argv[4]))
+        sys.stdout.write(render_html(doc))
         return 0
-    if mode == "restamp":
-        return restamp(argv[2], argv[3])
     if mode == "signature":
         sys.stdout.write(signature(argv[2]) + "\n")
         return 0
@@ -2032,11 +1966,11 @@ emit_lifecycle() {  # <folded-at> <id>
   python3 "$prog" lifecycle "$(fm_bridge_ledger_path)" "$1" "$2"
 }
 
-emit_html() {  # <folded-at> <checked-at>
+emit_html() {  # <folded-at>
   local prog
   prog=$(program_path) || die "cannot stage the fold program"
   # One process, one fold, shared in-process with the renderer.
-  python3 "$prog" html "$(fm_bridge_ledger_path)" "$1" "$2"
+  python3 "$prog" html "$(fm_bridge_ledger_path)" "$1"
 }
 
 ledger_signature() {
@@ -2045,46 +1979,204 @@ ledger_signature() {
   python3 "$prog" signature "$(fm_bridge_ledger_path)"
 }
 
-write_board() {  # <folded-at> <checked-at>
+# WRITING THE BOARD IS NOT FREE. Lavish hosts this file and reloads the page on
+# any write to it, which discards a ruling the captain is part-way through
+# annotating - and it reloads on a BYTE-IDENTICAL rewrite too, because the
+# reload keys on the write and not on a diff (measured, both:
+# docs/verification/bridge-hosted-input.md). So the last thing before the rename
+# is a comparison, and an unchanged board is left alone rather than replaced
+# with a copy of itself. Returns 0 when the board is current, whether or not
+# this call is what made it so.
+#
+# Every failure path says on stderr WHAT failed, because the caller records that
+# sentence and it is the only thing a later reader has to go on: "the board did
+# not render" and "the board's directory is a file" send someone to two very
+# different places.
+write_board() {  # <folded-at>
   local board tmp
   board=$(fm_bridge_board_path)
-  mkdir -p "$(dirname "$board")" || return 1
+  mkdir -p "$(dirname "$board")" \
+    || { printf 'cannot create the board directory %s\n' "$(dirname "$board")" >&2; return 1; }
   tmp="$board.tmp.$$"
-  emit_html "$1" "$2" > "$tmp" || { rm -f "$tmp"; return 1; }
-  mv -f "$tmp" "$board" || { rm -f "$tmp"; return 1; }
+  emit_html "$1" > "$tmp" \
+    || { rm -f "$tmp"; printf 'the fold or the render failed for %s\n' "$board" >&2; return 1; }
+  if [ -f "$board" ] && cmp -s "$tmp" "$board"; then
+    rm -f "$tmp"
+    return 0
+  fi
+  mv -f "$tmp" "$board" \
+    || { rm -f "$tmp"; printf 'cannot replace %s with the rendered board\n' "$board" >&2; return 1; }
+  return 0
+}
+
+# --- the tick's own failure record -----------------------------------------
+#
+# A board that renders fine and a board whose render has been failing for an
+# hour LOOK IDENTICAL to the reader: the content clock reads an older time, and
+# an older time is also what a quiet fleet looks like. Silence there is a stale
+# surface wearing a freshness promise, so the tick records its own failures
+# where the reason is still in hand, and alarms.
+#
+# THREE CONSECUTIVE, not one. A single failed render is transient - a full disk
+# that drained, a directory mid-replacement - and the next tick retries by
+# itself; alarming on it trains the reader to ignore the alarm. Three in a row
+# is a broken board.
+#
+# THE ALARM CARRIES THE REASON. An alarm that only says a render failed sends
+# the reader off to reproduce what the tick already knew.
+#
+# EVIDENCE OF HEALTH RESETS IT, THE PASSAGE OF TIME NEVER DOES: only a render
+# that actually landed clears the count, and the reset is logged before the
+# counter is dropped so the episode stays reconstructable afterwards.
+#
+# A SKIP IS NEUTRAL. Only a landed render resets the count and only a failed
+# render increments it; a tick that had nothing to render observed nothing about
+# the renderer's health and may neither clear an alarm a real failure earned nor
+# manufacture one.
+#
+# No rate limit lives here on purpose. The supervision cycle runs this tick at
+# most once per FM_BRIDGE_INTERVAL, so that gate already caps how often the
+# alarm can fire; a second limiter would be a second owner of one noise budget,
+# and the one that stayed quiet would be the one nobody remembered.
+TICK_FAILURES="$STATE_DIR/.bridge-tick-failures"
+TICK_LOG="$STATE_DIR/.bridge-tick.log"
+TICK_LOG_MAX_BYTES=${FM_BRIDGE_TICK_LOG_MAX_BYTES:-131072}
+ALARM_AFTER_FAILURES=3
+
+# Bounded, best-effort, append-only. Never fatal: a log that cannot be written
+# must not be the reason the board stops rendering.
+tick_log() {  # <line>
+  local sz
+  mkdir -p "$STATE_DIR" 2>/dev/null || return 0
+  printf '[%s] %s\n' "$(fm_bridge_now)" "$1" >> "$TICK_LOG" 2>/dev/null || return 0
+  sz=$(wc -c < "$TICK_LOG" 2>/dev/null | tr -d '[:space:]')
+  case "$sz" in ''|*[!0-9]*) return 0 ;; esac
+  if [ "$sz" -ge "$TICK_LOG_MAX_BYTES" ]; then
+    tail -n 500 "$TICK_LOG" > "$TICK_LOG.tmp" 2>/dev/null \
+      && mv -f "$TICK_LOG.tmp" "$TICK_LOG" 2>/dev/null
+    rm -f "$TICK_LOG.tmp" 2>/dev/null || true
+  fi
+  return 0
+}
+
+# One line, so a reason survives being carried as a wake payload and a log entry.
+one_line() { printf '%s' "$1" | tr '\n\t' '  ' | tr -s ' ' | sed 's/^ *//; s/ *$//'; }
+
+consecutive_tick_failures() {
+  local n
+  n=$(cut -f1 "$TICK_FAILURES" 2>/dev/null | head -1)
+  case "$n" in ''|*[!0-9]*) printf '0' ;; *) printf '%s' "$n" ;; esac
+}
+
+# EVERY failure says what failed, on stderr, at every count. Only the
+# `bridge-alarm: ` PREFIX is gated behind the threshold, because the prefix is
+# what wakes somebody and the reason is what a reader in front of the terminal
+# needs either way - bin/fm-session-start.sh runs this tick and prints whatever
+# it says, so withholding the reason below the threshold would leave the first
+# two failures reported as "could not be brought up to date" and nothing else.
+# The count travels with it because "how long has this been broken" is the
+# second question every reader asks.
+note_tick_failure() {  # <reason>
+  local reason n
+  reason=$(one_line "$1")
+  [ -n "$reason" ] || reason='the render failed without saying why'
+  n=$(( $(consecutive_tick_failures) + 1 ))
+  mkdir -p "$STATE_DIR" 2>/dev/null || true
+  printf '%s\t%s\n' "$n" "$reason" > "$TICK_FAILURES" 2>/dev/null || true
+  tick_log "render FAILED ($n in a row): $reason"
+  if [ "$n" -ge "$ALARM_AFTER_FAILURES" ]; then
+    printf 'bridge-alarm: the captain board has failed to render %s times in a row: %s\n' \
+      "$n" "$reason" >&2
+  else
+    printf 'bridge: the board did not render (failure %s of the %s that raise the alarm): %s\n' \
+      "$n" "$ALARM_AFTER_FAILURES" "$reason" >&2
+  fi
+  return 0
+}
+
+note_tick_success() {
+  local n
+  n=$(consecutive_tick_failures)
+  [ "$n" -gt 0 ] || return 0
+  tick_log "render RECOVERED after $n consecutive failures; the count is back to 0"
+  rm -f "$TICK_FAILURES" 2>/dev/null || true
   return 0
 }
 
 # --- the supervision-cycle tick --------------------------------------------
 #
 # Zero model involvement, and no model is ever woken to update the Bridge.
-# When the ledger has not changed, the body is NOT regenerated - only the
-# marked freshness line is restamped, because board freshness is how the captain
-# reads supervision freshness and a frozen clock would be indistinguishable from
-# a dead cycle.
+#
+# The tick rewrites the board WHEN THE LEDGER CONTENT CHANGED, and otherwise
+# touches nothing at all. It used to restamp a "checked" clock into the board
+# every interval so a frozen board and a dead supervision cycle would not look
+# the same; that clock is gone, because the write it needed is what makes Lavish
+# reload the hosted page and silently discard whatever ruling the captain was
+# annotating. Refresh yields to composition: the captain typing a ruling is the
+# whole point of the surface, and a clock is not worth interrupting it for.
+#
+# Liveness moved back to the instruments built for it - the watcher beacon at
+# state/.last-watcher-beat and the guard that alarms on a lapsed chain - which
+# answer it durably and cost the captain nothing. The ledger keeps every tick's
+# material for audit; the board never was that record.
+#
+# Every way this can fail is funnelled through note_tick_failure with the reason
+# it failed for, INCLUDING the ones that used to die() straight out of the
+# process: the supervision cycle runs this with output discarded, so a message
+# that only reached stderr reached nobody. The counter is what turns a transient
+# failure into an alarm once it stops being transient.
 do_tick() {
-  local verbose=$1 now sig prev board
-  require_python
+  local verbose=$1 now sig prev board err errf status
+  if ! err=$(require_python 2>&1); then
+    note_tick_failure "$err"
+    return 1
+  fi
   now=$(fm_bridge_now)
   board=$(fm_bridge_board_path)
-  sig=$(ledger_signature)
+  # The signature IS this call's stdout, so its stderr goes to a file rather
+  # than into the value - a diagnostic folded into the signature would read as
+  # a ledger change and rewrite the board for nothing. mktemp, like every other
+  # temporary this script stages: a predictable name in a shared /tmp is a path
+  # somebody else can own first, and this one is opened for truncation.
+  if ! errf=$(mktemp "${TMPDIR:-/tmp}/fm-bridge-tick.XXXXXX.err" 2>/dev/null); then
+    note_tick_failure "cannot stage a temporary file to capture the fold's diagnostics"
+    return 1
+  fi
+  sig=$(ledger_signature 2>"$errf") || status=$?
+  if [ "${status:-0}" -ne 0 ]; then
+    err=$(cat "$errf" 2>/dev/null || true)
+    rm -f "$errf"
+    note_tick_failure "$err"
+    return 1
+  fi
+  rm -f "$errf"
   prev=$(cat "$STAMP" 2>/dev/null || true)
 
+  # THE BASELINE IS THE LAST SUCCESSFUL RENDER, NEVER THE LAST TICK. $STAMP is
+  # written only where the board actually landed, so neither a failed attempt
+  # nor a skip advances it. A skip is only a skip when there is genuinely
+  # nothing owed to the surface.
+  #
+  # Compare tick-to-tick instead and the failure is silent: two renders fail,
+  # the ledger then goes quiet, and every later tick sees "unchanged since last
+  # time" and skips forever - the count frozen at two, the board stale, the
+  # alarm never earned. Against the last SUCCESSFUL render the unrendered delta
+  # stays owed, so every tick keeps ATTEMPTING until it lands or the count
+  # crosses the threshold.
+  #
+  # And the skip itself is NEUTRAL: it neither resets the count nor increments
+  # it, because a tick with nothing to render observed nothing about whether the
+  # renderer works.
   if [ "$sig" = "$prev" ] && [ -f "$board" ]; then
-    local prog
-    prog=$(program_path) || die "cannot stage the fold program"
-    if python3 "$prog" restamp "$board" "$now"; then
-      [ "$verbose" -eq 1 ] && printf 'bridge: unchanged; restamped %s\n' "$board"
-      return 0
-    fi
-    # The marker is missing (hand-edited or an older board): fall through to a
-    # full render rather than leaving a board nobody can date.
+    [ "$verbose" -eq 1 ] && printf 'bridge: ledger unchanged since the last render; left %s alone\n' "$board"
+    return 0
   fi
 
-  # The stamp is written only after the board actually landed, so a failed
-  # render leaves the signature stale and the NEXT tick retries instead of
-  # concluding nothing changed and skipping forever.
-  write_board "$now" "$now" || return 1
+  if ! err=$(write_board "$now" 2>&1); then
+    note_tick_failure "$err"
+    return 1
+  fi
+  note_tick_success
   mkdir -p "$STATE_DIR" 2>/dev/null || true
   printf '%s' "$sig" > "$STAMP" 2>/dev/null || true
   [ "$verbose" -eq 1 ] && printf 'bridge: rendered %s\n' "$board"
@@ -2136,11 +2228,11 @@ case "$MODE" in
     ;;
   html)
     require_python
-    if [ -n "$OUT" ]; then emit_html "$NOW" "$NOW" > "$OUT"; else emit_html "$NOW" "$NOW"; fi
+    if [ -n "$OUT" ]; then emit_html "$NOW" > "$OUT"; else emit_html "$NOW"; fi
     ;;
   write)
     require_python
-    write_board "$NOW" "$NOW" || die "could not write the board"
+    write_board "$NOW" || die "could not write the board"
     printf '%s\n' "$(fm_bridge_board_path)"
     ;;
   tick) do_tick "$VERBOSE" ;;

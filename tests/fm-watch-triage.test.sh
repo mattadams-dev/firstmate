@@ -9,8 +9,9 @@
 # advanced, beacon fresh), stopped-crew no-verb wakes surfaced (queue + exit),
 # provably-working stale panes absorbed-then-escalated past the threshold,
 # terminal-looking stale status lines overridden by an active run, the heartbeat
-# backstop fail-safe, and afk coherence (no double-triage while the away-mode
-# daemon owns supervision).
+# backstop fail-safe, the Bridge board's render alarm (relayed on the third
+# consecutive failure, silent on a transient one), and afk coherence (no
+# double-triage while the away-mode daemon owns supervision).
 #
 # Daemon-side classification/injection lives in fm-daemon.test.sh; watcher/lock
 # liveness in fm-watcher-lock.test.sh; the durable-queue safety matrix in
@@ -1828,6 +1829,74 @@ test_procevent_marker_failure_exits_and_replays() {
 
 # --- heartbeat: no-change absorbed, backstop surfaces a missed status --------
 
+# --- the Bridge board's render alarm ----------------------------------------
+#
+# The board is the captain's only surface, and a board rendering fine and a
+# board whose render has been failing for an hour LOOK IDENTICAL to whoever is
+# reading it - the content clock just says an older time, which is also what a
+# quiet fleet looks like. So the tick counts its own consecutive failures and
+# raises one "bridge-alarm:" line on the third, carrying the reason; the
+# watcher's whole job here is to relay that line verbatim as an actionable wake.
+#
+# Both directions, because a relay that swallows the alarm and a relay that
+# invents one are the same class of instrument lie. The threshold and the reason
+# themselves belong to the tick and are pinned in tests/fm-bridge.test.sh.
+#
+# FM_BRIDGE_INTERVAL is left at its default 999999-equivalent (age_of returns
+# 999999 for a missing marker) so EXACTLY ONE tick runs per case: the first poll
+# ticks because state/.last-bridge is absent, and the marker it then writes
+# closes the gate for the rest of the run.
+
+bridge_failing_case() {  # <name> -> a case whose board directory is a FILE
+  local dir
+  dir=$(make_case "$1")
+  mkdir -p "$dir/home"
+  : > "$dir/blocked"
+  printf '%s\n' "$dir"
+}
+
+test_bridge_render_alarm_is_relayed_with_its_reason() {
+  local dir state fakebin out drain_out pid
+  dir=$(bridge_failing_case bridge-render-alarm); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; drain_out="$dir/drain.out"
+  # Two failures already on the record, so this run's single tick is the third.
+  printf '2\tcannot create the board directory %s\n' "$dir/blocked" > "$state/.bridge-tick-failures"
+  PATH="$fakebin:$PATH" FM_HOME="$dir/home" FM_STATE_OVERRIDE="$state" \
+    FM_BRIDGE_BOARD="$dir/blocked/bridge.html" FM_BRIDGE_INTERVAL=999999 \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 60 \
+    || fail "a board that has failed to render three times in a row was never surfaced: $(cat "$out")"
+  grep -F "failed to render 3 times in a row" "$out" >/dev/null \
+    || fail "the watcher did not relay the board's render alarm: $(cat "$out")"
+  grep -F "$dir/blocked" "$out" >/dev/null \
+    || fail "the relayed alarm names no reason, so it only reports that something failed: $(cat "$out")"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after the board alarm failed"
+  grep "$(printf '\tcheck\t')" "$drain_out" | grep -F "failed to render" >/dev/null \
+    || fail "the board render alarm was not queued durably"
+  pass "three consecutive failed board renders surface as an actionable wake carrying the reason"
+}
+
+test_single_bridge_render_failure_stays_quiet() {
+  local dir state fakebin out pid
+  dir=$(bridge_failing_case bridge-render-transient); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"
+  PATH="$fakebin:$PATH" FM_HOME="$dir/home" FM_STATE_OVERRIDE="$state" \
+    FM_BRIDGE_BOARD="$dir/blocked/bridge.html" FM_BRIDGE_INTERVAL=999999 \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_live "$pid" 30; then
+    reap "$pid"; fail "one transient failed render woke firstmate: $(cat "$out")"
+  fi
+  [ ! -s "$out" ] || fail "one transient failed render printed a wake reason: $(cat "$out")"
+  [ ! -s "$state/.wake-queue" ] || fail "one transient failed render enqueued a durable wake record"
+  # The silence has to be a decision, not a tick that never ran.
+  [ "$(cut -f1 "$state/.bridge-tick-failures" 2>/dev/null || echo 0)" -ge 1 ] \
+    || fail "the board render never actually failed here, so this guard proves nothing"
+  reap "$pid"
+  pass "a single transient render failure is counted and stays quiet; the next tick retries"
+}
+
 test_heartbeat_no_change_absorbed() {
   local dir state fakebin out pid
   dir=$(make_case heartbeat-absorb); state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"
@@ -1999,6 +2068,8 @@ test_procevent_marker_keys_are_injective
 test_procevent_surface_serializes_with_drain
 test_procevent_surface_crash_boundaries
 test_procevent_marker_failure_exits_and_replays
+test_bridge_render_alarm_is_relayed_with_its_reason
+test_single_bridge_render_failure_stays_quiet
 test_heartbeat_no_change_absorbed
 test_heartbeat_backstop_surfaces_unsurfaced_status
 test_beacon_stays_fresh_while_absorbing
