@@ -89,9 +89,173 @@ test_stale_watch_lock_reclaimed() {
   pass "killed watcher stale lock is reclaimed"
 }
 
-test_live_stale_watch_lock_is_actionable() {
+# The proven root cause of the 2026-08-04 duplication, as a regression.
+# bin/fm-watch.sh used to run the PR-check migration BEFORE its singleton gate,
+# and that migration stops a live watcher to take the exclusion for itself. A
+# newcomer therefore terminated the incumbent as its first act, before proving it
+# was entitled to replace it - a kill decided from process inspection by a
+# process that had passed no gate at all. The incumbent must survive.
+test_a_starting_watcher_never_evicts_the_incumbent() {
+  local dir state fakebin incumbent second i
+  dir=$(make_case no-prelock-eviction)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  mark_pr_check_migration_complete "$state"
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=30 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$dir/incumbent.out" 2>&1 &
+  incumbent=$!
+  i=0
+  while [ "$i" -lt 100 ] && [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" != "$incumbent" ]; do
+    sleep 0.05
+    i=$((i + 1))
+  done
+  [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" = "$incumbent" ] \
+    || { kill "$incumbent" 2>/dev/null || true; fail "incumbent never took the singleton"; }
+
+  # Put the home back into the state that arms the migration's stop path: any
+  # home lands here when a check artifact is added or an X shim is refreshed.
+  rm -f "$state/.pr-check-migration-scan-v1"
+
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=30 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$dir/second.out" 2>&1 &
+  second=$!
+  i=0
+  while [ "$i" -lt 60 ] && is_live_non_zombie "$second"; do
+    sleep 0.05
+    i=$((i + 1))
+  done
+  is_live_non_zombie "$incumbent" \
+    || fail "a starting watcher terminated the incumbent before passing its own singleton gate"
+  [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" = "$incumbent" ] \
+    || fail "the incumbent lost the singleton to a watcher that had not yet acquired it"
+  kill "$incumbent" "$second" 2>/dev/null || true
+  wait "$incumbent" 2>/dev/null || true
+  wait "$second" 2>/dev/null || true
+  pass "a starting watcher never evicts the incumbent before its own singleton gate"
+}
+
+# The lock must recognize its own holder. The identity is published from inside a
+# command substitution's caller, never from the substitution: a subshell shares
+# the holder's command line but not its start time, so a self-computed identity
+# differs by one clock tick and matches only when the fork lands inside the same
+# tick. A lock that intermittently fails to recognize its holder is a duplication
+# generator that reproduces roughly never in testing.
+test_lock_publishes_its_real_holder_identity() {
+  local dir state fakebin watcher published actual peer_role i
+  dir=$(make_case identity-at-birth)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  mark_pr_check_migration_complete "$state"
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=30 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$dir/w.out" 2>&1 &
+  watcher=$!
+  i=0
+  while [ "$i" -lt 100 ] && [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" != "$watcher" ]; do
+    sleep 0.05
+    i=$((i + 1))
+  done
+  [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" = "$watcher" ] \
+    || { kill "$watcher" 2>/dev/null || true; fail "watcher never took the singleton"; }
+  published=$(cat "$state/.watch.lock/pid-identity" 2>/dev/null || true)
+  actual=$(FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$watcher")
+  [ -n "$published" ] || fail "the lock published no holder identity"
+  [ "$published" = "$actual" ] \
+    || fail "the lock published an identity that is not its holder's (published '$published' vs actual '$actual')"
+  # supervisor-role, not role: `role` belongs to the autoarm lock's own
+  # validated enum, and these values are not in it.
+  [ "$(cat "$state/.watch.lock/supervisor-role" 2>/dev/null || true)" = watcher \
+    ] || fail "the lock did not publish its supervisor role"
+  peer_role=$(FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_singleton_holder_verified "$2" && printf "%s\n" "$FM_SINGLETON_PEER_ROLE"' _ "$LIB" "$state/.watch.lock")
+  [ "$peer_role" = watcher ] \
+    || fail "a verified holder did not report its role to the reader that documents it (got '$peer_role')"
+  [ "$(cat "$state/.watch.lock/state" 2>/dev/null || true)" = "$state" ] \
+    || fail "the lock did not publish the state directory it supervises"
+  kill "$watcher" 2>/dev/null || true
+  wait "$watcher" 2>/dev/null || true
+  pass "a supervision lock publishes its real holder identity, role, and supervised state directory"
+}
+
+# The PR-check migration holds the watcher lock as an exclusion and is NOT a
+# watcher. If that lock publishes the watcher's executable path, the home, the
+# path, and the pid identity all agree with what a watcher-health check looks
+# for, so for the whole migration window every caller asking "is this home's
+# watcher healthy?" is answered yes and handed a pid that is not a watcher.
+#
+# The verdict is taken WHILE the real migration holds the lock, from inside a
+# `stat` shim the migration itself invokes on its first act after acquiring, and
+# it is the production predicate that answers. Asserting afterwards would pass
+# for the wrong reason - the holder is gone by then, so the health check fails on
+# liveness and never reaches the question this case exists to ask. The beacon is
+# seeded fresh for the same reason: a watcher that was just paused leaves one.
+#
+# A real watcher is started inside that same window for the second half: it must
+# stand down, and it must not report the holder as a running watcher. Standing
+# down is correct; saying "already running" about the migration exclusion is a
+# world-state nobody observed.
+test_migration_exclusion_never_reads_as_a_healthy_watcher() {
+  local dir state fakebin verdict real_stat snapshot bound
+  dir=$(make_case migration-not-a-watcher)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  snapshot="$dir/held-lock-verdict"
+  real_stat=$(command -v stat) || { pass "stat not available, skipping"; return; }
+  bound=
+  command -v timeout >/dev/null 2>&1 && bound="timeout 30"
+
+  cat > "$fakebin/stat" <<SH
+#!/usr/bin/env bash
+if [ ! -e "$snapshot" ] && [ -s "$state/.watch.lock/pid" ]; then
+  FM_HOME="$dir" FM_STATE_OVERRIDE="$state" bash -c '
+    . "\$1"
+    lock="\$2/.watch.lock"
+    printf "holder=%s role=%s path=%s\n" \\
+      "\$(cat "\$lock/pid" 2>/dev/null || true)" \\
+      "\$(cat "\$lock/supervisor-role" 2>/dev/null || true)" \\
+      "\$(cat "\$lock/watcher-path" 2>/dev/null || true)"
+    if fm_watcher_healthy "\$2" "\$3" 300 "\$4"; then
+      printf "verdict=healthy-watcher reported=%s\n" "\$FM_WATCHER_HEALTHY_PID"
+    else
+      printf "verdict=no-healthy-watcher\n"
+    fi
+  ' _ "$LIB" "$state" "$ROOT/bin/fm-watch.sh" "$dir" > "$snapshot" 2>/dev/null
+  printf 'standdown-start\n' >> "$snapshot"
+  $bound env FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_POLL=5 FM_SIGNAL_GRACE=1 \\
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \\
+    bash "$ROOT/bin/fm-watch.sh" >> "$snapshot" 2>&1
+  printf 'standdown-rc=%s\n' "\$?" >> "$snapshot"
+fi
+exec "$real_stat" "\$@"
+SH
+  chmod +x "$fakebin/stat"
+
+  : > "$state/.last-watcher-beat"
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" \
+    "$ROOT/bin/fm-pr-check-migrate.sh" > "$dir/migrate.out" 2>&1 || true
+
+  [ -s "$snapshot" ] \
+    || fail "the migration's own exclusion window was never observed, so this case proved nothing"
+  grep -q '^holder=[0-9]' "$snapshot" \
+    || fail "the observed lock named no holder: $(tr '\n' '|' < "$snapshot")"
+  grep -q 'role=pr-check-migration' "$snapshot" \
+    || fail "the exclusion did not publish itself as the migration: $(tr '\n' '|' < "$snapshot")"
+  verdict=$(sed -n 's/^verdict=\([^ ]*\).*/\1/p' "$snapshot")
+  [ "$verdict" = no-healthy-watcher ] \
+    || fail "the migration's exclusion read as this home's healthy watcher: $(tr '\n' '|' < "$snapshot")"
+  grep -q '^standdown-rc=0$' "$snapshot" \
+    || fail "a watcher started against the held exclusion did not stand down cleanly: $(tr '\n' '|' < "$snapshot")"
+  grep -q '^watcher: .*pr-check-migration.*not starting$' "$snapshot" \
+    || fail "the stand-down line did not name the migration as the holder: $(tr '\n' '|' < "$snapshot")"
+  if grep -q '^watcher: already running' "$snapshot"; then
+    fail "the stand-down line reported a running watcher where only the migration exclusion held the lock: $(tr '\n' '|' < "$snapshot")"
+  fi
+  pass "the PR-check migration's exclusion never reads as this home's healthy watcher, and a stood-down watcher names it"
+}
+
+# A lock held by a live process that publishes NO identity cannot be judged
+# either way from its own contents. That is genuinely unknown - not "probably a
+# peer" and not "probably stale" - so the watcher refuses loudly and starts
+# nothing. It replaces the former beacon-age judgment, which answered this same
+# situation from how old a file was.
+test_unidentifiable_live_lock_refuses_loudly() {
   local dir state fakebin out err status
-  dir=$(make_case live-stale-lock)
+  dir=$(make_case unidentifiable-live-lock)
   state="$dir/state"
   fakebin="$dir/fakebin"
   out="$dir/watch.out"
@@ -99,12 +263,61 @@ test_live_stale_watch_lock_is_actionable() {
   mark_pr_check_migration_complete "$state"
   mkdir "$state/.watch.lock"
   printf '%s\n' "$$" > "$state/.watch.lock/pid"
-  touch -t 200001010000 "$state/.last-watcher-beat"
   status=0
-  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_GUARD_GRACE=1 FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" 2> "$err" || status=$?
-  [ "$status" -ne 0 ] || fail "watcher silently no-opped behind a live stale holder"
-  grep -F 'heartbeat is stale' "$err" >/dev/null || fail "watcher did not explain the stale live lock"
-  pass "live watcher lock with stale heartbeat is actionable"
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" 2> "$err" || status=$?
+  [ "$status" -ne 0 ] || fail "watcher silently no-opped behind a lock it could not identify"
+  grep -F 'publishes no identity for its holder' "$err" >/dev/null \
+    || fail "watcher did not report the holder as unidentifiable (got: $(tr '\n' '|' < "$err"))"
+  [ ! -e "$state/.last-watcher-beat" ] || fail "a refused watcher published a liveness beacon"
+  pass "a live lock that cannot identify its holder refuses loudly and starts nothing"
+}
+
+# The wedge case the removed beacon judgment used to cover. The singleton gate
+# no longer decides anything from beacon age - it stands down quietly for a
+# verified-live peer - but the wedge must still be LOUD, from the layer that
+# owns supervision health. Proving both halves here is what stops "the gate got
+# quieter" from silently becoming "nobody reports a wedged watcher".
+test_wedged_incumbent_is_loud_from_the_arm_layer() {
+  local dir state fakebin out err status incumbent i
+  dir=$(make_case wedged-incumbent)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  mark_pr_check_migration_complete "$state"
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=30 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$dir/incumbent.out" 2>&1 &
+  incumbent=$!
+  i=0
+  while [ "$i" -lt 100 ] && [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" != "$incumbent" ]; do
+    sleep 0.05
+    i=$((i + 1))
+  done
+  [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" = "$incumbent" ] \
+    || { kill "$incumbent" 2>/dev/null || true; fail "incumbent never took the singleton"; }
+
+  # Age the beacon behind the incumbent's back: a wedged watcher holds its lock
+  # and stops beating.
+  touch -t 200001010000 "$state/.last-watcher-beat"
+
+  out="$dir/second.out"
+  err="$dir/second.err"
+  status=0
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=30 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" 2> "$err" || status=$?
+  [ "$status" -eq 0 ] || fail "the singleton gate failed instead of standing down for a verified-live peer"
+  grep -F "already running pid $incumbent" "$out" >/dev/null \
+    || fail "second watcher did not stand down for the verified-live incumbent"
+  is_live_non_zombie "$incumbent" || fail "the incumbent was evicted by a second watcher start"
+
+  # And the wedge is still surfaced, by the arm layer, which owns health.
+  status=0
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_GUARD_GRACE=1 FM_ARM_CONFIRM_TIMEOUT=2 \
+    FM_POLL=30 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    "$WATCH_ARM" > "$dir/arm.out" 2>&1 || status=$?
+  [ "$status" -ne 0 ] || fail "arm layer reported success while the incumbent was wedged"
+  grep -F 'watcher: FAILED' "$dir/arm.out" >/dev/null \
+    || fail "arm layer did not surface the wedged incumbent (got: $(tr '\n' '|' < "$dir/arm.out"))"
+
+  kill "$incumbent" 2>/dev/null || true
+  wait "$incumbent" 2>/dev/null || true
+  pass "a wedged incumbent keeps the singleton quietly and is surfaced loudly by the arm layer"
 }
 
 test_guard_warnings() {
@@ -1248,7 +1461,11 @@ test_pid_identity_is_locale_invariant
 test_proc_pid_identity_ignores_wall_clock_and_detects_pid_reuse
 test_msys_pid_identity_uses_proc
 test_stale_watch_lock_reclaimed
-test_live_stale_watch_lock_is_actionable
+test_a_starting_watcher_never_evicts_the_incumbent
+test_lock_publishes_its_real_holder_identity
+test_migration_exclusion_never_reads_as_a_healthy_watcher
+test_unidentifiable_live_lock_refuses_loudly
+test_wedged_incumbent_is_loud_from_the_arm_layer
 test_guard_warnings
 test_lock_single_winner_under_concurrency
 test_lock_steals_dead_pid_lock

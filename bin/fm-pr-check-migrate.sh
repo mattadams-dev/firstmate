@@ -6,7 +6,18 @@
 # registered custom checks remain armed, and every other task poll is
 # quarantined for private review. A current X-mode shim is preserved by exact
 # content, while the recognized older byte-static shim is refreshed in place.
-# Usage: fm-pr-check-migrate.sh [--checks-safe]
+#
+# Watcher exclusion has two shapes, and only one of them may stop anything:
+#   default        - run standalone (session start, an operator repair). The
+#                    exclusion is acquired here, which means a live watcher must
+#                    first be stopped; that stop goes through bin/fm-safe-kill.sh,
+#                    which takes its authority from the watcher lock rather than
+#                    from inspecting the process.
+#   --watcher-owned - the CALLER is the watcher and already holds the singleton.
+#                    Nothing is stopped and no lock is acquired. bin/fm-watch.sh
+#                    uses this so a starting watcher can never terminate the
+#                    incumbent before proving it is entitled to replace it.
+# Usage: fm-pr-check-migrate.sh [--checks-safe] [--watcher-owned]
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -21,17 +32,29 @@ MARKER_VALUE=fm-pr-check-migration-v1
 SCAN_MARKER="$STATE/.pr-check-migration-scan-v1"
 SCAN_MARKER_VALUE=fm-pr-check-migration-scan-v1
 WATCH="$SCRIPT_DIR/fm-watch.sh"
+MIGRATE_PATH="$SCRIPT_DIR/fm-pr-check-migrate.sh"
 WATCH_LOCK="$STATE/.watch.lock"
 NONCANONICAL_PREFIX='!noncanonical'
 LEGACY_NONCANONICAL_PREFIX=_noncanonical
 
 ALLOW_INCOMPLETE_REPAIRS=0
-if [ "$#" -eq 1 ] && [ "$1" = --checks-safe ]; then
-  ALLOW_INCOMPLETE_REPAIRS=1
-elif [ "$#" -ne 0 ]; then
-  echo "error: invalid PR check migration request" >&2
-  exit 2
-fi
+WATCHER_OWNED=0
+WATCHER_OWNER_PID=
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --checks-safe) ALLOW_INCOMPLETE_REPAIRS=1; shift ;;
+    --watcher-owned)
+      [ "$#" -gt 1 ] || { echo "error: --watcher-owned requires the holding watcher's pid" >&2; exit 2; }
+      WATCHER_OWNED=1
+      WATCHER_OWNER_PID=$2
+      case "$WATCHER_OWNER_PID" in
+        ''|*[!0-9]*) echo "error: --watcher-owned requires the holding watcher's pid" >&2; exit 2 ;;
+      esac
+      shift 2
+      ;;
+    *) echo "error: invalid PR check migration request" >&2; exit 2 ;;
+  esac
+done
 
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
@@ -265,48 +288,78 @@ fi
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 
 stopped_watcher=0
-pid=$(cat "$WATCH_LOCK/pid" 2>/dev/null || true)
-if fm_pid_alive "$pid"; then
-  if ! fm_watcher_lock_matches_pid "$STATE" "$WATCH" "$pid" "$FM_HOME"; then
-    echo "PR_CHECK_MIGRATION: watcher ownership is ambiguous; review state/.watch.lock before rearming polls" >&2
+lock_held=0
+if [ "$WATCHER_OWNED" -eq 1 ]; then
+  # The caller is the watcher and already holds the singleton for this home.
+  # Verify that claim rather than trusting the flag: a caller that does NOT hold
+  # it would otherwise migrate with no exclusion at all.
+  owner_pid=$(cat "$WATCH_LOCK/pid" 2>/dev/null || true)
+  if [ "$WATCHER_OWNER_PID" != "$PPID" ] || [ "$owner_pid" != "$WATCHER_OWNER_PID" ]; then
+    echo "PR_CHECK_MIGRATION: --watcher-owned was requested but the watcher lock does not name the calling watcher; refusing to migrate without exclusion" >&2
     exit 1
   fi
-  kill -TERM "$pid" 2>/dev/null || {
-    echo "PR_CHECK_MIGRATION: watcher could not be paused; review state/.watch.lock before rearming polls" >&2
+  if ! fm_watcher_lock_matches_pid "$STATE" "$WATCH" "$owner_pid" "$FM_HOME"; then
+    echo "PR_CHECK_MIGRATION: --watcher-owned was requested but the watcher lock's published identity does not match its holder; refusing to migrate without exclusion" >&2
     exit 1
-  }
-  stopped_watcher=1
+  fi
+else
+  pid=$(cat "$WATCH_LOCK/pid" 2>/dev/null || true)
+  if fm_pid_alive "$pid"; then
+    if ! fm_watcher_lock_matches_pid "$STATE" "$WATCH" "$pid" "$FM_HOME"; then
+      echo "PR_CHECK_MIGRATION: watcher ownership is ambiguous; review state/.watch.lock before rearming polls" >&2
+      exit 1
+    fi
+    # Authority for this stop comes from the watcher lock, checked again inside
+    # the helper against the pid it names. Nothing here selects a target by
+    # matching process text.
+    migrate_stop_rc=0
+    "$SCRIPT_DIR/fm-safe-kill.sh" --pid "$pid" --role watcher --signal TERM --wait 5 \
+      --reason "pause the watcher for a PR-check migration" >/dev/null || migrate_stop_rc=$?
+    # 6 is "already gone before the signal". The one-shot watcher can exit
+    # between the liveness check above and the helper's own, and an exclusion
+    # that is already satisfied is not a failure to acquire it.
+    case "$migrate_stop_rc" in
+      0|6) ;;
+      *)
+        echo "PR_CHECK_MIGRATION: watcher could not be paused; review state/.watch.lock before rearming polls" >&2
+        exit 1
+        ;;
+    esac
+    stopped_watcher=1
+  fi
+
+  # Captured through a variable first: $BASHPID inside the command substitution
+  # below would be the subshell's, and the lock must publish the identity of the
+  # process that actually holds it.
+  migration_pid=${BASHPID:-$$}
+  migration_identity=$(fm_pid_identity "$migration_pid" 2>/dev/null || true)
   i=0
-  while [ "$i" -lt 100 ] && fm_pid_alive "$pid"; do
+  # The exclusion publishes THIS script's path, not the watcher's. Publishing
+  # $WATCH here would make the lock's home, executable path, and pid identity all
+  # agree with what a watcher-health check looks for, so for the whole migration
+  # window every caller asking "is this home's watcher healthy?" would be
+  # answered yes and handed a pid that is not a watcher. The migration is not an
+  # arming authority; its lock must not read as one.
+  while [ "$i" -lt 100 ]; do
+    if fm_lock_with_owner_seed "$(fm_singleton_seed pr-check-migration "$FM_HOME" "$STATE" "$MIGRATE_PATH" "$migration_identity")" \
+      fm_lock_try_acquire "$WATCH_LOCK"; then
+      lock_held=1
+      break
+    fi
+    # A concurrent migration may have completed while this process waited.
+    # Its validated marker proves the old watcher crossed the boundary, so this
+    # process can continue to the normal watcher singleton instead of competing
+    # with the newly started watcher for a second migration lock.
+    if migration_complete && ! x_shim_locked_scan_needed; then
+      exit 0
+    fi
     sleep 0.05
     i=$((i + 1))
   done
-  if fm_pid_alive "$pid"; then
-    echo "PR_CHECK_MIGRATION: watcher did not pause; review state/.watch.lock before rearming polls" >&2
+  if [ "$lock_held" -ne 1 ]; then
+    echo "PR_CHECK_MIGRATION: watcher exclusion could not be acquired; review state/.watch.lock before rearming polls" >&2
     exit 1
   fi
-fi
-
-lock_held=0
-i=0
-while [ "$i" -lt 100 ]; do
-  if fm_lock_try_acquire "$WATCH_LOCK"; then
-    lock_held=1
-    break
-  fi
-  # A concurrent migration may have completed while this process waited.
-  # Its validated marker proves the old watcher crossed the boundary, so this
-  # process can continue to the normal watcher singleton instead of competing
-  # with the newly started watcher for a second migration lock.
-  if migration_complete && ! x_shim_locked_scan_needed; then
-    exit 0
-  fi
-  sleep 0.05
-  i=$((i + 1))
-done
-if [ "$lock_held" -ne 1 ]; then
-  echo "PR_CHECK_MIGRATION: watcher exclusion could not be acquired; review state/.watch.lock before rearming polls" >&2
-  exit 1
 fi
 
 MIGRATION_MARKER_TMP=

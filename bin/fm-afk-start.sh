@@ -81,25 +81,40 @@ daemon_lock_owner() {
   printf '%s\n' "$FM_AFK_LOCK"
 }
 
+# Identity comes from what the lock published, compared as whole bytes. There is
+# deliberately no "does this process's command line mention the daemon?"
+# fallback: in this fleet an agent's task text travels on argv, so a crewmate
+# briefed to fix the daemon matches that test, and so does the shell running it.
+# A lock that published no identity is answered "unknown" here and settled by the
+# daemon's own singleton gate, which refuses loudly rather than guessing.
 daemon_pid_matches() {
-  local pid=$1 owner=$2 identity current command
+  local pid=$1 owner=$2 identity current
   identity=$(cat "$owner/pid-identity" 2>/dev/null || true)
-  if [ -n "$identity" ]; then
-    current=$(fm_pid_identity "$pid") || return 1
-    [ "$current" = "$identity" ]
-    return
-  fi
-  command=$(ps -p "$pid" -o command= 2>/dev/null || true)
-  case "$command" in
-    *"$FM_AFK_DAEMON"*|*"fm-supervise-daemon.sh"*) return 0 ;;
-  esac
-  return 1
+  [ -n "$identity" ] || return 1
+  current=$(fm_pid_identity "$pid") || return 1
+  [ "$current" = "$identity" ]
 }
 
 daemon_lock_pid() {
   local owner
   owner=$(daemon_lock_owner) || return 1
   cat "$owner/pid" 2>/dev/null || true
+}
+
+# True only when nothing holds the daemon lock: it is absent, or its recorded
+# holder is provably not running. A lock whose holder is alive but unverifiable
+# is UNKNOWN and returns false here, exactly as it returns false from
+# daemon_lock_held_by_live_daemon - the two predicates are deliberately not
+# complements, because the middle case is neither.
+daemon_lock_provably_unheld() {
+  local owner pid
+  owner=$(daemon_lock_owner) || return 0
+  pid=$(cat "$owner/pid" 2>/dev/null || true)
+  case "$pid" in
+    ''|*[!0-9]*) return 0 ;;
+  esac
+  fm_pid_alive "$pid" || return 0
+  return 1
 }
 
 daemon_lock_held_by_live_daemon() {
@@ -131,13 +146,26 @@ fm_afk_start_main() {
     return 0
   fi
 
-  if fm_pid_alive "$pid" && [ -n "$pid" ]; then
-    fm_lock_remove_path "$FM_AFK_LOCK" 2>/dev/null || true
-  fi
+  # NOTHING removes the daemon lock here. This used to unlink it whenever the
+  # holder pid was alive but failed the match above - an unserialized decision,
+  # made from process inspection, outside the lock it was overriding. One
+  # transient identity read failure was enough to destroy a live daemon's lock
+  # and let a second daemon claim it, repeatably. The daemon's own singleton gate
+  # owns this now: it reclaims a holder that is provably gone or reused,
+  # serialized and re-verified, and refuses loudly when it cannot tell.
 
   # Fresh start: clear the previous away session's stale delivery artifacts
   # before the new daemon can surface them (fix for the leaked-artifact defect).
-  if [ "${FM_AFK_STATE_PREPARED:-0}" != 1 ]; then
+  #
+  # Only when this really is a fresh start. daemon_lock_held_by_live_daemon
+  # returns false for two different worlds - "no daemon holds this lock" and
+  # "a daemon holds it but its liveness cannot be established", the second being
+  # what a pre-upgrade lock or a transient identity read failure produces. The
+  # escalation buffer belongs to a live daemon in that second world, and wiping
+  # it destroys undelivered escalations for a daemon that is still running.
+  # Clearing therefore requires positive evidence that nothing holds the lock;
+  # anything else leaves the buffer alone and lets the daemon's own gate decide.
+  if [ "${FM_AFK_STATE_PREPARED:-0}" != 1 ] && daemon_lock_provably_unheld; then
     fm_afk_clear_stale_artifacts "$FM_AFK_STATE"
   fi
 

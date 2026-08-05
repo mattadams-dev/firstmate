@@ -82,10 +82,13 @@ mkdir -p "$STATE"
 . "$SCRIPT_DIR/fm-pending-reply-lib.sh"
 # shellcheck source=bin/fm-busy-lib.sh
 . "$SCRIPT_DIR/fm-busy-lib.sh"
+# Wedge-alarm reset evidence. Separate owner from busy state on purpose: this
+# answers "did anything move?", not "is a turn in progress?".
+# shellcheck source=bin/fm-health-evidence-lib.sh
+. "$SCRIPT_DIR/fm-health-evidence-lib.sh"
 
 WATCH_LOCK="$STATE/.watch.lock"
 WATCH_PATH="$SCRIPT_DIR/fm-watch.sh"
-WATCHER_STALE_GRACE=${FM_WATCHER_STALE_GRACE:-${FM_GUARD_GRACE:-300}}
 # The singleton-lock acquisition, EXIT trap, and the blocking supervision loop
 # all live below the source guard at the very bottom of this file (see "Main
 # entry"). Sourcing this file for unit tests therefore loads the functions -
@@ -288,8 +291,64 @@ FM_WEDGE_DEMAND_INSPECT_COUNT=${FM_WEDGE_DEMAND_INSPECT_COUNT:-3}
 # both places a hash can be absorbed this way: the plain non-terminal path,
 # and the stale_is_terminal-overridden path (a captain-relevant status-log
 # line that an active run/busy pane outranked).
-wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-file>
-  local win=$1 since_file=$2 label=$3 escalation_file=$4 since age n reason
+# Evidence of health resets the wedge ratchet. Called on every poll that would
+# otherwise advance an escalation, BEFORE the timer is consulted, so a lane that
+# is demonstrably working never accumulates a count it can only ratchet upward.
+#
+# The reset is caused by an observed CHANGE between two samples - rendered
+# output, process-tree CPU, or live descendants - and never by elapsed time. A
+# time-based amnesty would pardon the slow wedge this machinery exists to catch.
+# bin/fm-health-evidence-lib.sh owns which signals count and why.
+#
+# An unknown comparison leaves the alarm exactly as it was: absence of evidence
+# is not evidence of health, and it must not accelerate the alarm either.
+health_evidence_reset() {  # <window> <rendered-hash> <since-file> <escalation-count-file>
+  local win=$1 rendered=$2 since_file=$3 escalation_file=$4
+  local key sample_file prev cur n verdict
+  key=$(printf '%s' "$win" | tr ':/.' '___')
+  sample_file="$STATE/.health-sample-$key"
+  cur=$(fm_health_sample "$(window_backend "$win")" "$win" "$rendered")
+  prev=$(cat "$sample_file" 2>/dev/null || true)
+  printf '%s\n' "$cur" > "$sample_file" 2>/dev/null || true
+  fm_health_compare "$prev" "$cur"
+  verdict=$?
+  [ "$verdict" -eq 0 ] || return 1
+  n=$(cat "$escalation_file" 2>/dev/null || echo 0)
+  case "$n" in ''|*[!0-9]*) n=0 ;; esac
+  rm -f "$since_file" "$escalation_file"
+  # Logged as a transition, not merely dropped, so the alarm history stays
+  # reconstructable: a count that silently vanishes is indistinguishable from
+  # one that was never raised.
+  triage_log "wedge escalation reset by proven health: $win (escalation $n -> 0, advanced: ${FM_HEALTH_ADVANCED:-none})"
+  return 0
+}
+
+wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-file> <alarm-subject> [rendered-hash]
+  local win=$1 since_file=$2 label=$3 escalation_file=$4 subject=${5:-} rendered=${6:-} since age n reason
+  # Which alarm is this, and is evidence-of-movement its counterpart?
+  #
+  #   liveness        the STALE alarm - "this pane may be wedged". Evidence that
+  #                   anything moved is exactly its counterpart, so the reset
+  #                   applies.
+  #   turn-completion the BUSY alarm - "a turn has not finished in far too long".
+  #                   A pane that is producing output while completing no turn is
+  #                   the very shape this alarm exists to catch, so movement is
+  #                   NOT its counterpart. Its counterpart is a completed turn,
+  #                   which already clears this timer through busy_turn_over_age.
+  #
+  # The subject is stated explicitly and anything else fails closed to no reset.
+  # It used to be inferred from whether a rendered hash was passed, which was
+  # wrong in a way that could not be seen: withholding the hash blanks only that
+  # ONE component, while fm_health_sample still reads process-tree CPU and live
+  # descendants - and a busy pane's CPU advances between polls by definition. So
+  # the busy alarm reset on essentially every poll and could never escalate. An
+  # alarm that can never sound is the mirror image of a guard that refuses
+  # everything, and it fails silently.
+  if [ "$subject" = liveness ] \
+    && health_evidence_reset "$win" "$rendered" "$since_file" "$escalation_file"; then
+    date +%s > "$since_file"
+    return 0
+  fi
   since=$(cat "$since_file" 2>/dev/null || true)
   case "$since" in
     ''|*[!0-9]*)
@@ -345,7 +404,7 @@ handle_paused_stale() {  # <window> <task> <hash>
   key=$(printf '%s' "$win" | tr ':/.' '___')
   printf '%s' "$h" > "$STATE/.stale-$key"
   : > "$STATE/.paused-$key"
-  rm -f "$STATE/.stale-since-$key" "$STATE/.wedge-escalations-$key"
+  rm -f "$STATE/.stale-since-$key" "$STATE/.wedge-escalations-$key" "$STATE/.health-sample-$key"
   statusf="$STATE/$task.status"
   mtime=$(stat_mtime "$statusf")
   case "$mtime" in ''|*[!0-9]*) mtime=$(date +%s) ;; esac
@@ -415,7 +474,7 @@ clear_pause_tracking() {  # <window>
   key=${key//\//_}
   key=${key//./_}
   clear_pause_state "$win"
-  rm -f "$STATE/.stale-$key" "$STATE/.stale-since-$key" "$STATE/.wedge-escalations-$key"
+  rm -f "$STATE/.stale-$key" "$STATE/.stale-since-$key" "$STATE/.wedge-escalations-$key" "$STATE/.health-sample-$key"
 }
 
 # Reconcile a declared pause or captain-held status with authoritative crew state.
@@ -761,33 +820,41 @@ if [ "${BASH_SOURCE[0]}" != "$0" ]; then
   return 0
 fi
 
-# Before acquiring the watcher lock or enumerating any runnable check, replace
-# or quarantine checks created by older versions. The migration compares bytes
-# and reads data only; it never invokes legacy check files through Bash.
-"$SCRIPT_DIR/fm-pr-check-migrate.sh" --checks-safe || {
-  echo "watcher: PR check migration blocked; refusing to execute state checks" >&2
-  exit 1
-}
-
-if ! fm_lock_try_acquire "$WATCH_LOCK"; then
-  BEAT="$STATE/.last-watcher-beat"
-  if [ -n "${FM_LOCK_HELD_PID:-}" ]; then
-    if [ -e "$BEAT" ]; then
-      beat_age=$(fm_path_age "$BEAT")
-      if [ "$beat_age" -ge "$WATCHER_STALE_GRACE" ]; then
-        echo "watcher: lock held by live pid $FM_LOCK_HELD_PID but heartbeat is stale for ${beat_age}s (>${WATCHER_STALE_GRACE}s); inspect or stop that watcher before re-arming." >&2
-        exit 1
+# SINGLETON AT BIRTH. This is the first act of the watcher runtime, before any
+# other work, because whatever a supervisor does before its singleton gate it
+# does as an unaccountable second supervisor. The gate is decided from the lock
+# alone - never from a beacon age against a grace threshold, which cannot tell a
+# working peer from a wedged one and gets the answer catastrophically wrong in
+# both directions. bin/fm-wake-lib.sh owns the decision procedure.
+fm_supervisor_singleton_acquire "$WATCH_LOCK" watcher "$FM_HOME" "$STATE" "$WATCH_PATH"
+case $? in
+  0) ;;
+  1)
+    # Standing down is right in every case here, but "already running" is a claim
+    # about WHAT holds the lock, and the holder is not always a watcher: the
+    # standalone PR-check migration takes this same lock as an exclusion. Saying
+    # "watcher" for it would report a world-state nobody observed, which is the
+    # false-confidence direction this seam already fixed on the health side. A
+    # holder that publishes no role predates the field, so the peer wording -
+    # which is what it almost always is - stays the honest default there.
+    if [ -n "${FM_SINGLETON_PEER_ROLE:-}" ] && [ "${FM_SINGLETON_PEER_ROLE:-}" != watcher ]; then
+      if [ -n "${FM_SINGLETON_PEER_PID:-}" ]; then
+        echo "watcher: lock $WATCH_LOCK is held by $FM_SINGLETON_PEER_ROLE pid $FM_SINGLETON_PEER_PID, not by a watcher; not starting"
+      else
+        echo "watcher: lock $WATCH_LOCK is held by $FM_SINGLETON_PEER_ROLE, not by a watcher; not starting"
       fi
-    elif [ "$(fm_path_age "$WATCH_LOCK")" -ge "$WATCHER_STALE_GRACE" ]; then
-      echo "watcher: lock held by live pid $FM_LOCK_HELD_PID but no heartbeat exists; inspect or stop that watcher before re-arming." >&2
-      exit 1
+    elif [ -n "${FM_SINGLETON_PEER_PID:-}" ]; then
+      echo "watcher: already running pid $FM_SINGLETON_PEER_PID"
+    else
+      echo "watcher: already running"
     fi
-    echo "watcher: already running pid $FM_LOCK_HELD_PID"
-  else
-    echo "watcher: already running"
-  fi
-  exit 0
-fi
+    exit 0
+    ;;
+  *)
+    echo "watcher: ${FM_SINGLETON_REASON:-watcher singleton could not be decided}; not starting a second supervisor" >&2
+    exit 1
+    ;;
+esac
 watcher_cleanup() {
   fm_active_check_stop || return 1
   fm_check_output_cleanup
@@ -799,12 +866,37 @@ trap 'exit 1' HUP INT TERM
 # This watcher's own pid, as recorded in the lock by fm_lock_claim (which writes
 # ${BASHPID:-$$} from this same main shell). Read directly, never via a command
 # substitution, so it matches the stored holder pid for the self-eviction check.
+# Home, watcher path, and pid identity were published INTO the lock before it
+# became visible, so no peer can observe this lock without being able to
+# identify its holder.
 WATCHER_PID=${BASHPID:-$$}
-printf '%s\n' "$FM_HOME" > "$WATCH_LOCK/fm-home" || true
-printf '%s\n' "$WATCH_PATH" > "$WATCH_LOCK/watcher-path" || true
+
+# Upstream's terminal-delivery ledger identifies this watcher by pid AND process
+# identity. That identity is READ BACK from the lock rather than recomputed:
+# the lock published it before it became visible, and re-deriving it here would
+# let the ledger and the lock disagree about who this watcher is - the exact
+# false-identity shape the singleton exists to remove.
 FM_WATCH_DELIVERY_PID=$WATCHER_PID
-FM_WATCH_DELIVERY_IDENTITY=$(fm_pid_identity "$WATCHER_PID" 2>/dev/null || true)
-printf '%s\n' "$FM_WATCH_DELIVERY_IDENTITY" > "$WATCH_LOCK/pid-identity" 2>/dev/null || true
+FM_WATCH_DELIVERY_IDENTITY=$(cat "$WATCH_LOCK/pid-identity" 2>/dev/null || true)
+
+# Publish the liveness beacon immediately, not on the first loop pass. An arm
+# that polls fm_watcher_healthy during a beaconless startup window sees "no
+# healthy watcher" and forks another one; the gate above makes that duplicate
+# harmless, but leaving the window open manufactures the race for no reason.
+touch "$STATE/.last-watcher-beat"
+
+# Replace or quarantine checks created by older versions before any check can be
+# enumerated. The migration compares bytes and reads data only; it never invokes
+# legacy check files through Bash. It runs BEHIND the singleton gate and in
+# watcher-owned mode: this process already holds the exclusion the migration
+# would otherwise acquire for itself, and - the reason the ordering matters - the
+# standalone migration stops a live watcher to get that exclusion. Run ahead of
+# the gate, that made every watcher start terminate the incumbent before proving
+# it was entitled to replace it.
+"$SCRIPT_DIR/fm-pr-check-migrate.sh" --checks-safe --watcher-owned "$WATCHER_PID" || {
+  echo "watcher: PR check migration blocked; refusing to execute state checks" >&2
+  exit 1
+}
 
 [ -e "$STATE/.last-heartbeat" ] || touch "$STATE/.last-heartbeat"
 
@@ -1073,7 +1165,7 @@ EOF
             # wedge timer is running for it) - keep treating it that way
             # without re-reading the crew state every poll, and without
             # letting the still-captain-relevant log line re-surface it.
-            wedge_timer_check "$w" "$ssf" "stale (overridden terminal status)" "$ewf"
+            wedge_timer_check "$w" "$ssf" "stale (overridden terminal status)" "$ewf" liveness "$h"
           fi
           # else: already surfaced as genuinely terminal on a prior poll of
           # this same hash - nothing left to do (matches the original,
@@ -1116,12 +1208,12 @@ EOF
                 paused)  handle_paused_stale "$w" "$task" "$h" ;;
                 working) clear_pause_state "$w"
                          printf '%s' "$h" > "$sf"
-                         wedge_timer_check "$w" "$ssf" "non-terminal stale (provably working after a declared pause)" "$ewf"
+                         wedge_timer_check "$w" "$ssf" "non-terminal stale (provably working after a declared pause)" "$ewf" liveness "$h"
                          triage_log "absorbed non-terminal stale (provably working): $w" ;;
                 *)       handle_paused_stale "$w" "$task" "$h" ;;
               esac
             else
-              wedge_timer_check "$w" "$ssf" "non-terminal stale" "$ewf"
+              wedge_timer_check "$w" "$ssf" "non-terminal stale" "$ewf" liveness "$h"
             fi
           fi
         fi
@@ -1130,7 +1222,7 @@ EOF
         # unless a genuinely busy pane has gone too long with no completed turn -
         # then route it through the same wedge timer instead of erasing it.
         if [ "$busy_now" -eq 0 ] && busy_turn_over_age "$task"; then
-          wedge_timer_check "$w" "$ssf" "busy (no completed turn)" "$ewf"
+          wedge_timer_check "$w" "$ssf" "busy (no completed turn)" "$ewf" turn-completion
         else
           rm -f "$ssf" "$ewf"
         fi
@@ -1142,7 +1234,7 @@ EOF
       printf '%s' "$h" > "$hf"
       echo 0 > "$cf"
       if [ "$busy_now" -eq 0 ] && busy_turn_over_age "$task"; then
-        wedge_timer_check "$w" "$ssf" "busy (no completed turn)" "$ewf"
+        wedge_timer_check "$w" "$ssf" "busy (no completed turn)" "$ewf" turn-completion
       else
         rm -f "$ssf" "$ewf"
       fi

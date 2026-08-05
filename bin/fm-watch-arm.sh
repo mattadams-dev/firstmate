@@ -70,11 +70,13 @@
 #
 # --restart: stop ONLY this FM_HOME's watcher (the pid recorded in THIS home's
 # state/.watch.lock) and own a fresh cycle, or attach if a verified live peer
-# wins the singleton while the duplicate child stands down. It
-# resolves and signals exactly that pid, so it can never touch another home's
-# watcher. NEVER `pkill -f
-# bin/fm-watch.sh`: that pattern matches every firstmate home's watcher
-# (secondmate homes run the same script) and would kill siblings.
+# wins the singleton while the duplicate child stands down. The stop goes
+# through bin/fm-safe-kill.sh, which re-derives its authority from that same
+# lock, so it can never touch another home's watcher, a session, or an ancestor.
+# A pattern-based stop is not an alternative here: the same pattern matches every
+# firstmate home's watcher (secondmate homes run the same script) and, because a
+# worker's brief travels on its argv, it also matches the workers assigned to
+# repair supervision. See docs/arm-pretool-check.md "Process termination".
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -175,10 +177,16 @@ cycle_log_append() {
     sleep 0.02
     i=$((i + 1))
   done
-  printf 'arm_pid=%s\twatcher_pid=%s\torigin=%s\tstarted_at=%s\tended_at=%s\texit_code=%s\tsignal=%s\treason=%s\tbeacon_age=%s\tlock_before=%s\tlock_after=%s\tsuccessor=%s\n' \
+  # home= and state= are recorded because their absence is what made the
+  # 2026-08-04 duplication unanswerable after the fact: the ledger could show two
+  # cycles but never say whether they belonged to one home or to two, and an
+  # instrument that cannot distinguish those worlds must not be asked to guess.
+  printf 'arm_pid=%s\twatcher_pid=%s\torigin=%s\thome=%s\tstate=%s\tstarted_at=%s\tended_at=%s\texit_code=%s\tsignal=%s\treason=%s\tbeacon_age=%s\tlock_before=%s\tlock_after=%s\tsuccessor=%s\n' \
     "$ARM_PID" \
     "$(cycle_clean_field "$cycle_watcher_pid")" \
     "$(cycle_clean_field "$cycle_origin")" \
+    "$(cycle_clean_field "$FM_HOME")" \
+    "$(cycle_clean_field "$STATE")" \
     "$cycle_started_at" \
     "$ended_at" \
     "$(cycle_clean_field "$exit_code")" \
@@ -246,14 +254,21 @@ cycle_mark_predecessor_successor() {
   fm_lock_release "$CYCLE_LOG_LOCK"
 }
 
+# Drop a lock this home published whose recorded pid is provably no longer the
+# watcher it named (a reused pid). The recorded pid is re-read and re-tested
+# immediately before the removal: without that, a lock rotated to a genuinely
+# live successor between the caller's read and this call would be unlinked out
+# from under it, turning a restart into a second watcher.
 clear_stale_recorded_watcher_lock() {
-  local lock_home lock_path lock_identity
+  local lock_home lock_path lock_identity pid
   lock_home=$(cat "$WATCH_LOCK/fm-home" 2>/dev/null || true)
   lock_path=$(cat "$WATCH_LOCK/watcher-path" 2>/dev/null || true)
   lock_identity=$(cat "$WATCH_LOCK/pid-identity" 2>/dev/null || true)
   [ "$lock_home" = "$FM_HOME" ] || return 0
   [ "$lock_path" = "$WATCH" ] || return 0
   [ -n "$lock_identity" ] || return 0
+  pid=$(cat "$WATCH_LOCK/pid" 2>/dev/null || true)
+  ! fm_watcher_lock_matches_pid "$STATE" "$WATCH" "$pid" "$FM_HOME" || return 0
   fm_lock_remove_path "$WATCH_LOCK" || true
 }
 
@@ -520,19 +535,36 @@ case "${1:-}" in
 esac
 
 if [ "$mode" = restart ]; then
-  # Home-scoped stop: only the watcher pid recorded in THIS home's lock.
+  # Home-scoped stop: only the watcher pid recorded in THIS home's lock, and the
+  # stop itself goes through bin/fm-safe-kill.sh, which re-derives its authority
+  # from that same lock and refuses a session, an ancestor, or a pid the lock
+  # does not name. The helper waits for the exit and reports it, so the fresh
+  # watcher takes a released or reclaimable lock rather than seeing the dying one
+  # as a live holder and no-opping.
   lock_pid=$(cat "$WATCH_LOCK/pid" 2>/dev/null || true)
   if fm_pid_alive "$lock_pid"; then
     if fm_watcher_lock_matches_pid "$STATE" "$WATCH" "$lock_pid" "$FM_HOME"; then
-      kill -TERM "$lock_pid" 2>/dev/null || true
-      # Wait for it to actually exit before relaunching, so the fresh watcher
-      # either takes a released lock or reclaims a now-dead-pid stale lock instead
-      # of seeing the dying one as a live holder and no-opping.
-      i=0
-      while [ "$i" -lt 50 ] && fm_pid_alive "$lock_pid"; do
-        sleep 0.1
-        i=$((i + 1))
-      done
+      restart_stop_rc=0
+      "$SCRIPT_DIR/fm-safe-kill.sh" --pid "$lock_pid" --role watcher --signal TERM --wait 5 \
+        --reason "operator-requested watcher restart" >/dev/null || restart_stop_rc=$?
+      case "$restart_stop_rc" in
+        0|6) ;;   # stopped, or already gone before the signal - either way it is not running
+        5)
+          # Signalled, still running at the deadline - a watcher inside a bounded
+          # check cannot process its trap until that check returns. This is not a
+          # refusal and must not become one: the invariant that matters is that
+          # exactly one watcher survives, and the path below preserves it either
+          # way by attaching to a verified-healthy peer instead of starting a
+          # second one. Say what was observed and continue.
+          echo "watcher: restart signal sent to pid $lock_pid, which had not exited yet; following the singleton instead of starting a second watcher" >&2
+          ;;
+        *)
+          # Refused or undecidable: the stop was never authorized, so a restart
+          # must not proceed as if it had been.
+          echo "watcher: FAILED - this home's watcher could not be stopped for a restart" >&2
+          exit 1
+          ;;
+      esac
     else
       clear_stale_recorded_watcher_lock
     fi

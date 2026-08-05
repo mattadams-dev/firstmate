@@ -123,6 +123,105 @@ matrix_case D56 deny 'for x in 1; do pkill -f fm-watch; done'
 matrix_case D57 deny 'case x in x) pkill -f fm-watch ;; esac'
 matrix_case D58 deny 'until false; do kill $(pgrep -f fm-watch); done'
 
+# --- process termination (docs/arm-pretool-check.md "Termination") ----------
+#
+# K-series: every shape that selects a target by matching text, plus every
+# termination by pid, which routes to bin/fm-safe-kill.sh instead.
+matrix_case K01 deny 'kill -TERM 17907'
+matrix_case K02 deny 'kill 17907'
+matrix_case K03 deny 'kill -9 17907'
+matrix_case K04 deny 'kill -s TERM 17907'
+matrix_case K05 deny 'kill -SIGKILL 17907'
+matrix_case K06 deny 'pkill -f fm-supervise-daemon'
+matrix_case K07 deny 'pkill node'
+matrix_case K08 deny 'killall node'
+matrix_case K09 deny 'killall -9 sleep'
+matrix_case K10 deny 'kill "$PID"'
+matrix_case K11 deny 'kill $PID'
+matrix_case K12 deny 'sudo kill -TERM 17907'
+matrix_case K13 deny 'env FOO=1 kill -TERM 17907'
+matrix_case K14 deny 'ps aux | grep firstmate | awk "{print \$2}" | xargs kill'
+matrix_case K15 deny 'pgrep -f firstmate | xargs kill -9'
+matrix_case K16 deny 'kill -- -12345'
+matrix_case K17 deny 'kill -TERM -12345'
+matrix_case K18 deny 'exec kill -TERM 17907'
+matrix_case K19 deny 'timeout 5 kill -TERM 17907'
+matrix_case K20 deny 'bash -c "kill -TERM 17907"'
+# The sanctioned helper's own name ends in `kill`, so the fallback that scans
+# unmodelled grammar has to ignore that token. These three prove ignoring it
+# launders nothing: a sibling bare kill, a killall wearing the helper's prefix,
+# and a plain kill all still fail closed inside the same unmodelled grammar.
+# K22 is redundantly guarded on purpose - the unstripped pattern scan and the
+# exemption's trailing boundary each deny it alone - so no single mutation kills
+# it. That is recorded rather than papered over; see docs/verification.
+matrix_case K21 deny 'for p in 1; do bin/fm-safe-kill.sh --pid 5; kill 9; done'
+matrix_case K22 deny 'for p in 1; do fm-safe-killall fm-watch; done'
+matrix_case K23 deny 'for p in 1 2; do kill $p; done'
+# The laundering direction for the signal-0 exemption. A probe is exempt in
+# unmodelled grammar; a delivered signal standing next to one, wearing one, or
+# arriving through the probe's own substitution is not.
+matrix_case K24 deny 'if kill -0 5; then kill -9 6; fi'
+matrix_case K25 deny 'for p in 1 2; do kill -0 -TERM $p; done'
+matrix_case K26 deny 'if kill -0"9" 5; then :; fi'
+matrix_case K27 deny 'if kill -0 $(kill -9 6); then :; fi'
+matrix_case K28 deny 'for p in 1 2; do kill -s TERM $p; done'
+matrix_case K29 deny 'while true; do kill -0 5; pkill -f node; done'
+# The watcher-pid guard keeps its absolute half. Signal 0 is exempt from it;
+# nothing that delivers a signal is, whether the pid was resolved into a
+# variable, taken straight from a substitution, or sent with no signal named at
+# all. K33 holds the fallback's half of the same boundary.
+matrix_case K30 deny 'pid=$(pgrep -f fm-watch); kill -TERM $pid'
+matrix_case K31 deny 'pid=$(pgrep -f fm-watch); kill $pid'
+matrix_case K32 deny 'kill -0 $(pgrep -f fm-watch)'
+matrix_case K33 deny 'for f in fm-watcher-lock; do bash tests/$f.test.sh; kill -9 5; done'
+
+# L-series is the mirror image, and it is the half that gets missed: a guard
+# that refuses every kill leaves supervision unrecoverable and every liveness
+# probe in the fleet broken. Signal 0 delivers nothing, job specs name only the
+# caller's own children, and the verified helper must stay reachable.
+matrix_case L01 allow 'kill -0 17907'
+matrix_case L02 allow 'kill -0 "$pid"'
+matrix_case L03 allow 'kill -0 17907 2>/dev/null'
+matrix_case L04 allow 'kill -s 0 17907'
+matrix_case L05 allow 'kill -l'
+matrix_case L06 allow 'kill %1'
+matrix_case L07 allow 'bin/fm-safe-kill.sh --pid 17907 --role watcher --reason recovery'
+matrix_case L08 allow "$ROOT/bin/fm-safe-kill.sh --pid 17907 --role supervise-daemon --reason recovery"
+matrix_case L09 allow 'pgrep -f fm-supervise-daemon'
+matrix_case L10 allow "echo 'kill -TERM 17907'"
+matrix_case L11 allow "rg -n 'pkill' docs tests"
+matrix_case L12 allow 'git status'
+# A recovery kill is written in loops and conditionals, which this parser does
+# not model, so it falls back to a raw scan. Because the one command the policy
+# mandates is itself spelled `...-kill.sh`, that scan denied the escape hatch it
+# exists to protect: supervision could not recover, and nothing said so.
+matrix_case L13 allow 'for p in 1 2; do bin/fm-safe-kill.sh --role watcher --pid $p; done'
+matrix_case L14 allow 'if true; then bin/fm-safe-kill.sh --role watcher --pid 5; fi'
+matrix_case L15 allow 'while read p; do bin/fm-safe-kill.sh --role watcher --pid $p; done < list'
+matrix_case L16 allow 'for x in fm-watch-arm; do bin/fm-safe-kill.sh --pid 5 --role watcher; done'
+matrix_case L17 allow 'for f in fm-safe-kill fm-watcher-lock; do bash tests/$f.test.sh; done'
+# The same mirror-image failure, one command over. A liveness probe is written
+# inside an `if` or a loop, which is grammar this parser does not model, so the
+# fallback denied the fleet's most common observation and left `ps | grep` -
+# the census that counted four daemons where zero existed - as the way to ask.
+# Signal 0 delivers nothing, so it is exempt wherever it appears; K24-K29 hold
+# the other side of that boundary.
+matrix_case L18 allow 'if kill -0 "$pid" 2>/dev/null; then echo alive; fi'
+matrix_case L19 allow 'for p in 1 2; do kill -0 $p; done'
+matrix_case L20 allow 'while kill -0 5; do sleep 1; done'
+matrix_case L21 allow 'if kill -s 0 "$pid"; then echo alive; fi'
+matrix_case L22 allow 'until kill -0 5; do sleep 1; done'
+# The last place the probe was still refused, and it was refused for PROXIMITY:
+# the raw scan fires on the bytes `fm-watch` co-occurring with a kill verb, so
+# L17 plus a liveness check denied, while the same two commands outside a loop
+# allowed. The boundary belongs on what a command does - observe versus act - so
+# signal 0 is exempt from the watcher-pid guard as well. K30-K33 keep that guard
+# absolute for everything that delivers a signal.
+matrix_case L23 allow 'for f in fm-safe-kill fm-watcher-lock; do bash tests/$f.test.sh; kill -0 5; done'
+matrix_case L24 allow 'pid=$(pgrep -f fm-watch); kill -0 $pid'
+matrix_case L25 allow 'for w in 1; do echo fm-watch-arm; kill -0 5; done'
+matrix_case L26 allow 'kill -0 5; echo fm-watch-arm'
+
 matrix_case E01 allow "bin/fm-watch-checkpoint.sh --seconds '180;still-one-arg'"
 matrix_case E02 allow "bin/fm-watch-checkpoint.sh --label 'fm-watch-arm.sh; literal argument'"
 matrix_case E03 allow 'bin/fm-watch-arm.sh # output > file &'
@@ -183,7 +282,7 @@ run_matrix_entry() {
   fi
 
   [ "$rc" -eq 2 ] || fail "$id via $entry must deny, got exit $rc"
-  jq -e '.hookSpecificOutput.permissionDecision == "deny" and (.systemMessage | test("\\[(watcher-(background|pipeline|redirection|bundled|nested|direct)|broad-watcher-kill|unclassifiable-protected-command)\\]"))' "$err_file" >/dev/null 2>&1 \
+  jq -e '.hookSpecificOutput.permissionDecision == "deny" and (.systemMessage | test("\\[(watcher-(background|pipeline|redirection|bundled|nested|direct)|broad-watcher-kill|pattern-kill|unverified-kill|unclassifiable-protected-command)\\]"))' "$err_file" >/dev/null 2>&1 \
     || fail "$id via $entry deny must carry a stable reason code on stderr: $(cat "$err_file")"
   if [ "$entry" = claude ]; then
     [ ! -s "$out_file" ] || fail "$id via claude deny must leave stdout empty: $(cat "$out_file")"

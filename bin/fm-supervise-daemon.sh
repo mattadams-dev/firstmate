@@ -1569,17 +1569,29 @@ fm_super_main() {
 
   [ -x "$WATCH" ] || { echo "error: watcher not found or not executable: $WATCH" >&2; exit 1; }
 
-  # --- single instance (portable lock, no flock dependency) ------------------
-  if ! fm_lock_try_acquire "$LOCK"; then
-    if [ -n "${FM_LOCK_HELD_PID:-}" ]; then
-      echo "error: another fm-supervise-daemon is already running (pid $FM_LOCK_HELD_PID, lock $LOCK held)" >&2
-    else
-      echo "error: another fm-supervise-daemon is already running (lock $LOCK held)" >&2
-    fi
-    exit 1
-  fi
+  # --- SINGLETON AT BIRTH (portable lock, no flock dependency) ---------------
+  # Same gate and same decision procedure as the watcher layer: the lock alone
+  # decides, it publishes the holder's identity before it becomes visible, and
+  # no age threshold participates. Everything below this point - backend
+  # discovery, target validation, the supervision loop - is work that only the
+  # home's one daemon is entitled to do.
+  fm_supervisor_singleton_acquire "$LOCK" supervise-daemon "$FM_HOME" "$STATE" "$FM_DAEMON_DIR/fm-supervise-daemon.sh"
+  case $? in
+    0) ;;
+    1)
+      if [ -n "${FM_SINGLETON_PEER_PID:-}" ]; then
+        echo "error: another fm-supervise-daemon is already running (pid $FM_SINGLETON_PEER_PID, lock $LOCK held)" >&2
+      else
+        echo "error: another fm-supervise-daemon is already running (lock $LOCK held)" >&2
+      fi
+      exit 1
+      ;;
+    *)
+      echo "error: ${FM_SINGLETON_REASON:-the away-mode daemon singleton could not be decided}; not starting a second daemon" >&2
+      exit 1
+      ;;
+  esac
   echo "$$" > "$PIDFILE"
-  fm_pid_identity "${BASHPID:-$$}" > "$LOCK/pid-identity" 2>/dev/null || true
 
   # --- auto-discover the supervisor BACKEND (tmux vs herdr) first -----------
   # Priority: FM_SUPERVISOR_BACKEND override > $TMUX_PANE (tmux) > $HERDR_ENV=1

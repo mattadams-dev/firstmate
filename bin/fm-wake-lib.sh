@@ -27,6 +27,19 @@ fm_pid_alive() {
   kill -0 "$pid" 2>/dev/null
 }
 
+# A reaped-but-unwaited process still answers kill -0, yet it can never run
+# again. That is a distinguishable world-state, not an unknown: naming it keeps
+# a zombie lock holder reclaimable instead of wedging supervision behind a
+# holder that will never release.
+fm_pid_is_zombie() {
+  local pid=$1 state
+  case "$pid" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  state=$(ps -o state= -p "$pid" 2>/dev/null | tr -d '[:space:]')
+  [ "${state%"${state#?}"}" = Z ]
+}
+
 fm_pid_identity() {
   local pid=$1 out proc_root stat_line starttime cmdline_hex identity_key
   local -a stat_fields
@@ -78,15 +91,26 @@ fm_path_age() {
   echo $(( $(date +%s) - m ))
 }
 
+# Is the watcher lock's published holder THIS home's live watcher? The lock is
+# also held, briefly, by holders that are not watchers - the PR-check migration
+# takes it as an exclusion - so the published role is part of the answer, not
+# only the executable path. A holder that publishes no role at all predates the
+# field and is judged on the remaining evidence; refusing those would leave every
+# pre-upgrade home unable to recognize its own running watcher.
 FM_WATCHER_MATCHED_IDENTITY=
 fm_watcher_lock_matches_pid() {
-  local state=$1 watch_path=$2 pid=$3 home=${4:-$FM_HOME} lockdir lock_home lock_path lock_identity current_identity
+  local state=$1 watch_path=$2 pid=$3 home=${4:-$FM_HOME} lockdir lock_home lock_path lock_role lock_identity current_identity
   FM_WATCHER_MATCHED_IDENTITY=
   lockdir="$state/.watch.lock"
   lock_home=$(cat "$lockdir/fm-home" 2>/dev/null || true)
   lock_path=$(cat "$lockdir/watcher-path" 2>/dev/null || true)
+  lock_role=$(cat "$lockdir/supervisor-role" 2>/dev/null || true)
   lock_identity=$(cat "$lockdir/pid-identity" 2>/dev/null || true)
   [ "$lock_home" = "$home" ] || return 1
+  case "$lock_role" in
+    ''|watcher) ;;
+    *) return 1 ;;
+  esac
   [ "$lock_path" = "$watch_path" ] || return 1
   [ -n "$lock_identity" ] || return 1
   current_identity=$(fm_pid_identity "$pid") || return 1
@@ -122,7 +146,9 @@ fm_lock_clean_known_files() {
     "$lockdir/fm-home" \
     "$lockdir/pid-identity" \
     "$lockdir/role" \
+    "$lockdir/supervisor-role" \
     "$lockdir/watcher-path" \
+    "$lockdir/state" \
     2>/dev/null || true
 }
 
@@ -158,9 +184,43 @@ fm_lock_owner_dir() {
   mktemp -d "${lock_abs}.owner.XXXXXX" 2>/dev/null
 }
 
+# Identity fields written into an owner directory BEFORE the lock symlink that
+# publishes it. Set by fm_lock_with_owner_seed; consumed by fm_lock_prepare_owner.
+# Each entry is "<filename> <content>" on its own line, so a lock is never
+# observable in a state where it names a holder but cannot say who that holder
+# is. Without this the identity files land after the link, leaving a window in
+# which a peer reads a published lock, finds no identity, and cannot distinguish
+# "a watcher that just claimed it" from "a stale claim by a reused pid".
+FM_LOCK_OWNER_SEED=
+
+# fm_lock_with_owner_seed <seed> <command...>: run a lock acquisition with
+# <seed> published into the owner directory. The seed is cleared for the
+# duration of any nested acquisition (fm_lock_try_acquire takes a sibling
+# .steal lock, which must not inherit the primary lock's identity).
+fm_lock_with_owner_seed() {
+  local seed=$1 rc
+  shift
+  FM_LOCK_OWNER_SEED=$seed
+  "$@"
+  rc=$?
+  FM_LOCK_OWNER_SEED=
+  return "$rc"
+}
+
+fm_lock_write_owner_seed() {
+  local ownerdir=$1 name content
+  [ -n "$FM_LOCK_OWNER_SEED" ] || return 0
+  while IFS=' ' read -r name content; do
+    [ -n "$name" ] || continue
+    case "$name" in */*|.|..) return 1 ;; esac
+    printf '%s\n' "$content" > "$ownerdir/$name" 2>/dev/null || return 1
+  done <<< "$FM_LOCK_OWNER_SEED"
+}
+
 fm_lock_prepare_owner() {
   local ownerdir=$1 mypid back
   mypid=${BASHPID:-$$}
+  fm_lock_write_owner_seed "$ownerdir" || return 1
   printf '%s\n' "$mypid" > "$ownerdir/pid" 2>/dev/null || return 1
   back=$(cat "$ownerdir/pid" 2>/dev/null || true)
   [ "$back" = "$mypid" ]
@@ -304,9 +364,12 @@ fm_lock_recheck_stale_owner() {
 }
 
 fm_lock_try_acquire() {
-  local lockdir=$1 pid steal cur rc steal_owner primary_owner
+  local lockdir=$1 pid steal cur rc steal_owner primary_owner seed
   FM_LOCK_HELD_PID=
   FM_LOCK_OWNER_DIR=
+  # The .steal lock below is an internal serialization token, not the lock the
+  # caller is identifying itself with, so it must never inherit the seed.
+  seed=$FM_LOCK_OWNER_SEED
 
   if fm_lock_try_create "$lockdir"; then
     return 0
@@ -323,11 +386,14 @@ fm_lock_try_acquire() {
   fi
 
   steal="$lockdir.steal"
+  FM_LOCK_OWNER_SEED=
   if ! fm_lock_try_acquire "$steal"; then
+    FM_LOCK_OWNER_SEED=$seed
     FM_LOCK_HELD_PID=$(cat "$lockdir/pid" 2>/dev/null || true)
     FM_LOCK_OWNER_DIR=
     return 1
   fi
+  FM_LOCK_OWNER_SEED=$seed
   steal_owner=${FM_LOCK_OWNER_DIR:-}
 
   cur=$(cat "$lockdir/pid" 2>/dev/null || true)
@@ -402,6 +468,43 @@ fm_lock_release() {
   rmdir "$lockdir" 2>/dev/null || true
 }
 
+# --- the alarm-reset rule, stated once ---------------------------------------
+#
+# This seam raises two alarms, and they have one shared rule between them:
+#
+#   ALARM STATE IS CLEARED ONLY BY POSITIVE EVIDENCE ABOUT THAT ALARM'S OWN
+#   SUBJECT, AND NEVER BY ELAPSED TIME.
+#
+# Elapsed time is forbidden because a time-based amnesty pardons precisely the
+# slow failure an alarm exists to catch, and does it silently. "Unknown" clears
+# nothing, and it accelerates nothing.
+#
+# The rule has exactly two applications, with disjoint subjects and disjoint
+# state. They are deliberately NOT one function: a single reset spanning both
+# would dispatch on subject into two branches that share no evidence and no
+# state, which is two mechanisms wearing one name - it would hide this boundary
+# rather than make it checkable.
+#
+#   fm_failure_episode_reset      (here)
+#     subject   the HOME's supervision chain - is anything supervising at all?
+#     state     .turnend-claude-blocks, .claude-autoarm-failure-notified,
+#               .claude-autoarm-failure-alarmed
+#     evidence  fm_watcher_healthy: a verified live identity-matched watcher
+#               with a fresh beacon. A freshness requirement is not a
+#               time-based amnesty - requiring recent evidence is the opposite
+#               of pardoning elapsed silence.
+#
+#   health_evidence_reset         (bin/fm-watch.sh)
+#     subject   ONE crewmate's pane - is that worker wedged?
+#     state     .wedge-escalations-<key>, .stale-since-<key>
+#     evidence  that pane's own rendered output, process-tree CPU, or live
+#               descendants, compared across two samples.
+#
+# THE BOUNDARY: neither reset may touch the other's state. A healthy watcher is
+# no evidence that crewmate X is unstuck, and a computing crewmate is no evidence
+# that the home is supervised. tests/fm-health-evidence.test.sh drives each reset
+# with the other's state present and asserts it survives, so the separation is a
+# fixture rather than a claim in a comment.
 fm_failure_episode_reset() {
   local state=$1 mode=${2:-acquire} lock current pid acquired=0 path
   lock="$state/.turnend-claude-blocks.lock"
@@ -437,6 +540,185 @@ fm_failure_episode_reset() {
   fi
   [ "$acquired" -eq 0 ] || fm_lock_release "$lock"
   return 0
+}
+
+# --- supervisor singleton ----------------------------------------------------
+#
+# ONE owner of "may this process become this home's <role> supervisor?", for
+# both supervision layers (bin/fm-watch.sh and bin/fm-supervise-daemon.sh).
+#
+# The decision is made from the lock alone and is total: acquired, held by a
+# verified-live peer, or unknown. It never consults a liveness beacon, an mtime,
+# or any age threshold, because a threshold cannot distinguish "a peer that is
+# alive and working" from "a peer that is alive and wedged" - and a supervisor
+# that guesses wrong in either direction either duplicates itself or evicts the
+# only healthy cycle. A wedged peer is a supervision-health question the guards
+# already own (bin/fm-guard.sh); it is never a licence to become a second one.
+#
+# The lock publishes role, home, executable path, and pid identity in the owner
+# directory BEFORE the symlink that makes it visible, so there is no window in
+# which a peer can observe a lock without being able to identify its holder.
+# A holder pid that is alive but whose current identity does not match the
+# published one is a REUSED pid, not a live peer, and is reclaimable - that
+# distinction comes from identity, never from how old anything is.
+#
+# Callers: acquire this before any other work. Whatever a supervisor does before
+# its singleton gate, it does as an unaccountable second supervisor.
+# shellcheck disable=SC2034 # Read by callers after fm_supervisor_singleton_acquire returns.
+FM_SINGLETON_PEER_PID=
+# shellcheck disable=SC2034 # Read by callers after fm_supervisor_singleton_acquire returns.
+FM_SINGLETON_PEER_ROLE=
+# shellcheck disable=SC2034 # Read by callers after fm_supervisor_singleton_acquire returns.
+FM_SINGLETON_REASON=
+
+# fm_singleton_seed <role> <home> <state> <exec_path> <pid-identity>: the
+# identity a supervisor publishes with its lock. Every acquisition of a supervision lock
+# uses this, including the PR-check migration's temporary watcher exclusion, so
+# no supervision lock is ever held by an unidentifiable holder.
+#
+# The identity is a PARAMETER, never computed here. This function is always
+# called inside a command substitution, and $BASHPID inside one is the
+# subshell's - which shares the holder's command line but not its start time, so
+# a self-computed identity would differ from the holder's by one clock tick and
+# match only when the fork happened to land inside the same tick. A lock that
+# fails to recognize its own holder is a duplication generator, and an
+# intermittent one.
+# <state> is recorded separately from <home> because they are not the same
+# identity and were being conflated. FM_STATE_OVERRIDE moves the supervised
+# fleet without changing FM_HOME, so two supervisors can legitimately record an
+# identical home while watching entirely different state directories - which is
+# exactly what makes a process-table census read them as duplicates of one
+# another. The supervised fleet is the state directory; the lock now says so.
+# The field is `supervisor-role`, not `role`. `role` already belongs to
+# fm_lock_set_role's validated autoarm|terminal-check enum on
+# state/.claude-autoarm.lock, and these values (watcher, supervise-daemon,
+# pr-check-migration) are not in it. One field name with two owners and two
+# vocabularies reads correctly right up until a lock is handed to the wrong
+# reader.
+fm_singleton_seed() {
+  printf 'supervisor-role %s\nfm-home %s\nstate %s\nwatcher-path %s\npid-identity %s\n' \
+    "$1" "$2" "$3" "$4" "$5"
+}
+
+# fm_singleton_holder_verified <lockdir>: is the lock's published holder
+# still that process? 0 yes (FM_SINGLETON_PEER_ROLE names its role), 1 provably
+# not (dead, or the pid was reused by something else), 2 undecidable.
+# Uncertainty is never resolved toward either answer.
+fm_singleton_holder_verified() {
+  local lockdir=$1 pid lock_identity current
+  # shellcheck disable=SC2034 # Read by callers after this returns.
+  FM_SINGLETON_PEER_ROLE=
+  pid=$(cat "$lockdir/pid" 2>/dev/null || true)
+  case "$pid" in
+    ''|*[!0-9]*) return 2 ;;
+  esac
+  fm_pid_alive "$pid" || return 1
+  fm_pid_is_zombie "$pid" && return 1
+  lock_identity=$(cat "$lockdir/pid-identity" 2>/dev/null || true)
+  # A lock left by a firstmate version that predates identity-at-birth cannot be
+  # judged either way from its own contents. Say so rather than guessing.
+  [ -n "$lock_identity" ] || return 2
+  # The recorded home is deliberately NOT part of this verdict. A supervision
+  # lock lives inside the state directory it governs, so reaching this lock at
+  # all already means sharing that fleet; two homes cannot contend for it unless
+  # they resolve to the same directory, in which case exactly one of them should
+  # win and this is the function that decides which. Treating a missing or
+  # differing home as undecidable instead would wedge every home whose lock
+  # predates the field - away mode could never start again - which is the
+  # can-never-arm failure this whole contract exists to avoid.
+  # Cross-home authority is a different question, and bin/fm-safe-kill.sh owns it.
+  current=$(fm_pid_identity "$pid") || return 2
+  [ "$current" = "$lock_identity" ] || return 1
+  FM_SINGLETON_PEER_ROLE=$(cat "$lockdir/supervisor-role" 2>/dev/null || true)
+  return 0
+}
+
+# Reclaim a lock whose published holder is provably not the process now wearing
+# that pid. Serialized through the same sibling .steal token the dead-holder
+# path uses, and re-verified while holding it, so two reclaimers cannot both
+# win and a holder that becomes verifiable mid-flight is left alone.
+fm_singleton_reclaim_reused() {
+  local lockdir=$1 role=$2 home=$3 state=$4 exec_path=$5 identity=$6 steal steal_owner rc=1
+  steal="$lockdir.steal"
+  fm_lock_try_acquire "$steal" || return 1
+  # The steal token we now hold would otherwise block our own re-create:
+  # fm_lock_claim refuses any claim made while a .steal exists unless it is told
+  # that this exact owner is the one holding it. This mirrors the dead-holder
+  # path in fm_lock_try_acquire, which passes the same argument for the same
+  # reason. Omitting it removes the lock and then fails to replace it, leaving
+  # the home with no lock at all.
+  steal_owner=${FM_LOCK_OWNER_DIR:-}
+  if [ "$(fm_singleton_holder_verified "$lockdir"; echo $?)" = 1 ]; then
+    fm_lock_remove_path "$lockdir" || true
+    fm_lock_with_owner_seed "$(fm_singleton_seed "$role" "$home" "$state" "$exec_path" "$identity")" \
+      fm_lock_try_create "$lockdir" "$steal_owner" && rc=0
+  fi
+  fm_lock_release "$steal"
+  return "$rc"
+}
+
+# fm_supervisor_singleton_acquire <lockdir> <role> <home> <state> <exec_path>
+#   0 - acquired; this process is now the home's <role> supervisor.
+#   1 - a verified-live holder has it; FM_SINGLETON_PEER_PID and
+#       FM_SINGLETON_PEER_ROLE name it. Standing down is the only safe act.
+#       This is returned ONLY after that holder was actually verified - a lost
+#       race is outcome 2, never a peer this never looked at.
+#   2 - undecidable; FM_SINGLETON_REASON says why. Never acquire on this path,
+#       and never resolve it by inspecting or terminating the holder.
+fm_supervisor_singleton_acquire() {
+  local lockdir=$1 role=$2 home=$3 state=$4 exec_path=$5 verdict mypid identity
+  FM_SINGLETON_PEER_PID=
+  # shellcheck disable=SC2034 # Read by callers after this returns.
+  FM_SINGLETON_PEER_ROLE=
+  FM_SINGLETON_REASON=
+
+  # A function body is not a subshell, so this is genuinely this process's pid.
+  mypid=${BASHPID:-$$}
+  identity=$(fm_pid_identity "$mypid" 2>/dev/null || true)
+  if [ -z "$identity" ]; then
+    # A supervisor that cannot state who it is must not become the singleton:
+    # every peer would then read its lock as unidentifiable and refuse to attach,
+    # and no future holder could tell a live peer from a reused pid.
+    FM_SINGLETON_REASON="this process's own identity could not be read, so it cannot publish a $role lock"
+    return 2
+  fi
+
+  if fm_lock_with_owner_seed "$(fm_singleton_seed "$role" "$home" "$state" "$exec_path" "$identity")" \
+    fm_lock_try_acquire "$lockdir"; then
+    return 0
+  fi
+
+  fm_singleton_holder_verified "$lockdir"
+  verdict=$?
+  # shellcheck disable=SC2034 # Read by callers after this returns.
+  FM_SINGLETON_PEER_PID=$(cat "$lockdir/pid" 2>/dev/null || true)
+  case "$verdict" in
+    0)
+      return 1
+      ;;
+    1)
+      # Dead holder, or a pid the OS handed to something else. Reclaiming the
+      # LOCK is safe and is what keeps supervision recoverable; nothing here
+      # touches the process wearing that pid.
+      fm_singleton_reclaim_reused "$lockdir" "$role" "$home" "$state" "$exec_path" "$identity" && return 0
+      # The reclaim did not succeed, and nothing here verified a live holder -
+      # the published one was provably gone or reused. Returning 1 would mean
+      # "a verified-live holder has it", and the caller would announce a peer
+      # that was never verified. That is false certainty inside a three-outcome
+      # design whose whole point is that undecidable is first-class, so this is
+      # undecidable and says so. It self-corrects: whoever did win the lock is a
+      # real supervisor, and the next acquisition reads it as a verified peer.
+      # shellcheck disable=SC2034 # Read by callers after this returns.
+      FM_SINGLETON_PEER_PID=
+      FM_SINGLETON_REASON="lock $lockdir was contended while its published holder was retiring, and no live holder was verified"
+      return 2
+      ;;
+    *)
+      # shellcheck disable=SC2034 # Read by callers after this returns.
+      FM_SINGLETON_REASON="lock $lockdir is held but publishes no identity for its holder, so a live peer cannot be told from a reused pid"
+      return 2
+      ;;
+  esac
 }
 
 fm_wake_clean_field() {

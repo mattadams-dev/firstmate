@@ -119,7 +119,8 @@ state/               volatile runtime signals; gitignored
   .afk               durable away-mode flag; present = sub-supervisor may inject escalations (set by /afk, cleared on user return)
   .watch.lock .wake-queue.lock watcher singleton and queue serialization locks
   .claude-autoarm.lock .claude-autoarm-epoch .claude-autoarm-failure-notified .claude-autoarm-failure-alarmed .turnend-claude-blocks .turnend-claude-blocks.lock   Claude Stop auto-arm single-flight, epoch, failure-episode, attended-alarm, guard-budget, and budget-lock records; never touch
-  .hash-* .count-* .stale-* .stale-since-* .paused-* .wedge-escalations-* .seen-* .hb-surfaced-* .last-* .heartbeat-streak .watch-successor-output.* .watch-deliveries.*   watcher internals; never touch
+  .hash-* .count-* .stale-* .stale-since-* .paused-* .wedge-escalations-* .health-sample-* .seen-* .hb-surfaced-* .last-* .heartbeat-streak .watch-successor-output.* .watch-deliveries.*   watcher internals; never touch
+  .safe-kill.log     durable record of every termination bin/fm-safe-kill.sh performed or refused, with the reason it was given
   .watch-triage.log  watcher's absorbed-wake debug log (size-capped); never relied on, safe to delete
   .last-watcher-beat watcher liveness beacon, touched every poll (including while absorbing benign wakes); guard scripts read it
   .subsuper-* .supervise-daemon.*   sub-supervisor internals; never touch
@@ -386,7 +387,8 @@ When X-linked work reaches a milestone or terminal state, load `fmx-respond`; be
 
 A secondmate's idle endpoint is healthy, and parent supervision relies on its routed status rather than treating a quiet pane as stale.
 Waiting on a healthy supervision cycle is silent; empty polls, elapsed time, and no-change updates are not captain-facing progress.
-Never broadly kill watchers, especially never `pkill -f bin/fm-watch.sh`, because that can kill sibling firstmate homes.
+Never select a process to terminate by matching text: in this fleet a worker's instructions travel on its command line, so a pattern that names a supervisor matches the workers assigned to fix it and the shell running the search.
+Route every termination through `bin/fm-safe-kill.sh`, which takes its authority from the lock naming the target; its refusal is a stop-and-escalate result, never an obstacle to work around.
 A forced repair must use the home-scoped owner path emitted by supervision instructions.
 
 Guard warnings do not replace the contract.
