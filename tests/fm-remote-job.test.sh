@@ -19,7 +19,82 @@ REAL_GIT=$(command -v git)
 OTHER_PID=
 RECOVERY_WORKER_PID=
 mkdir -p "$REMOTE_ROOT/bin" "$REMOTE_HOME" "$ACCOUNT_HOME" "$RUNTIME_BIN"
-trap 'if [ -n "$OTHER_PID" ]; then kill "$OTHER_PID" 2>/dev/null || true; fi; if [ -n "$RECOVERY_WORKER_PID" ]; then kill "$RECOVERY_WORKER_PID" 2>/dev/null || true; fi; if [ -f "$STATE_ROOT/worker.pid" ]; then kill "$(cat "$STATE_ROOT/worker.pid")" 2>/dev/null || true; fi; rm -rf -- "$TMP_ROOT"' EXIT
+
+# True only when <pid> is BOTH live and running this test's own mktemp-unique
+# fixture worker path. A recorded pid is only a record: by teardown the process is
+# often already gone and its number reused, so the file alone is never authority
+# to signal. Both facts checked here are self-owned, so nothing outside this test
+# can ever be selected - the hazard this suite pins at "stale ownership is
+# reclaimed without signaling a reused pid".
+fixture_worker_pid() { # <pid>
+  local pid=${1:-}
+  case "$pid" in ''|*[!0-9]*) return 1 ;; esac
+  case "$(ps -o args= -p "$pid" 2>/dev/null || true)" in
+    *"$REMOTE_ROOT/bin/fm-remote-job-worker.sh"*) return 0 ;;
+  esac
+  return 1
+}
+
+# Stop the worker tree and WAIT for it before removing the directory it lives in.
+#
+# What this test launches is worker_supervise_linux, not the worker itself: it
+# respawns its --serve child whenever that child exits non-zero. Signalling only
+# the pid recorded in worker.pid and deleting the tree in the same breath left the
+# child's shutdown writing into a directory rm was already removing, which failed
+# the shutdown, which is exactly the supervisor's respawn trigger - so the tree got
+# rebuilt underneath the removal. That surfaces as
+# "rm: cannot remove ...: Directory not empty", printed after the real message, so
+# it reads as a second unrelated defect while burying the assertion that actually
+# failed; and whatever rm did win left a live supervisor spinning in the runner.
+# The supervisor is reached structurally, as the parent of the recorded child.
+stop_worker_tree() { # <state-root>
+  local state=$1 child supervisor
+  child=
+  if [ -f "$state/worker.pid" ]; then
+    child=$(tr -d ' \n' < "$state/worker.pid" 2>/dev/null || true)
+  fi
+  fixture_worker_pid "$child" || child=
+  supervisor=
+  if [ -n "$child" ]; then
+    supervisor=$(ps -o ppid= -p "$child" 2>/dev/null | tr -d ' ' || true)
+    fixture_worker_pid "$supervisor" || supervisor=
+  fi
+  if [ -n "$supervisor" ]; then kill -TERM "$supervisor" 2>/dev/null || true; fi
+  if [ -n "$child" ]; then kill -TERM "$child" 2>/dev/null || true; fi
+  for _ in $(seq 1 100); do
+    if ! fixture_worker_pid "$supervisor" && ! fixture_worker_pid "$child"; then
+      return 0
+    fi
+    sleep 0.05
+  done
+  if [ -n "$supervisor" ]; then kill -KILL "$supervisor" 2>/dev/null || true; fi
+  if [ -n "$child" ]; then kill -KILL "$child" 2>/dev/null || true; fi
+  sleep 0.2
+  return 0
+}
+
+fm_remote_job_test_teardown() {
+  if [ -n "$OTHER_PID" ]; then kill "$OTHER_PID" 2>/dev/null || true; fi
+  if [ -n "$RECOVERY_WORKER_PID" ]; then
+    kill "$RECOVERY_WORKER_PID" 2>/dev/null || true
+    for _ in $(seq 1 100); do
+      kill -0 "$RECOVERY_WORKER_PID" 2>/dev/null || break
+      sleep 0.05
+    done
+  fi
+  stop_worker_tree "$STATE_ROOT"
+  stop_worker_tree "$TMP_ROOT/recovery-jobs"
+  # Report a leftover rather than swallowing it or letting a failed removal read
+  # as a failing test: by here the tree is stopped, so anything still present is
+  # news worth printing.
+  if ! rm -rf -- "$TMP_ROOT" 2>/dev/null; then
+    sleep 0.5
+    rm -rf -- "$TMP_ROOT" 2>/dev/null ||
+      printf 'warning: could not fully remove %s\n' "$TMP_ROOT" >&2
+  fi
+  return 0
+}
+trap fm_remote_job_test_teardown EXIT
 
 cp "$ROOT/bin/fm-remote-job-lib.sh" "$ROOT/bin/fm-remote-job-worker.sh" "$REMOTE_ROOT/bin/"
 printf 'fixture\n' > "$REMOTE_ROOT/AGENTS.md"
@@ -278,7 +353,26 @@ fm_remote_job_reap "$ACCOUNT_HOME" "$JOB_ID" || fail "the timed-out job could no
 pass "the worker enforces the job timeout and publishes its result"
 
 QUEUED_SIDE_EFFECT="$TMP_ROOT/queued-side-effect"
-fm_remote_job_stage "$ACCOUNT_HOME" "$REMOTE_ROOT" "$REMOTE_HOME" fm-timeout-job.sh < /dev/null > /dev/null
+BLOCKING_SIDE_EFFECT="$TMP_ROOT/blocking-side-effect"
+# The expired condition is built so that it is already true, and already durable,
+# before the worker can look at the queued job even once.
+#
+# It used to be built by racing the worker instead: the job was staged with a live
+# 5-second queue deadline and that deadline was then rewritten to an expired one,
+# which only held if the rewrite landed before the blocking job released the
+# worker. The blocking job ran for one second, so the entire budget for staging a
+# job and rewriting its record was under a second - 0.886s measured idle. On a
+# loaded runner the rewrite lost that race; the worker then ran a job whose
+# recorded deadline was genuinely still in the future, which is correct behavior,
+# and the assertion reported the product broken for obeying its own input.
+#
+# Here the blocking job holds the worker for several times the queued job's whole
+# queue timeout, and nothing rewrites a live record. Load can only delay the
+# worker's release, which widens the margin, so the construction gets stronger
+# under exactly the conditions that used to break it.
+FM_REMOTE_JOB_TIMEOUT=10
+fm_remote_job_stage "$ACCOUNT_HOME" "$REMOTE_ROOT" "$REMOTE_HOME" \
+  fm-delay-job.sh 5 "$BLOCKING_SIDE_EFFECT" < /dev/null > /dev/null
 FIRST_JOB_ID=$FM_REMOTE_JOB_ID
 FIRST_JOB_DIR="$STATE_ROOT/jobs/$FIRST_JOB_ID"
 for _ in $(seq 1 100); do
@@ -287,9 +381,21 @@ for _ in $(seq 1 100); do
 done
 [ "$(fm_remote_job_read_state "$FIRST_JOB_DIR" 2>/dev/null || true)" = running ] \
   || fail "the blocking job did not begin running"
+FM_REMOTE_JOB_QUEUE_TIMEOUT=1
+FM_REMOTE_JOB_TIMEOUT=5
 fm_remote_job_stage "$ACCOUNT_HOME" "$REMOTE_ROOT" "$REMOTE_HOME" fm-touch-job.sh "$QUEUED_SIDE_EFFECT" < /dev/null > /dev/null
 JOB_ID=$FM_REMOTE_JOB_ID
-printf '%s\n' "$(fm_remote_job_read_deadline "$FIRST_JOB_DIR")" > "$STATE_ROOT/jobs/$JOB_ID/queue_deadline"
+FM_REMOTE_JOB_QUEUE_TIMEOUT=5
+QUEUED_DEADLINE=$(fm_remote_job_read_number "$STATE_ROOT/jobs/$JOB_ID" queue_deadline) \
+  || fail "the queued job did not record a durable deadline"
+while [ "$(date +%s)" -le "$QUEUED_DEADLINE" ]; do sleep 0.05; done
+# Checked rather than assumed: the deadline has to expire while the blocking job
+# still owns the worker, because only then is every later look obliged to expire
+# it. If a machine were ever slow enough to break that, this names the fixture
+# instead of letting the assertion below accuse the worker of a fault it did not
+# commit - the failure mode this whole case was rewritten to remove.
+[ "$(fm_remote_job_read_state "$FIRST_JOB_DIR" 2>/dev/null || true)" = running ] \
+  || fail "fixture precondition lost: the blocking job released the worker before the queued deadline passed"
 fm_remote_job_wait "$ACCOUNT_HOME" "$FIRST_JOB_ID" || fail "$FM_REMOTE_JOB_ERROR"
 fm_remote_job_wait "$ACCOUNT_HOME" "$JOB_ID" || fail "$FM_REMOTE_JOB_ERROR"
 [ "$FM_REMOTE_JOB_EXIT" -eq 124 ] || fail "an expired queued job did not publish a timeout result"
@@ -297,6 +403,32 @@ assert_absent "$QUEUED_SIDE_EFFECT" "the worker executed a queued job after its 
 fm_remote_job_reap "$ACCOUNT_HOME" "$FIRST_JOB_ID" || fail "the blocking job could not be reaped"
 fm_remote_job_reap "$ACCOUNT_HOME" "$JOB_ID" || fail "the expired queued job could not be reaped"
 pass "the worker expires queued jobs before they can mutate"
+
+# The same guarantee with the timing forced rather than arranged: the queued
+# record is completed, and its deadline allowed to pass, while no worker exists at
+# all. The worker's first sight of the job is therefore always of an already
+# expired one, on any machine at any load, with no window for it to be seen
+# earlier. This is the case that would have caught the original defect had it been
+# real, and it cannot itself go order-sensitive.
+PRESTARTED_SIDE_EFFECT="$TMP_ROOT/prestarted-side-effect"
+stop_worker_tree "$STATE_ROOT"
+assert_absent "$STATE_ROOT/worker.pid" "the worker tree did not stop before the pre-expired stage"
+FM_REMOTE_JOB_QUEUE_TIMEOUT=1
+FM_REMOTE_JOB_TIMEOUT=5
+fm_remote_job_stage "$ACCOUNT_HOME" "$REMOTE_ROOT" "$REMOTE_HOME" \
+  fm-touch-job.sh "$PRESTARTED_SIDE_EFFECT" < /dev/null > /dev/null
+JOB_ID=$FM_REMOTE_JOB_ID
+FM_REMOTE_JOB_QUEUE_TIMEOUT=5
+QUEUED_DEADLINE=$(fm_remote_job_read_number "$STATE_ROOT/jobs/$JOB_ID" queue_deadline) \
+  || fail "the pre-expired job did not record a durable deadline"
+while [ "$(date +%s)" -le "$QUEUED_DEADLINE" ]; do sleep 0.05; done
+fm_remote_job_ensure_worker "$REMOTE_ROOT" "$ACCOUNT_HOME" || fail "$FM_REMOTE_JOB_ERROR"
+fm_remote_job_wait "$ACCOUNT_HOME" "$JOB_ID" || fail "$FM_REMOTE_JOB_ERROR"
+[ "$FM_REMOTE_JOB_EXIT" -eq 124 ] \
+  || fail "a job whose deadline passed before the worker started was not expired"
+assert_absent "$PRESTARTED_SIDE_EFFECT" "a worker executed a job that expired before the worker existed"
+fm_remote_job_reap "$ACCOUNT_HOME" "$JOB_ID" || fail "the pre-expired job could not be reaped"
+pass "a queued job that expires before the worker starts is never executed"
 
 FIRST_DELAYED_SIDE_EFFECT="$TMP_ROOT/first-delayed-side-effect"
 SECOND_DELAYED_SIDE_EFFECT="$TMP_ROOT/second-delayed-side-effect"
