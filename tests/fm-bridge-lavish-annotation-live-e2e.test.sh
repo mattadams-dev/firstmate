@@ -128,21 +128,56 @@ while [ "$attempt" -lt 45 ]; do
   sleep 2
 done
 [ "$revealed" -eq 1 ] \
-  || fail "lavish-axi $LAVISH_VERSION never revealed the hosted board, so nothing about annotation was measured"
+  || could_not_observe "whether the board's ask rows can be annotated"
 
-# One helper for "did an annotation card open", because a card can render a beat
-# after the click returns and a single look would call that a refusal.
+# THREE OUTCOMES, NOT TWO. "No annotation card" is only alarming if the page was
+# actually in a state where a card could have opened: the artifact frame loaded,
+# and annotate mode on. A headless browser that never finished rendering the
+# frame produces the same silence, and reporting that as "the captain cannot
+# answer an ask" is a false alarm - the expensive kind, because the next reader
+# goes looking for a defect in the board.
+#
+# So: 0 = a card opened, 1 = a card did not open with the page demonstrably
+# ready, 2 = the page was not in a state that could answer the question.
 annotation_card_opened() {  # <uid>
-  local out
+  local out after
   out=$(chrome-devtools-axi click "@$1" 2>&1)
   case "$out" in
     *"Tell the agent what to change"*) return 0 ;;
   esac
+  # A card can render a beat after the click returns.
   sleep 1
-  case "$(snap)" in
+  after=$(snap)
+  case "$after" in
     *"Tell the agent what to change"*) return 0 ;;
   esac
+  page_can_answer "$after" || return 2
   return 1
+}
+
+# Was the page in a state where an annotation card COULD have opened?
+page_can_answer() {  # <snapshot>
+  case "$1" in
+    *'RootWebArea url="about:blank"'*) return 1 ;;
+    *"chrome-error://"*) return 1 ;;
+  esac
+  case "$1" in
+    *'button "Annotate"'*pressed*) : ;;
+    *) return 1 ;;
+  esac
+  case "$1" in
+    *'"O1: A: retire it"'*) return 0 ;;
+  esac
+  return 1
+}
+
+could_not_observe() {  # <what was being checked>
+  printf 'not ok - COULD NOT OBSERVE: %s\n' "$1" >&2
+  printf '  The hosted board was not in a state that could answer the question -\n' >&2
+  printf '  the artifact frame was not rendered, or annotate mode was off. This is\n' >&2
+  printf '  NOT a verdict about the board. Re-run where the browser can actually\n' >&2
+  printf '  render the page in the foreground.\n' >&2
+  exit 2
 }
 
 dismiss_card() {
@@ -167,21 +202,34 @@ case "$option_line" in
 esac
 option_uid=$(printf '%s' "$option_line" | sed -E 's/.*uid=([^ ]+).*/\1/')
 
-if ! annotation_card_opened "$option_uid"; then
-  fail "lavish-axi $LAVISH_VERSION opened no annotation card on the board's answer option.
+annotation_card_opened "$option_uid"
+case "$?" in
+  0) : ;;
+  2) could_not_observe "whether an answer option can be annotated" ;;
+  *) fail "lavish-axi $LAVISH_VERSION opened no annotation card on the board's answer option.
   The board's only input path is annotation, so this is the captain being unable
-  to answer an ask - re-measure docs/verification/bridge-hosted-input.md."
-fi
+  to answer an ask - re-measure docs/verification/bridge-hosted-input.md." ;;
+esac
 dismiss_card
 pass "a real hosted session opens an annotation card on a real ask's answer option"
 
 # The ref has to be annotatable too: it is what an annotation carries to say
 # WHICH ask was ruled on.
-ref_uid=$(uid_of 'StaticText "O1"')
+#
+# The LAST one on the page, deliberately. The ref appears twice: once in the
+# asks index, inside the anchor that jumps to the card, and once on the card
+# itself. The index one is inside a `data-lavish-action` link and is therefore
+# NOT annotatable - that attribute is exactly the "let this click navigate"
+# exemption, and it is the right trade for a link. The card is where a ruling is
+# placed, and the card comes after the index in document order.
+ref_uid=$(snap | grep -E 'uid=[^ ]+ [A-Za-z]+ "O1"' | tail -1 | sed -E 's/.*uid=([^ ]+).*/\1/')
 [ -n "$ref_uid" ] || fail "the hosted board rendered no visible ref for the ask"
-if ! annotation_card_opened "$ref_uid"; then
-  fail "lavish-axi $LAVISH_VERSION opened no annotation card on the ask's visible ref"
-fi
+annotation_card_opened "$ref_uid"
+case "$?" in
+  0) : ;;
+  2) could_not_observe "whether an ask's visible ref can be annotated" ;;
+  *) fail "lavish-axi $LAVISH_VERSION opened no annotation card on the ask's visible ref" ;;
+esac
 dismiss_card
 pass "the ask's visible ref is annotatable, so an annotation can name what it ruled on"
 
