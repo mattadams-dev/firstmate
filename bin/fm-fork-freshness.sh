@@ -29,6 +29,9 @@
 #   FORK_FRESHNESS: <owner/repo> status=unknown reason=<text>
 #   FORK_FRESHNESS_COVERAGE: owner=<login> repos=<n> forks=<n> swept=<n> behind=<n> unknown=<n> ignored=<n>
 #   FORK_FRESHNESS_COVERAGE: status=unknown reason=<text>
+# The two coverage lines are independent: a sweep whose repository list came back
+# at the enumeration cap prints the counts it did determine AND an unknown
+# coverage line naming the cap, because forks past the cap were never read.
 # An unknown reading carries no behind= or ahead= field at all: a missing tool,
 # an expired credential, a rate limit, an unreachable forge, and a renamed
 # upstream are all "unknown", and none of them may render as in-sync. A reading
@@ -60,7 +63,9 @@
 #   fork-sync-harness         harness --dispatch launches the sync worker on
 # Environment overrides: FM_FORK_SWEEP_INTERVAL_DAYS, FM_FORK_SWEEP_RETRY_MINUTES
 # (floor between attempts after an incomplete sweep, default 60),
-# FM_FORK_SYNC_HARNESS, FM_FORK_FRESHNESS_NOW (epoch, for tests).
+# FM_FORK_SYNC_HARNESS, FM_FORK_SWEEP_LIST_LIMIT (repository-list cap, default
+# 200; a list that comes back at the cap reads as unknown coverage),
+# FM_FORK_FRESHNESS_NOW (epoch, for tests).
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -132,7 +137,9 @@ repo_slug_from_url() {
       ;;
     *) return 0 ;;
   esac
+  path=${path%/}
   path=${path%.git}
+  path=${path%/}
   path=${path#/}
   case "$path" in
     */*/*|'') return 0 ;;
@@ -204,12 +211,20 @@ compare_status() {
   printf '%s\t%s\t%s\n' "$status" "$ahead" "$behind"
 }
 
+# The cap on the one repository-list call. It is detected rather than trusted:
+# an account with more repositories than the cap returns exactly cap rows and
+# says nothing about the rest, so a sweep that hit it reports unknown coverage
+# instead of stamping itself complete over forks it never read.
+LIST_LIMIT=${FM_FORK_SWEEP_LIST_LIMIT:-200}
+case "$LIST_LIMIT" in ''|*[!0-9]*) LIST_LIMIT=200 ;; esac
+[ "$LIST_LIMIT" -gt 0 ] || LIST_LIMIT=200
+
 # enumerate_owned <owner> -> one TSV row per owned repository. Uses the
 # authenticated repository list so private repositories are included; a partial
 # list would be a silent truncation of the sweep's whole reason to exist.
 enumerate_owned() {
   local owner=$1 out
-  out=$(gh repo list "$owner" --limit 200 \
+  out=$(gh repo list "$owner" --limit "$LIST_LIMIT" \
     --json nameWithOwner,isFork,isArchived,parent,defaultBranchRef \
     --jq '.[] | [.nameWithOwner, (.isFork|tostring), (.isArchived|tostring), (.parent | if . == null then "" else .owner.login + "/" + .name end), (.defaultBranchRef.name // "")] | @tsv' 2>&1) || {
     clean_reason "$out"
@@ -554,9 +569,15 @@ cmd_sweep() {
   # increments would be discarded - a coverage line reading "swept=0 behind=0"
   # over two forks that are behind, and an exit code to match. A false count is
   # the same failure as a false reading.
-  local seen="" facts
+  # seen is delimited on BOTH sides of every entry: an unanchored match would let
+  # a candidate whose slug is a suffix of an enumerated one ("me/firstmate"
+  # inside "acme/firstmate") be dropped with no line and no count, which is the
+  # silent omission this sweep exists to end rather than the loud "ignored" or
+  # "unknown" the contract promises.
+  local seen=$'\n' facts owned=0
   while IFS= read -r row; do
     [ -n "$row" ] || continue
+    owned=$((owned + 1))
     repos=$((repos + 1))
     slug=$(printf '%s' "$row" | cut -f1)
     is_fork=$(printf '%s' "$row" | cut -f2)
@@ -581,7 +602,7 @@ cmd_sweep() {
 
   while IFS= read -r slug; do
     [ -n "$slug" ] || continue
-    case "$seen" in *"$slug"$'\n'*) continue ;; esac
+    case "$seen" in *$'\n'"$slug"$'\n'*) continue ;; esac
     seen="$seen$slug"$'\n'
     repos=$((repos + 1))
     if is_ignored "$slug"; then
@@ -601,9 +622,22 @@ cmd_sweep() {
   printf 'FORK_FRESHNESS_COVERAGE: owner=%s repos=%s forks=%s swept=%s behind=%s unknown=%s ignored=%s\n' \
     "$owner" "$repos" "$forks" "$SWEPT_COUNT" "$BEHIND_COUNT" "$UNKNOWN_COUNT" "$ignored"
 
+  # A full enumeration is indistinguishable from a truncated one except by its
+  # size, so the size is checked: hitting the cap means repositories exist that
+  # this run never saw, which is unknown coverage, not a clean sweep. It counts
+  # toward the exit code (4 or 5) so the completion stamp is withheld and the
+  # sweep stays due, and it is kept out of the per-fork unknown= count above,
+  # which counts readings rather than the coverage they were drawn from.
+  local truncated=0
+  [ "$owned" -lt "$LIST_LIMIT" ] || truncated=1
+  if [ "$truncated" = 1 ]; then
+    printf 'FORK_FRESHNESS_COVERAGE: status=unknown reason=%s\n' \
+      "$(clean_reason "the repository list for $owner returned $owned entries, the whole --limit $LIST_LIMIT cap, so any fork past it was never read")"
+  fi
+
   local code=0
   [ "$BEHIND_COUNT" -eq 0 ] || code=3
-  if [ "$UNKNOWN_COUNT" -gt 0 ]; then
+  if [ "$UNKNOWN_COUNT" -gt 0 ] || [ "$truncated" = 1 ]; then
     [ "$code" -eq 3 ] && code=5 || code=4
   fi
   return "$code"

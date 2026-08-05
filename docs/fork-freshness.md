@@ -31,6 +31,20 @@ reading failed each get their own output line, and the closing
 considered. A fork that cannot be checked is an explicit unknown, never an
 absence.
 
+The repository list is one capped call, and a full list is indistinguishable from
+a truncated one except by its size, so the size is checked. When the list comes
+back at the cap the sweep prints the counts it did determine and, beside them, a
+second coverage line declaring coverage unknown and naming the cap:
+
+```
+FORK_FRESHNESS_COVERAGE: owner=acme repos=200 forks=12 swept=12 behind=0 unknown=0 ignored=0
+FORK_FRESHNESS_COVERAGE: status=unknown reason=the repository list for acme returned 200 entries, the whole --limit 200 cap, so any fork past it was never read
+```
+
+That is unknown coverage, not a clean sweep: the exit code carries it, the
+completion stamp is withheld, and the sweep stays due. `FM_FORK_SWEEP_LIST_LIMIT`
+raises the cap for a run.
+
 The public `users/<login>/repos` endpoint is deliberately not used: it returns
 only public repositories, so an enumeration built on it silently truncates the
 sweep's whole reason to exist. [`verification/fork-freshness.md`](verification/fork-freshness.md)
@@ -57,6 +71,8 @@ that does not parse all read as unknown, and none of them may render as
 in-sync - a check that cannot run must never look like a check that passed. The
 exit code carries the same distinction: 0 for a complete sweep with nothing
 behind, 3 when something is behind, 4 when something is unknown, 5 for both.
+Coverage that could not be fully determined counts as unknown for that exit code
+even when every reading the sweep did take was clean.
 
 ## What happens when a fork is behind
 
@@ -101,7 +117,10 @@ cannot be bypassed:
   reading for the PR's own repository. That script is the only writer of the
   `pr=` line that `bin/fm-pr-merge.sh` requires, so no merge through the
   sanctioned path can skip the reading. It is silent when the repository is
-  determinately not a fork, so ordinary non-fork PRs stay quiet.
+  determinately not a fork, so ordinary non-fork PRs stay quiet. It is bounded by
+  `FM_FORK_SWEEP_PR_TIMEOUT` (default 45 seconds), so an unreachable forge costs
+  an unknown reading rather than a hung task, and it can never fail arming the
+  merge watch.
 - **Weekly**: the locked session-start sweep in `bin/fm-bootstrap.sh` runs
   `sweep --if-due`, which is silent between cadences. A read-only session (one
   that could not take the fleet lock) never runs it, exactly like every other
@@ -128,5 +147,6 @@ All optional, all under this home's gitignored `config/`, one value per line.
 | `fork-sync-harness` | harness `--dispatch` launches the sync worker on |
 
 `FM_FORK_SWEEP_INTERVAL_DAYS`, `FM_FORK_SWEEP_RETRY_MINUTES`,
-`FM_FORK_SWEEP_BOOTSTRAP_TIMEOUT` and `FM_FORK_SYNC_HARNESS` override the
-corresponding values for one run.
+`FM_FORK_SWEEP_BOOTSTRAP_TIMEOUT`, `FM_FORK_SWEEP_PR_TIMEOUT`,
+`FM_FORK_SWEEP_LIST_LIMIT` and `FM_FORK_SYNC_HARNESS` override the corresponding
+values for one run.
