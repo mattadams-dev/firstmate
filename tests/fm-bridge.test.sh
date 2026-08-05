@@ -66,6 +66,13 @@ new_home() {  # -> a fresh isolated FM_HOME
 
 ledger_of() { printf '%s/data/bridge/ledger.jsonl' "$1"; }
 
+# Whether the board file was WRITTEN, which is the question the hosted page
+# answers to - Lavish reloads on the write, not on a diff. Portable across the
+# two stat dialects rather than assuming GNU.
+board_mtime() {  # <path> -> mtime in seconds
+  stat -c %Y "$1" 2>/dev/null || stat -f %m "$1"
+}
+
 # Read one jq-ish field out of --state without a second parser of our own.
 state_query() {  # <home> <python-expression over `d`>
   FM_HOME=$1 "$RENDER" --state | python3 -c "
@@ -451,11 +458,17 @@ case "$(FM_HOME=$HOME10 "$RENDER" --html)" in
 esac
 pass "a missing ledger renders as explicitly empty, not as a quiet all-clear"
 
-# --- 11. the tick: cheap when nothing changed, honest about both clocks -----
+# --- 11. the tick: it writes only when the ledger content changed -----------
 #
-# Board freshness IS supervision freshness, so a frozen clock and a dead
-# supervision cycle must not look the same. The tick therefore skips the BODY
-# when the ledger is unchanged, but never skips saying when it last checked.
+# THE WRITE IS THE COST. Lavish hosts this board and reloads the page on any
+# write to the file, which silently destroys a ruling the captain is part-way
+# through annotating - and it reloads on a byte-identical rewrite too, because
+# the reload keys on the write and not on a diff. Both measured:
+# docs/verification/bridge-hosted-input.md.
+#
+# So the guard is writer-side and it is about the FILE, not about the bytes: an
+# unchanged ledger must leave the board's mtime alone. Refresh yields to
+# composition; supervision liveness is the beacon's and the guard's job.
 
 HOME11=$(new_home)
 FM_HOME=$HOME11 "$BRIDGE" ask -q --id tick-one --project orca \
@@ -469,15 +482,25 @@ FM_BRIDGE_NOW=2026-07-31T12:00:00Z FM_HOME=$HOME11 "$RENDER" --tick \
 pass "the first tick renders the board and records a change stamp"
 
 cp "$BOARD" "$TMP_ROOT/before-skip.html"
+before_mtime=$(board_mtime "$BOARD")
+sleep 1
 FM_BRIDGE_NOW=2026-07-31T12:03:00Z FM_HOME=$HOME11 "$RENDER" --tick \
   || fail "tick: skip path failed"
-diff <(grep -v 'FM-FRESH' "$TMP_ROOT/before-skip.html") <(grep -v 'FM-FRESH' "$BOARD") \
-  >/dev/null || fail "tick: an unchanged ledger regenerated the board body"
-grep -q 'checked <span class="clock">2026-07-31T12:03:00Z' "$BOARD" \
-  || fail "tick: the skip path did not advance the checked clock"
+diff "$TMP_ROOT/before-skip.html" "$BOARD" >/dev/null \
+  || fail "tick: an unchanged ledger changed the board's bytes"
+[ "$(board_mtime "$BOARD")" = "$before_mtime" ] \
+  || fail "tick: an unchanged ledger rewrote the board file, which reloads it out from under an open annotation"
+pass "an unchanged ledger leaves the board file untouched, not rewritten with a copy of itself"
+
+# The clock that used to be restamped in is gone with it. A board that printed
+# a "checked" time nothing advances would be an instrument reporting a liveness
+# it never observed - the exact failure the restamp existed to avoid, arrived at
+# from the other side.
 grep -q 'content as of <span class="clock">2026-07-31T12:00:00Z' "$BOARD" \
-  || fail "tick: the skip path moved the content clock, which did not change"
-pass "an unchanged ledger restamps only the freshness line, advancing checked but not content"
+  || fail "tick: the board does not say when its content is from"
+grep -q 'checked <span class="clock"' "$BOARD" \
+  && fail "tick: the board still claims a checked time nothing advances"
+pass "the board dates its content and claims no supervision liveness of its own"
 
 FM_HOME=$HOME11 "$BRIDGE" note -q --project orca --title "a new fact" >/dev/null
 FM_BRIDGE_NOW=2026-07-31T12:06:00Z FM_HOME=$HOME11 "$RENDER" --tick \
@@ -485,7 +508,37 @@ FM_BRIDGE_NOW=2026-07-31T12:06:00Z FM_HOME=$HOME11 "$RENDER" --tick \
 grep -q 'content as of <span class="clock">2026-07-31T12:06:00Z' "$BOARD" \
   || fail "tick: a changed ledger did not advance the content clock"
 grep -q 'a new fact' "$BOARD" || fail "tick: a changed ledger did not pick up the new record"
-pass "a changed ledger re-renders the body and advances both clocks"
+pass "a changed ledger re-renders the body and re-dates the content"
+
+# A ledger touched without changing content is not a change. The signature reads
+# CONTENT for this reason: an mtime-shaped signature would rewrite the board,
+# and the rewrite is what costs the captain their open ruling.
+touch "$(FM_HOME=$HOME11 "$RENDER" --ledger-path)"
+before_mtime=$(board_mtime "$BOARD")
+sleep 1
+FM_BRIDGE_NOW=2026-07-31T12:07:00Z FM_HOME=$HOME11 "$RENDER" --tick \
+  || fail "tick: failed after the ledger was touched"
+[ "$(board_mtime "$BOARD")" = "$before_mtime" ] \
+  || fail "tick: touching the ledger rewrote the board"
+pass "touching the ledger without changing it does not rewrite the board"
+
+# The backstop under the tick's own skip: whatever asks for a write, a render
+# that comes out byte-identical to the board already on disk must not replace
+# it. An explicit --write at a fixed clock is that case, and it is the only
+# rewrite path the tick's signature does not already stand in front of.
+before_mtime=$(board_mtime "$BOARD")
+sleep 1
+FM_BRIDGE_NOW=2026-07-31T12:09:00Z FM_HOME=$HOME11 "$RENDER" --write >/dev/null \
+  || fail "write: explicit write failed"
+first_write=$(board_mtime "$BOARD")
+[ "$first_write" != "$before_mtime" ] \
+  || fail "write: an explicit write at a new clock did not rewrite the board, so this guard proves nothing"
+sleep 1
+FM_BRIDGE_NOW=2026-07-31T12:09:00Z FM_HOME=$HOME11 "$RENDER" --write >/dev/null \
+  || fail "write: repeat write failed"
+[ "$(board_mtime "$BOARD")" = "$first_write" ] \
+  || fail "write: a byte-identical render replaced the board file anyway, which reloads the hosted page for nothing"
+pass "a byte-identical render never replaces the board file"
 
 # The board is generated. A hand edit is not a place to put facts, and the next
 # tick says so by overwriting it.
@@ -676,6 +729,7 @@ FM_HOME=$HOME16 "$BRIDGE" task -q --id l-pr --project orca --phase pr-open \
 FM_HOME=$HOME16 "$BRIDGE" ask -q --id l-co --project machine --title "a routed ask" \
   --answer "A" --to cocaptain >/dev/null
 FM_HOME=$HOME16 "$RENDER" --html > "$TMP_ROOT/links.html"
+FM_HOME=$HOME16 "$RENDER" --state > "$TMP_ROOT/links-state.json"
 
 python3 - "$TMP_ROOT/links.html" <<'LINKCHECK' || fail "links: see the reported anchor"
 import re, sys
@@ -707,18 +761,109 @@ sys.exit(0)
 LINKCHECK
 pass "every link carries Lavish's pass-through, opens safely, and reads as its own URL"
 
-# The answer forms must keep working under the same layer. They are <button>,
-# which Lavish already treats as native, so this checks the form was not
-# "improved" into an anchor at some point.
-python3 - "$TMP_ROOT/links.html" <<'FORMCHECK' \
-  || fail "links: the answer forms are no longer native controls under Lavish"
+# --- 16b. the board takes no input, and everything on it can be annotated ---
+#
+# The board's input path is Lavish's annotation layer and its conversation
+# panel. Nothing else. It used to carry a composer of its own - a textarea with
+# copy and clear and no send - which could not reach anybody and was wiped by
+# the next redraw, so a captain who typed a ruling into it believed they had
+# answered and the fleet never heard it.
+#
+# That makes two properties guard-class, and they fail in opposite directions:
+#   1. the board must offer NO input affordance of its own, and
+#   2. everything the captain must annotate must actually BE annotatable.
+# Lavish skips native controls and everything inside them when deciding what can
+# be annotated, so the same list settles both: a control on this board is either
+# an input path it does not have, or a dead spot on a row the captain must rule
+# on. Measured, both directions, against real hosting:
+# docs/verification/bridge-hosted-input.md.
+
+python3 - "$TMP_ROOT/links.html" <<'INPUTCHECK' \
+  || fail "input path: see the reported element"
 import re, sys
 html = open(sys.argv[1]).read()
-if not re.search(r'<button class="ans"', html):
-    sys.exit("answer forms are not <button>, so Lavish will swallow their clicks")
+# Markup only. Stylesheet text and the embedded state document are not elements,
+# and a rule or a record that merely mentions a tag name is not one.
+markup = re.sub(r"<(style|script)\b[^>]*>.*?</\1>", "", html, flags=re.S | re.I)
+
+# Lavish's own exclusion list, from its artifact SDK. Anything matching it - or
+# nested inside something matching it - is invisible to annotation.
+NATIVE = ("button", "input", "select", "textarea", "option", "optgroup",
+          "label", "summary")
+
+for tag in NATIVE:
+    for found in re.finditer(r"<%s\b[^>]*>" % tag, markup, re.I):
+        sys.exit("the board renders a native control, which is either an input "
+                 "it cannot send or a spot the captain cannot annotate: %s"
+                 % found.group(0))
+if re.search(r'contenteditable=["\']?(?!false)', markup, re.I):
+    sys.exit("the board renders a contenteditable element")
+
+# The composer specifically, by every name it went under.
+for dead in ("queue-text", "queue-copy", "queue-clear", "queued rulings",
+             "dock-open"):
+    if dead in html:
+        sys.exit("the retired ruling composer is still on the board: %r" % dead)
 sys.exit(0)
-FORMCHECK
-pass "answer forms stay native controls, so rulings still queue through annotation"
+INPUTCHECK
+pass "the board renders no control of its own: nothing to type into, nothing that cannot be annotated"
+
+# The other half, and the reason the first half is safe: the ask rows still
+# carry what an annotation needs to identify. An annotation arrives as the
+# anchor it was rooted at plus the text it was placed on, so stripping either
+# the per-item anchors or the visible refs would trade one broken input path
+# for another - silently, since the board would still look right.
+python3 - "$TMP_ROOT/links.html" "$TMP_ROOT/links-state.json" <<'ANCHORCHECK' \
+  || fail "annotation anchors: see the reported ask"
+import json, re, sys
+html = open(sys.argv[1]).read()
+doc = json.load(open(sys.argv[2]))
+asks = doc["asks"]
+if not asks:
+    sys.exit("no asks in the fixture, so this guard proves nothing")
+
+options = re.findall(r'<span class="ans">([^<]*)</span>', html)
+if not options:
+    sys.exit("no answer options rendered, so this guard proves nothing")
+
+for key in asks:
+    item = doc["items"][key]
+    if ('id="item-%s"' % key) not in html:
+        sys.exit("ask %s has no per-item anchor, so an annotation on it cannot "
+                 "say which ask it meant" % key)
+    label = item["ref"] or item["id"]
+    if item["answers"]:
+        for answer in item["answers"]:
+            wanted = "%s: %s" % (label, answer)
+            if wanted not in html:
+                sys.exit("ask %s renders an answer that does not name its own "
+                         "ask: expected %r" % (key, wanted))
+    if item["ref"] and ('<span class="ref">%s</span>' % item["ref"]) not in html:
+        sys.exit("ask %s renders no visible ref, so an annotation on it arrives "
+                 "unquotable" % key)
+sys.exit(0)
+ANCHORCHECK
+pass "every ask keeps its per-item anchor, its visible ref, and answers that name their own ask"
+
+# And the board says where the input actually is, rather than leaving the
+# captain to infer it from the absence of a box.
+python3 - "$TMP_ROOT/links.html" <<'SIGNPOSTCHECK' \
+  || fail "signpost: see the reported gap"
+import sys
+html = open(sys.argv[1]).read()
+if "annotate" not in html.lower():
+    sys.exit("the board never names annotation as the way to rule")
+if "conversation panel" not in html.lower():
+    sys.exit("the board never names where an annotated ruling is sent from")
+if "no input path at all" not in html.lower():
+    sys.exit("the board does not say what it is when opened as a plain file, "
+             "which is the one case where there is no input path")
+if "not saved anywhere" not in html.lower():
+    sys.exit("the board does not warn that an unqueued annotation is lost on "
+             "the next redraw, which is measured behaviour")
+sys.exit(0)
+SIGNPOSTCHECK
+pass "the board states its input path, and states plainly what it does not promise"
 
 # --- 17. ledger text cannot break out of the embedded state document -------
 #
@@ -1027,14 +1172,14 @@ if variable.group(1) not in reserved:
 if rules["#rail"].get("right") != "0":
     sys.exit("the fixed column is not pinned to the edge it reserves")
 
-# Opening the ruling composer must widen that same reserved column rather than
-# introduce a second out-of-flow element over the board.
-docked = [selector for selector in rules if "dock-open" in selector]
-if not docked:
-    sys.exit("nothing widens the reserved column, so the composer must cover content")
-if not any(variable.group(1) in declarations
-           for selector, declarations in rules.items() if "dock-open" in selector):
-    sys.exit("the composer does not widen the reserved column: %s" % docked)
+# The column is fixed-width and stays that way. It once widened to open a
+# ruling composer; with no composer there is nothing left that may resize it,
+# and a rule that grew the reserved column again would move every row on the
+# page for chrome that no longer exists.
+widening = [selector for selector, declarations in rules.items()
+            if selector != ":root" and variable.group(1) in declarations]
+if widening:
+    sys.exit("something still resizes the reserved column: %s" % widening)
 sys.exit(0)
 RAIL
 pass "the only out-of-flow element is the column the page reserves for it"
