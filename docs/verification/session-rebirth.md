@@ -70,6 +70,21 @@ The timing tests do not run the threshold reader.
 `armable_home` writes the due marker directly, because routing it through the reader would make a detection regression fail fifteen timing tests and present as a timing bug.
 The handover between the two halves is pinned from both sides instead, by `test_death_reading_marks_rebirth_due` and `test_arm_refuses_when_not_due`.
 
+## Full-cycle run, 2026-08-05
+
+The four parts were driven end to end against a plain checkout with the real scripts, the real turn-end hook payload shape, and the two measured fixtures standing in for the predecessor's and successor's transcripts.
+A `tmux` shim served the canned pane and a recorder stood in for the Bridge writer.
+
+Observed, in order:
+
+1. `bin/fm-turnend-guard.sh` fed a Stop payload naming the 368,381-token transcript exited 0 and recorded `verdict=due`, writing `state/.rebirth-due`.
+2. `bin/fm-rebirth.sh arm` with an open `needs-decision` refused: `not armed: a decision is still open: work: needs-decision [key=shape] ...`, and nothing was typed into the pane.
+3. After a matching `resolved` line the same command armed, typed `/exit`, and submitted it - the pane recorded `TYPED /exit` then `ENTER`.
+4. `bin/fm-session-launch.sh` saw the session end, claimed the rebirth, and launched exactly one replacement.
+5. `state/.safe-kill.log` did not exist: nothing was signalled anywhere in the cycle.
+6. `bin/fm-session-start.sh` printed the successor block naming the predecessor session, its 368,381 tokens, and the Bridge command for a records gap.
+7. The successor's first turn end recorded its own 61,602 reading and posted `session reborn: 61602 tokens, down from 368381` to the Bridge, then removed the handoff and the due marker.
+
 ## Composer reads
 
 The quiescence tests drive `bin/fm-tmux-lib.sh` and `bin/fm-composer-lib.sh` for real behind a `tmux` shim that serves a canned pane, rather than stubbing the composer verdict.
