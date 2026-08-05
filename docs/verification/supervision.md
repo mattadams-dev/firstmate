@@ -447,6 +447,11 @@ Its first replacement passed for a second, different version of the same reason:
 The working fixture seeds a predecessor sample directly and drives a live CPU burner through a substituted `fm_health_target_pid`, so every layer below that one seam runs for real against evidence that genuinely advances.
 A mutation matrix is the only thing that surfaced either defect; both suites were green throughout.
 
+A third defect in the same fixture surfaced only from a full-suite sweep: the drivers observed the test shell itself, a live process doing work, so every frozen-pane assertion held only while the harness burned less than one clock tick between two calls.
+It passed standalone and failed under load - a verdict that depended on ambient load rather than on its subject.
+Each test now observes the process it claims to: a `sleep` for a frozen pane, a spin loop for a busy one.
+Verified by six consecutive runs against four competing CPU loaders, zero failures.
+
 Five of the eleven are the mirror-image or boundary-crossing direction on purpose.
 A supervisor that can never arm and a helper that can never terminate anything are the same failure as their opposites, one mirror over, and they fail silently rather than loudly.
 
