@@ -204,6 +204,23 @@ DISPOSITION	alpha	workspace wB is not a live workspace of this home in session 1
 
 The first is an unreachable backend, the second a genuine absence, and `unreachable_backend_is_unknown_not_absent` asserts the first world never produces the second reading.
 
+Checking the exit status is necessary and was not sufficient.
+`.result.workspaces[]?` yields EMPTY OUTPUT WITH EXIT 0 for any body that is not the expected shape - an `{"error":{...}}` response, or a renamed field after a protocol bump - because `.result` on a body without that key is `null` and `null[]?` suppresses the error.
+A call that succeeded and returned something the run did not understand therefore reached the same absence claim by a different door, at all three live reads.
+So each read is now checked twice, once on the call's exit status and once on the SHAPE of the body, using the `type == "array"` rule `fm_backend_herdr_workspace_presence_state` already applies in `bin/backends/herdr.sh`:
+
+```
+DISPOSITION	alpha	the workspace list response for session 1 carries no .result.workspaces array, so it was not understood and whether workspace wB is still live is UNKNOWN, not absent
+```
+
+The distinction the checks preserve is between a container that is PRESENT and genuinely empty, which is a real absence and is reported as one, and a container that was not there at all, which is UNKNOWN.
+Neither check subsumes the other: a body that fails to parse never reaches the shape check, and a call that emits a well-formed list and THEN fails passes the shape check on a list the backend never finished standing behind.
+`unexpected_workspace_body_is_unknown_not_absent`, `unexpected_tab_body_is_unknown_not_absent`, `unexpected_pane_body_is_unknown_not_absent` and `failed_call_with_wellformed_body_is_unknown_not_absent` own those worlds, and the first of them asserts the reading reaches the durable receipt and not only stdout.
+
+The tab and pane CLI-failure branches now carry the same `UNKNOWN, not absent` marker their sibling parse-failure branches always did.
+Neither branch ever asserted absence, so this is not a correctness repair; it is receipt vocabulary.
+A herdr that dies between the workspace read and the tab read is the most likely mid-run backend loss, and an audit grepping the durable receipt for UNKNOWN would otherwise file it with the ordinary refusals.
+
 ## Two shapes that are refused rather than repaired
 
 **A symlinked record is never written.**
@@ -240,13 +257,17 @@ ok - dry_run_writes_nothing
 ok - duplicated_binding_reported_not_skipped
 ok - empty_binding_reported_not_skipped
 ok - existing_binding_untouched
+ok - failed_call_with_wellformed_body_is_unknown_not_absent
 ok - foreign_workspace_refused
 ok - healthy_record_is_never_a_disposition
+ok - help_prints_the_whole_header_and_no_source
 ok - interrupted_run_resumes
 ok - label_names_other_task_refused
+ok - migrated_record_keeps_its_mode
 ok - mismatched_binding_reported_not_skipped
 ok - observable_binding_migrates
 ok - observe_reports_unbound_record_on_partial_home
+ok - pane_list_failure_is_unknown_not_absent
 ok - pane_mismatch_refused
 ok - receipt_accumulates_across_runs
 ok - receipt_failure_mid_run_is_not_silent
@@ -255,23 +276,29 @@ ok - receipt_written_for_observe_run
 ok - repeated_apply_is_idempotent
 ok - repeated_apply_is_not_refused
 ok - symlinked_record_refused_and_stays_a_symlink
+ok - tab_list_failure_is_unknown_not_absent
 ok - teardown_validator_accepts_migrated_record
 ok - teardown_validator_rejects_unmigrated_record
 ok - tmux_reported_not_silent
+ok - unexpected_pane_body_is_unknown_not_absent
+ok - unexpected_tab_body_is_unknown_not_absent
+ok - unexpected_workspace_body_is_unknown_not_absent
 ok - unobservable_backend_refused
 ok - unreachable_backend_is_unknown_not_absent
 ok - unreadable_record_reported_not_skipped
 ok - unterminated_record_refused
 ok - valid_binding_is_not_a_disposition
 ok - windowless_record_reported_not_skipped
+ok - workspace_metacharacter_refused
 
-all 31 cases passed
+all 40 cases passed
 ```
 
 The empty-binding and duplicated-binding fixtures are synthetic on purpose, because zero real specimens existed in the migrated home.
 A refusal shape without a fixture proving it fires is how the silent-skip hole survived review the first time.
 The same reasoning applies to the windowless, unreadable, dangling-symlink, symlinked, and unterminated fixtures: none of them is produced by any current `bin/fm-spawn.sh` writer, so each is defensive, and each has a case that would notice if it stopped being reported.
 `valid_binding_is_not_a_disposition` and `healthy_record_is_never_a_disposition` prove the other direction: a correctly bound record and a healthy observable record produce their normal outcomes, so reporting the broken shapes did not turn every record into a disposition item.
+The unrecognised-body fixtures are served through a `raw_fixture` helper rather than the scenario builders, because the builders can only produce the shape the migration expects and the point of those cases is a body it does not.
 
 Mutation experiment.
 Each mutation neutralises one guard, leaving the surrounding block intact, and is pinned to its target line by content so a drifted line number fails loudly rather than silently mutating unrelated code.
@@ -279,16 +306,23 @@ Each mutation neutralises one guard, leaving the surrounding block intact, and i
 ```
 $ bash tests/fm-migrate-endpoint-binding-mutation.sh
 == baseline: unmutated script ==
-BASELINE green (31)
+BASELINE green (40)
 
 == mutations that let an unobserved value be written ==
 CAUGHT   value-from-filename-not-label      failing: label_names_other_task_refused
 CAUGHT   skip-pane-identity-check           failing: pane_mismatch_refused
-CAUGHT   skip-home-workspace-check          failing: foreign_workspace_refused
+CAUGHT   skip-home-workspace-check          failing: foreign_workspace_refused workspace_metacharacter_refused
+CAUGHT   workspace-match-not-fixed-string   failing: workspace_metacharacter_refused
 CAUGHT   accept-ambiguous-pane              failing: ambiguous_pane_refused
 
 == mutations that report an unobservable world as a definite absence ==
-CAUGHT   unreachable-backend-read-as-absent failing: unreachable_backend_is_unknown_not_absent
+CAUGHT   unreachable-backend-read-as-absent failing: failed_call_with_wellformed_body_is_unknown_not_absent unexpected_workspace_body_is_unknown_not_absent unreachable_backend_is_unknown_not_absent
+CAUGHT   trust-the-body-of-a-failed-call    failing: failed_call_with_wellformed_body_is_unknown_not_absent
+CAUGHT   read-unrecognised-workspace-body-as-absent failing: unexpected_workspace_body_is_unknown_not_absent
+CAUGHT   read-unrecognised-tab-body-as-absent failing: unexpected_tab_body_is_unknown_not_absent
+CAUGHT   read-unrecognised-pane-body-as-absent failing: unexpected_pane_body_is_unknown_not_absent
+CAUGHT   tab-list-failure-omits-unknown-marker failing: tab_list_failure_is_unknown_not_absent
+CAUGHT   pane-list-failure-omits-unknown-marker failing: pane_list_failure_is_unknown_not_absent
 
 == mutations that turn a refusal shape back into a silent skip ==
 CAUGHT   silent-skip-empty-binding          failing: empty_binding_reported_not_skipped
@@ -305,24 +339,34 @@ CAUGHT   append-onto-unterminated-record    failing: unterminated_record_refused
 == mutations on idempotence and the receipt, in both directions ==
 CAUGHT   double-write-already-bound-record  failing: existing_binding_untouched interrupted_run_resumes repeated_apply_is_idempotent repeated_apply_is_not_refused
 CAUGHT   reintroduce-one-shot-refusal       failing: repeated_apply_is_idempotent repeated_apply_is_not_refused
-CAUGHT   run-without-writing-receipt        failing: receipt_accumulates_across_runs receipt_failure_mid_run_is_not_silent receipt_written_for_apply_run receipt_written_for_observe_run unreachable_backend_is_unknown_not_absent
+CAUGHT   run-without-writing-receipt        failing: pane_list_failure_is_unknown_not_absent receipt_accumulates_across_runs receipt_failure_mid_run_is_not_silent receipt_written_for_apply_run receipt_written_for_observe_run tab_list_failure_is_unknown_not_absent unexpected_workspace_body_is_unknown_not_absent unreachable_backend_is_unknown_not_absent
 CAUGHT   continue-past-failed-receipt-write failing: receipt_failure_mid_run_is_not_silent
 
 == the false-positive direction: a healthy record reported as a decision ==
 CAUGHT   report-healthy-record-as-disposition failing: existing_binding_untouched valid_binding_is_not_a_disposition
 
 == control: a blanket bypass should be caught broadly, not narrowly ==
-CAUGHT   blanket-write-without-observation  failing: absent_endpoint_refused ambiguous_pane_refused foreign_workspace_refused label_names_other_task_refused pane_mismatch_refused unreachable_backend_is_unknown_not_absent
+CAUGHT   blanket-write-without-observation  failing: absent_endpoint_refused ambiguous_pane_refused failed_call_with_wellformed_body_is_unknown_not_absent foreign_workspace_refused label_names_other_task_refused pane_list_failure_is_unknown_not_absent pane_mismatch_refused tab_list_failure_is_unknown_not_absent unexpected_pane_body_is_unknown_not_absent unexpected_tab_body_is_unknown_not_absent unexpected_workspace_body_is_unknown_not_absent unreachable_backend_is_unknown_not_absent workspace_metacharacter_refused
+
+== the write must not silently change the record it repairs ==
+CAUGHT   write-without-carrying-the-mode    failing: migrated_record_keeps_its_mode
+
+== --help must print the header, and only the header ==
+CAUGHT   help-range-truncates-header        failing: help_prints_the_whole_header_and_no_source
+CAUGHT   help-range-overruns-into-source    failing: help_prints_the_whole_header_and_no_source
 
 RESULT: every mutation was caught by exactly the expected case(s)
 ```
 
 Both directions hold.
-A genuinely observable binding still migrates (baseline green, 31 cases).
+A genuinely observable binding still migrates (baseline green, 40 cases).
 Each mutation that would let an unobserved value be written is caught by exactly the case that owns that guard, so the suite identifies which protection is missing rather than going uniformly red.
 
 The `value-from-filename-not-label` mutation is the one that matters most: it is precisely "assertion instead of observation", and it is caught by exactly one case.
-`unreachable-backend-read-as-absent` restores the masking that let an unreachable herdr be written into the receipt as a definite absence, and is caught by the case that owns that distinction.
+`unreachable-backend-read-as-absent` restores the masking that let an unobservable herdr be written into the receipt as a definite absence, and is caught by the three cases that own that distinction at the workspace read.
+Each live read is checked twice - on the call's exit status and on the SHAPE of the body it returned - because either check alone leaves a world it cannot tell from a genuine absence, so `trust-the-body-of-a-failed-call` and `read-unrecognised-workspace-body-as-absent` remove each half on its own and neither can rot behind the other.
+`read-unrecognised-tab-body-as-absent` and `read-unrecognised-pane-body-as-absent` do the same at the two later reads, where an empty `.result.tabs`/`.result.panes` otherwise means the endpoint is genuinely gone - which is exactly why a body the run did not understand must not produce the same reading.
+`tab-list-failure-omits-unknown-marker` and `pane-list-failure-omits-unknown-marker` drop the UNKNOWN marker from the two branches that keep honest wording either way: nothing asserts absence, so what these pin is the DURABLE receipt, where an audit grepping for UNKNOWN would otherwise file a herdr that died mid-run with the ordinary refusals.
 The silent-skip mutations restore a blind spot by dropping a report and skipping the record; each is caught by exactly the fixture that owns that shape, which is what the per-shape cases are for.
 `silent-skip-dangling-symlink` and `launder-symlinked-record` each break only their own case because the two symlink shapes are branched apart rather than sharing one guard - dropping the dangling report leaves the record caught by the live-symlink branch, so the line that appears would name the wrong fact, which is why that case pins the reason text and not merely the presence of a line.
 `append-onto-unterminated-record` removes the only guard standing between a truncated record and an append that corrupts the preceding key while leaving the record a candidate forever.
@@ -332,6 +376,16 @@ Idempotence and the receipt are mutated in both directions, because each has a w
 `run-without-writing-receipt` is expected to break every case that reads a receipt, which now includes `unreachable_backend_is_unknown_not_absent`: that case asserts the durable receipt carries the unknown/absent distinction, not only stdout.
 `continue-past-failed-receipt-write` lets the run survive the failure it just reported, and only the mid-run case can see it, since no other case loses a writable receipt.
 `report-healthy-record-as-disposition` is the false-positive direction of the accounting rule: it reports a record that was in fact processed normally as needing a human decision, and is caught by the two cases that assert a healthy record is accounted for without being a disposition.
+
+`workspace-match-not-fixed-string` turns the cross-home workspace check back into a pattern match, which is what it was: it is the only comparison in the observation not made by `=`, so a recorded id carrying a regex metacharacter could match a different live id of the same length.
+The foreign-workspace fixture cannot see that - `wOTHER` is not a pattern for `wB` - so `workspace_metacharacter_refused` owns it, and `skip-home-workspace-check` breaks both because removing the check entirely removes both readings of it.
+
+`write-without-carrying-the-mode` drops the record's own mode from the replacement file, which is exactly what `chmod --reference` did silently on every non-GNU platform: `write_binding` replaces the record through a `mktemp` file created 0600, so one `--apply` narrows every migrated record's permissions and no outcome line says so.
+The mode is now read through the BSD/GNU `stat` pair this repo already settled on in `bin/fm-x-lib.sh` and a failure to read or apply it fails the write rather than passing silently, so the case asserts the mode on the bytes and that `state/` holds no leftover temp file afterwards.
+The failed-`mv` path now removes its temp file like its two sibling failure exits already did; that path is not separately fixtured, because making `mv` fail while `mktemp` in the same directory succeeds needs a state the harness cannot construct without root, and the residue assertion above is what would notice a leak on the paths it can reach.
+
+`help-range-truncates-header` and `help-range-overruns-into-source` are the two drift directions of `--help`, which prints the file's own header and is the surface a previous review round caught printing a claim that had gone stale.
+The range is now derived - from line 2 to the first line that does not start with `#` - rather than pinned to a line number, and both mutations restore a pinned range: one short, which truncates the header mid-sentence, and one long, which dumps shell source through the comment-stripping `sed`.
 
 Existing guard suites were re-run unchanged: `fm-teardown-endpoint-safety` (5 ok), `fm-teardown-evidence` (6 ok), `fm-backend-herdr` (161 ok).
 
@@ -379,6 +433,6 @@ No path through the script writes an unobserved or asserted value, on any home, 
 The mutation experiment above covers the new properties in all three directions the ruling required.
 `double-write-already-bound-record` sends an already-bound record back through observation so a repeated run appends a second binding and provenance pair; it is caught by the idempotence case and by every other fixture holding a bound record.
 `reintroduce-one-shot-refusal` restores the last shipped form of the guard, and is caught by exactly the two cases that run twice against a fully migrated home - idempotence means safe to repeat, not clever about refusing.
-`run-without-writing-receipt` lets a run complete without recording itself and is caught by exactly the three receipt cases.
+`run-without-writing-receipt` lets a run complete without recording itself and is caught by exactly the eight cases that read a receipt: the four receipt cases, and the four unknown-not-absent cases that assert the durable receipt carries the distinction rather than only stdout.
 
 The permanent guarantee - that teardown refuses an unbound or mismatched record - is owned by `tests/fm-teardown-endpoint-safety.test.sh`, which this change left untouched and green.

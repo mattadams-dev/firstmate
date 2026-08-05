@@ -59,6 +59,12 @@ case "${1:-} ${2:-}" in
 esac
 [ -f "$f" ] || exit 1
 cat "$f"
+# A call that emits a WELL-FORMED body and then fails - a truncated or timed-out
+# read, and the shape real herdr 0.7.1 uses for a business-logic refusal. The
+# body alone looks authoritative here, so only the call's exit status tells the
+# two worlds apart.
+[ -z "${FM_FAKE_HERDR_FAIL_AFTER_OUTPUT:-}" ] || exit 1
+exit 0
 SH
 chmod +x "$FAKEBIN/herdr"
 export PATH="$FAKEBIN:$PATH"
@@ -110,6 +116,14 @@ panes() {
     out+="{\"pane_id\":\"${p%@*}\",\"tab_id\":\"${p#*@}\",\"workspace_id\":\"$ws\",\"foreground_cwd\":\"/wt/${p%@*}\"}"
   done
   printf '%s]}}\n' "$out" > "$h/fix/panes-$ws.json"
+}
+
+# raw_fixture <home> <basename> <json>: serve a body of our own choosing for one
+# inventory call, so a case can model a WELL-FORMED response that is not the
+# shape this migration expects - an error object, or a renamed field after a
+# protocol bump. The builders above can only produce the expected shape.
+raw_fixture() {
+  printf '%s\n' "$3" > "$1/fix/$2.json"
 }
 
 # herdr_meta <home> <id> <session> <ws> <tab> <pane> [extra-line...]
@@ -233,6 +247,34 @@ case_ambiguous_pane_refused() {
   case "$out" in *"DISPOSITION"$'\t'"alpha"*"more than one pane"*) ;;
     *) fail "an ambiguous tab was not refused: $out" ;; esac
   assert_no_grep 'endpoint_task_id=' "$h/state/alpha.meta" "wrote a binding for an ambiguous tab"
+}
+
+# write_binding replaces the record through a mktemp file, which is created 0600.
+# The record's own mode has to be carried onto the replacement, or one --apply
+# silently narrows every migrated record's permissions - a change to the record
+# that no outcome line would ever mention. Asserted on the bytes of the mode,
+# and on state/ holding no leftover temp file afterwards.
+case_migrated_record_keeps_its_mode() {
+  local h; h=$(new_home recordmode)
+  workspaces "$h" firstmate wB
+  tabs "$h" wB "wB:t19:label=fm-alpha"
+  panes "$h" wB "wB:p19@wB:t19"
+  herdr_meta "$h" alpha 1 wB wB:t19 wB:p19
+  chmod 640 "$h/state/alpha.meta"
+
+  run_migrate "$h" --apply >/dev/null
+
+  local mode
+  if [ "$(uname)" = Darwin ]; then
+    mode=$(stat -f %Lp "$h/state/alpha.meta")
+  else
+    mode=$(stat -c %a "$h/state/alpha.meta")
+  fi
+  [ "$mode" = 640 ] || fail "the migrated record's mode became $mode, expected the 640 it was created with"
+
+  local residue
+  residue=$(find "$h/state" -name '*.migrate.*' 2>/dev/null | wc -l | tr -d ' ')
+  [ "$residue" -eq 0 ] || fail "$residue temp file(s) left behind in state/"
 }
 
 # The default run observes and reports but must not touch a record.
@@ -507,6 +549,162 @@ case_unreachable_backend_is_unknown_not_absent() {
   assert_grep 'UNKNOWN' "$h/data/endpoint-binding-migration-receipts.log" \
     "the durable receipt does not carry the unknown/absent distinction"
   assert_no_grep 'endpoint_task_id=' "$h/state/alpha.meta" "wrote a binding without a live read"
+}
+
+# The second unobservable world, which the case above cannot reach: the call
+# SUCCEEDS and returns a well-formed body that is not the expected shape - an
+# `{"error":{...}}` response, or a renamed field after a protocol bump.
+# `.result.workspaces[]?` yields empty output and exit 0 for all of them, so a
+# status-only check reads "not understood" as "looked, and it was not there".
+# Asserted on the durable receipt as well as stdout, because the receipt is
+# where a sharpened guess outlives the run that made it.
+case_unexpected_workspace_body_is_unknown_not_absent() {
+  local h; h=$(new_home unexpectedws)
+  raw_fixture "$h" workspaces '{"error":{"code":"session_not_found","message":"no such session"}}'
+  tabs "$h" wB "wB:t19:label=fm-alpha"
+  panes "$h" wB "wB:p19@wB:t19"
+  herdr_meta "$h" alpha 1 wB wB:t19 wB:p19
+
+  local out; out=$(run_migrate "$h" --apply)
+  case "$out" in *"DISPOSITION"$'\t'"alpha"*UNKNOWN*) ;;
+    *) fail "an unrecognised workspace list body was not reported as unknown: $out" ;; esac
+  case "$out" in *"is not a live workspace"*)
+    fail "an unrecognised workspace list body was reported as a definite absence: $out" ;; esac
+  assert_no_grep 'is not a live workspace' "$h/data/endpoint-binding-migration-receipts.log" \
+    "the durable receipt records an absence claim for a body it did not understand"
+  assert_grep 'UNKNOWN' "$h/data/endpoint-binding-migration-receipts.log" \
+    "the durable receipt does not carry the unknown/absent distinction"
+  assert_no_grep 'endpoint_task_id=' "$h/state/alpha.meta" "wrote a binding from a body it did not understand"
+}
+
+# The same world one level down: the workspace read succeeds and the TAB list
+# comes back well-formed but unrecognised. `.result.tabs[]?` is empty for it, and
+# an empty tab list otherwise means the endpoint is genuinely gone.
+case_unexpected_tab_body_is_unknown_not_absent() {
+  local h; h=$(new_home unexpectedtabs)
+  workspaces "$h" firstmate wB
+  raw_fixture "$h" tabs-wB '{"result":{"type":"tab_list","windows":[]}}'
+  panes "$h" wB "wB:p19@wB:t19"
+  herdr_meta "$h" alpha 1 wB wB:t19 wB:p19
+
+  local out; out=$(run_migrate "$h" --apply)
+  case "$out" in *"DISPOSITION"$'\t'"alpha"*UNKNOWN*) ;;
+    *) fail "an unrecognised tab list body was not reported as unknown: $out" ;; esac
+  case "$out" in *"no live tab"*)
+    fail "an unrecognised tab list body was reported as a definite absence: $out" ;; esac
+  assert_no_grep 'endpoint_task_id=' "$h/state/alpha.meta" "wrote a binding from a body it did not understand"
+}
+
+# And once more at the pane read, the last of the three live reads. An empty
+# `.result.panes[]?` otherwise means the tab genuinely holds no pane.
+case_unexpected_pane_body_is_unknown_not_absent() {
+  local h; h=$(new_home unexpectedpanes)
+  workspaces "$h" firstmate wB
+  tabs "$h" wB "wB:t19:label=fm-alpha"
+  raw_fixture "$h" panes-wB '{"result":{"type":"pane_list","terminals":[]}}'
+  herdr_meta "$h" alpha 1 wB wB:t19 wB:p19
+
+  local out; out=$(run_migrate "$h" --apply)
+  case "$out" in *"DISPOSITION"$'\t'"alpha"*UNKNOWN*) ;;
+    *) fail "an unrecognised pane list body was not reported as unknown: $out" ;; esac
+  case "$out" in *"has no pane"*)
+    fail "an unrecognised pane list body was reported as a definite absence: $out" ;; esac
+  assert_no_grep 'endpoint_task_id=' "$h/state/alpha.meta" "wrote a binding from a body it did not understand"
+}
+
+# The third unobservable world, and the one the SHAPE check cannot reach: the
+# call emits a perfectly well-formed list and THEN fails. The body looks
+# authoritative, so reading it would report the recorded workspace as absent on
+# the strength of a list the backend never finished standing behind. Only the
+# call's own exit status tells that world from a complete answer.
+case_failed_call_with_wellformed_body_is_unknown_not_absent() {
+  local h; h=$(new_home failedcallbody)
+  workspaces "$h" firstmate wOTHER
+  tabs "$h" wB "wB:t19:label=fm-alpha"
+  panes "$h" wB "wB:p19@wB:t19"
+  herdr_meta "$h" alpha 1 wB wB:t19 wB:p19
+
+  local out
+  out=$(FM_HOME="$h" FM_FAKE_HERDR_FIX="$h/fix" FM_FAKE_HERDR_FAIL_AFTER_OUTPUT=1 \
+    "$MIGRATE" --apply 2>&1)
+  case "$out" in *"DISPOSITION"$'\t'"alpha"*UNKNOWN*) ;;
+    *) fail "a failed call carrying a well-formed body was not reported as unknown: $out" ;; esac
+  case "$out" in *"is not a live workspace"*)
+    fail "the body of a failed call was read as a definite absence: $out" ;; esac
+  assert_no_grep 'endpoint_task_id=' "$h/state/alpha.meta" "wrote a binding from the body of a failed call"
+}
+
+# The two live reads AFTER the workspace read must carry the same UNKNOWN marker
+# their sibling parse failures do. A herdr that dies between the workspace read
+# and the tab read is the most likely mid-run backend loss, and a receipt that
+# records it without the marker files it with the ordinary refusals.
+case_tab_list_failure_is_unknown_not_absent() {
+  local h; h=$(new_home tabcallfails)
+  workspaces "$h" firstmate wB
+  # No tabs-wB.json fixture: the fake herdr exits non-zero for `tab list`.
+  panes "$h" wB "wB:p19@wB:t19"
+  herdr_meta "$h" alpha 1 wB wB:t19 wB:p19
+
+  local out; out=$(run_migrate "$h" --apply)
+  case "$out" in *"DISPOSITION"$'\t'"alpha"*"could not list live tabs"*UNKNOWN*) ;;
+    *) fail "a failed tab list did not carry the unknown/absent distinction: $out" ;; esac
+  assert_grep 'UNKNOWN' "$h/data/endpoint-binding-migration-receipts.log" \
+    "the durable receipt does not carry the unknown/absent distinction for a failed tab list"
+  assert_no_grep 'endpoint_task_id=' "$h/state/alpha.meta" "wrote a binding without a live tab read"
+}
+
+case_pane_list_failure_is_unknown_not_absent() {
+  local h; h=$(new_home panecallfails)
+  workspaces "$h" firstmate wB
+  tabs "$h" wB "wB:t19:label=fm-alpha"
+  # No panes-wB.json fixture: the fake herdr exits non-zero for `pane list`.
+  herdr_meta "$h" alpha 1 wB wB:t19 wB:p19
+
+  local out; out=$(run_migrate "$h" --apply)
+  case "$out" in *"DISPOSITION"$'\t'"alpha"*"could not list live panes"*UNKNOWN*) ;;
+    *) fail "a failed pane list did not carry the unknown/absent distinction: $out" ;; esac
+  assert_grep 'UNKNOWN' "$h/data/endpoint-binding-migration-receipts.log" \
+    "the durable receipt does not carry the unknown/absent distinction for a failed pane list"
+  assert_no_grep 'endpoint_task_id=' "$h/state/alpha.meta" "wrote a binding without a live pane read"
+}
+
+# --- the cross-home workspace boundary --------------------------------------
+#
+# The workspace check is the only thing standing between this migration and
+# another home's endpoint, and it is the only comparison here made by grep rather
+# than by `=`. A recorded id carrying a regex metacharacter must not match a
+# DIFFERENT live id of the same length, which a non-fixed-string match allows.
+case_workspace_metacharacter_refused() {
+  local h; h=$(new_home wsmetachar)
+  workspaces "$h" firstmate wB
+  tabs "$h" wB "wB:t19:label=fm-alpha"
+  panes "$h" wB "wB:p19@wB:t19"
+  herdr_meta "$h" alpha 1 'w.' wB:t19 wB:p19
+
+  local out; out=$(run_migrate "$h" --apply)
+  case "$out" in *"DISPOSITION"$'\t'"alpha"*"not a live workspace of this home"*) ;;
+    *) fail "a metacharacter-bearing workspace id matched a different live workspace: $out" ;; esac
+  assert_no_grep 'endpoint_task_id=' "$h/state/alpha.meta" \
+    "wrote a binding for a workspace id that only matched as a pattern"
+}
+
+# --- --help ------------------------------------------------------------------
+#
+# --help prints the file's own header, which is the surface a previous review
+# round caught printing a claim that had gone stale. The range is derived rather
+# than pinned, so this asserts what derivation has to get right in both
+# directions: the whole header reaches the reader, and no shell source follows it.
+case_help_prints_the_whole_header_and_no_source() {
+  local out rc
+  out=$("$MIGRATE" --help 2>&1)
+  rc=$?
+  [ "$rc" -eq 0 ] || fail "--help exited $rc"
+  case "$out" in *"REPEATABLE repair"*) ;;
+    *) fail "--help did not print the start of the header: $out" ;; esac
+  case "$out" in *"disposition item is a reported outcome, not a failure of this script."*) ;;
+    *) fail "--help truncated the header before its last line: $out" ;; esac
+  case "$out" in *"set -uo pipefail"*|*"FM_ROOT="*)
+    fail "--help leaked shell source past the end of the header: $out" ;; esac
 }
 
 # --- the one-shot guard -----------------------------------------------------

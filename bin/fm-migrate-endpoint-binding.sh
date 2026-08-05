@@ -41,11 +41,19 @@
 #
 # "The endpoint is gone" and "the backend could not be queried" are two
 # different worlds, and a reading that cannot tell them apart must never report
-# the stronger one. Every live read here is status-checked before its output is
-# interpreted: a failed `herdr` call or an unparseable response yields an
-# explicit UNKNOWN disposition naming that condition, never an absence claim.
-# The receipt carries the same distinction, because the receipt is the durable
-# surface where a sharpened guess would outlive the run that made it.
+# the stronger one. Every live read here is checked twice before its output is
+# interpreted - once on the call's exit status, once on the SHAPE of the body it
+# returned. A failed `herdr` call, an unparseable response, and a well-formed
+# response that does not carry the expected list all yield an explicit UNKNOWN
+# disposition naming that condition, never an absence claim. Only a list that is
+# demonstrably present and genuinely empty is read as a real absence.
+#
+# The status check alone was not enough: `.result.workspaces[]?` returns empty
+# output and exit 0 for an `{"error":{...}}` body or a renamed field, so an
+# emptiness that means "not understood" would have been reported as "looked, and
+# it was not there". The receipt carries the same distinction throughout, because
+# the receipt is the durable surface where a sharpened guess would outlive the
+# run that made it.
 #
 # WHAT THIS REPAIRS, AND WHAT IT REFUSES TO REPAIR
 #
@@ -169,7 +177,7 @@ APPLY=0
 case "${1:-}" in
   '') ;;
   --apply) APPLY=1 ;;
-  -h|--help) sed -n '2,162p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
+  -h|--help) sed -n '2,${/^#/!q;p;}' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
   *) echo "usage: $(basename "$0") [--apply]" >&2; exit 1 ;;
 esac
 
@@ -321,9 +329,22 @@ observe_herdr_binding() {
   #    two worlds, one reading. Checking the call's own exit status is what
   #    keeps them apart. The jq variable is $want, never $label: `label` is a jq
   #    reserved keyword, and a compile error there would empty every result.
+  #
+  #    Exit status alone is not enough, because `.result.workspaces[]?` yields
+  #    EMPTY OUTPUT WITH EXIT 0 for any body that is not the expected shape - an
+  #    `{"error":{...}}` response, or a renamed field after a protocol bump -
+  #    and reading that emptiness as absence is the same two-worlds-one-reading
+  #    failure one level down. So the container itself must be proven present
+  #    before its emptiness is allowed to mean anything, which is the
+  #    `type == "array"` rule fm_backend_herdr_workspace_presence_state applies.
+  #    A container that IS present and genuinely empty is a real absence.
   local workspace_list home_label live_workspaces
   workspace_list=$(fm_backend_herdr_cli "$session" workspace list 2>/dev/null) || {
     echo "could not list live workspaces in session $session, so whether workspace $workspace is still live is UNKNOWN, not absent"
+    return 1
+  }
+  printf '%s' "$workspace_list" | jq -e '(.result.workspaces | type) == "array"' >/dev/null 2>&1 || {
+    echo "the workspace list response for session $session carries no .result.workspaces array, so it was not understood and whether workspace $workspace is still live is UNKNOWN, not absent"
     return 1
   }
   home_label=$(fm_backend_herdr_workspace_label)
@@ -332,7 +353,7 @@ observe_herdr_binding() {
     echo "could not read the live workspace list of session $session, so whether workspace $workspace is still live is UNKNOWN, not absent"
     return 1
   }
-  printf '%s\n' "$live_workspaces" | grep -qx -- "$workspace" || {
+  printf '%s\n' "$live_workspaces" | grep -qxF -- "$workspace" || {
     echo "workspace $workspace is not a live workspace of this home in session $session"
     return 1
   }
@@ -342,7 +363,11 @@ observe_herdr_binding() {
   #    is refused rather than resolved by preference.
   local tabs label_matches observed_label observed_tab
   tabs=$(fm_backend_herdr_cli "$session" tab list --workspace "$workspace" 2>/dev/null) || {
-    echo "could not list live tabs in workspace $workspace of session $session"
+    echo "could not list live tabs in workspace $workspace of session $session, so whether tab $tab is still live is UNKNOWN, not absent"
+    return 1
+  }
+  printf '%s' "$tabs" | jq -e '(.result.tabs | type) == "array"' >/dev/null 2>&1 || {
+    echo "the tab list response for workspace $workspace in session $session carries no .result.tabs array, so it was not understood and whether tab $tab is still live is UNKNOWN, not absent"
     return 1
   }
   label_matches=$(printf '%s' "$tabs" | jq -r --arg t "$tab" \
@@ -375,7 +400,11 @@ observe_herdr_binding() {
   #    pane, so the window endpoint cleanup will act on is the one observed.
   local panes pane_matches observed_pane
   panes=$(fm_backend_herdr_cli "$session" pane list --workspace "$workspace" 2>/dev/null) || {
-    echo "could not list live panes in workspace $workspace of session $session"
+    echo "could not list live panes in workspace $workspace of session $session, so whether tab $observed_tab still holds pane $pane is UNKNOWN, not absent"
+    return 1
+  }
+  printf '%s' "$panes" | jq -e '(.result.panes | type) == "array"' >/dev/null 2>&1 || {
+    echo "the pane list response for workspace $workspace in session $session carries no .result.panes array, so it was not understood and whether tab $observed_tab still holds pane $pane is UNKNOWN, not absent"
     return 1
   }
   pane_matches=$(printf '%s' "$panes" | jq -r --arg t "$observed_tab" \
@@ -410,13 +439,28 @@ observe_herdr_binding() {
 }
 
 # write_binding <meta> <observed-id> <detail>: append the observed value and
-# its provenance atomically, preserving the file's mode. Never rewrites an
-# existing binding - this repairs absence only. Refuses a symlink outright: the
-# `mv` below replaces the link itself, which would launder a record teardown
-# refuses into a regular file teardown accepts.
+# its provenance atomically, carrying the record's own mode onto the replacement.
+# Never rewrites an existing binding - this repairs absence only. Refuses a
+# symlink outright: the `mv` below replaces the link itself, which would launder
+# a record teardown refuses into a regular file teardown accepts.
+#
+# The mode is read through the BSD/GNU `stat` pair this repo already settled on
+# (fmx_single_link_file_mode_valid in bin/fm-x-lib.sh), not `chmod --reference`,
+# which exists only in GNU coreutils and would silently leave every migrated
+# record at mktemp's 0600 on macOS. A mode that cannot be read or applied fails
+# the write and is reported, because silently narrowing a record's permissions
+# is a change to the record that no outcome line would ever mention. Every
+# failure path removes the temp file, so a state/ directory that refuses writes
+# does not accumulate one <id>.meta.migrate.XXXXXX per attempt.
 write_binding() {
-  local meta=$1 observed_id=$2 detail=$3 tmp
+  local meta=$1 observed_id=$2 detail=$3 tmp mode
   [ ! -L "$meta" ] || return 1
+  if [ "$(uname)" = Darwin ]; then
+    mode=$(stat -f %Lp "$meta" 2>/dev/null) || return 1
+  else
+    mode=$(stat -c %a "$meta" 2>/dev/null) || return 1
+  fi
+  [ -n "$mode" ] || return 1
   tmp=$(mktemp "$meta.migrate.XXXXXX") || return 1
   cat "$meta" > "$tmp" || { rm -f "$tmp"; return 1; }
   {
@@ -424,8 +468,8 @@ write_binding() {
     printf 'endpoint_task_id_provenance=migrated observed_at=%s by=%s %s\n' \
       "$RUN_AT" "$(basename "${BASH_SOURCE[0]}")" "$detail"
   } >> "$tmp" || { rm -f "$tmp"; return 1; }
-  chmod --reference="$meta" "$tmp" 2>/dev/null || true
-  mv -f "$tmp" "$meta"
+  chmod "$mode" "$tmp" 2>/dev/null || { rm -f "$tmp"; return 1; }
+  mv -f "$tmp" "$meta" || { rm -f "$tmp"; return 1; }
 }
 
 printf '# fm-migrate-endpoint-binding run\n'
