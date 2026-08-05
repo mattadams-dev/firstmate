@@ -8,7 +8,7 @@ This record holds the empirical facts the `AGENTS.md` context diet acts on: the 
 
 The diet's remaining scope is **duplicate removal, not extraction**.
 
-Extraction is now measured as a poor lever: a new skill costs a fixed 300 to 400 resident tokens whether or not it ever loads, so nothing below roughly 1,500 bytes of removable procedure can pay for itself at any trigger rarity.
+Extraction is now measured as a poor lever: a new skill's `description:` frontmatter is resident in the harness listing whether or not the skill ever loads, so an extraction pays only when its net removal from `AGENTS.md` exceeds that description's cost - a relation to measure each time, not a constant to look up.
 Removing a duplicate whose owner already exists carries no such tax and returns its full size.
 
 The two results in this record are the comparison:
@@ -49,7 +49,7 @@ Run against `~/.claude/projects/-home-jamada-code-personal-firstmate/`, claude 2
 
 Those two reproduce the published baseline pair exactly, which is what validates the command above as the instrument.
 
-The wider history is the caution this record exists to state: the five next-older transcripts in the same directory read 62,046, 59,927, 56,490, 56,490, 56,142 and 56,916.
+The wider history is the caution this record exists to state: the six next-older transcripts in the same directory read 62,046, 59,927, 56,490, 56,490, 56,142 and 56,916 - the repeated 56,490 is two distinct transcripts, not a duplicated reading.
 The 134-token spread between the two baselines is therefore the spread of two adjacent same-day readings, not a stable noise floor.
 Interactive birth weight moves with everything else resident in a session, so an interactive before/after pair separated by real work does not isolate an `AGENTS.md` change.
 
@@ -138,16 +138,16 @@ Removing the block from `AGENTS.md` saved 102 tokens.
 The skill's presence then added 184, for a net **+82** - the extraction made the floor worse before it had ever been loaded.
 
 The cause is that a skill's `description:` frontmatter is resident in the harness listing from the first turn.
-A new skill therefore costs, permanently and unconditionally:
+That description is the only *additional* resident cost a new skill creates.
+Its section 13 index line, which rider 3's verdict keeps resident, and the inline trigger stub left behind in the owning section both live inside `AGENTS.md`, so they are already netted out of the trim the table above measures and counting them again double-counts them.
 
-- its listing description, measured at 184 tokens for a four-sentence description and 107 for the two-sentence rewrite that replaced it;
-- its section 13 index line, which rider 3's verdict keeps resident;
-- the inline trigger stub left behind in the owning section.
+Break-even is therefore a relation and not a constant: **the net resident removal from `AGENTS.md` must exceed the skill's listing-description cost.**
 
-Against those it saves only the procedure body it removed.
-Break-even is therefore roughly 300 to 400 tokens of genuinely removable procedure - about 1,500 bytes - and blocks below that cannot pay for themselves no matter how rare the trigger.
+Today's evaluation of that description cost, on claude 2.1.222 and under the two-sentence cap `firstmate-coding-guidelines` now mandates, is 107 tokens; the four-sentence version it replaced measured 184.
+Both are readings taken on 2026-08-05 under those conditions, not standing figures - re-measure before applying the relation to a new extraction, because a harness or listing-format change moves them.
 
 After rewriting the description to two sentences and shortening both the stub and the index line, the same extraction reads 49,831: a net saving of **77 tokens** against the 49,908 it started from.
+It decomposes as 184 tokens of net resident removal against the 107-token description.
 
 Keep descriptions short for this reason.
 A verbose trigger description is not free documentation; it is resident context charged to every session that never uses the skill.

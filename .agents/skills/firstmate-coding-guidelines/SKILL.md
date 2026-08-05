@@ -70,15 +70,18 @@ saving per session = block tokens x P(this session never fires the trigger)
 A trigger that fires in nearly every session saves nearly nothing and adds a tool round trip, however cleanly the block splits into law and verb.
 Estimate that probability before proposing an extraction, and prefer deleting a duplicate outright wherever an owner already exists, because a doc read on demand carries no such discount.
 
-### The extraction break-even, and it is a hard floor
+### The extraction break-even
 
-A new skill carries a fixed resident tax, paid from the first turn whether or not it ever loads.
-Its `description:` frontmatter sits in the harness's skill listing, its trigger line sits in `AGENTS.md` section 13, and its inline stub sits in the owning section.
-That tax measures 300 to 400 tokens.
+A new skill carries a resident tax paid from the first turn whether or not it ever loads: its `description:` frontmatter sits in the harness's skill listing.
+Its section 13 trigger line and its inline stub are resident too, but both stay inside `AGENTS.md`, so they are already netted out of whatever the trim removes and must not be counted a second time.
 
-**An extraction needs roughly 300 to 400 tokens - about 1,500 bytes - of genuinely removable procedure to break even, and no extraction below that floor is worth making at any trigger rarity.**
-Rarity raises what a qualifying extraction returns; it cannot pay the fixed tax.
-Measure the conversion rather than assuming it: the first attempt at the one qualifying extraction in `AGENTS.md` section 7 made the floor 82 tokens *worse* before it was tuned.
+**The break-even is a relation, never a constant: an extraction pays only when the net resident removal from `AGENTS.md` - the trim measured after the stub and the index line are written back - exceeds that skill's listing-description cost.**
+Rarity raises what a qualifying extraction returns; it cannot pay the description's cost, which every session carries including the ones that never load the skill.
+Evaluate the relation by measuring both sides, never by applying a remembered number.
+
+Today's evaluation of the right-hand side, recorded for calibration and not as a floor: on 2026-08-05, claude 2.1.222, a `description:` written to the two-sentence cap below measured 107 tokens.
+That figure holds only under those conditions - a harness change, a listing-format change, or a longer description moves it - so re-measure rather than reuse it.
+The one qualifying extraction in `AGENTS.md` section 7 decomposes as 184 tokens of net resident removal against 107 tokens of description, a 77-token saving; its untuned first attempt carried a four-sentence description and made the floor 82 tokens *worse*.
 
 Prefer the dedup class instead.
 Content that already has an owner elsewhere carries no resident tax at all and returns its full size, because removing a duplicate adds nothing back.

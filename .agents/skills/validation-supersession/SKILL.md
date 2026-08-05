@@ -17,11 +17,19 @@ A new requirement, a correction inside accepted intent, or a downstream fix stay
 
 The hazard the sequence exists to prevent is a second writer on a branch an active run still owns, and its quieter twin: shipping the obsolete work because custody came back and the head looked usable.
 
+## Preserve before touching custody
+
+Do this before step 1 of the sequence below, because step 1 destroys what it saves.
+
+`data/learnings.md` in a home that has hit this records the companion hazard: fix-round commits live only in the gate repo, not on the lane's branch, and `axi abort` deletes that checkout.
+Rescue anything that exists only there first, and confirm the rescue landed before aborting.
+
 ## The sequence
 
 Run these in order, and do not compress them.
 
-1. **Abort the active run through no-mistakes axi's supported abort command, then confirm through axi status that the run has stopped, before changing any code.**
+1. **Rescue first, then abort the active run through no-mistakes axi's supported abort command, then confirm through axi status that the run has stopped, before changing any code.**
+   Complete the preservation step above before issuing the abort; the abort deletes the gate checkout, so anything not already rescued is gone.
    The confirmation is a separate step from the abort because the abort returning is not the run having stopped.
 
 2. **Read `branch_sync.next_action` from structured axi status and follow it.**
@@ -52,8 +60,3 @@ The worker correctly refused to treat it as either, flagged it for whoever resum
 
 Read that as the shape of a correct outcome: the sequence is allowed to stop at step 2 and escalate.
 An ambiguous custody reading is a blocker to report, not a state to interpret in the direction that lets work continue.
-
-## Preserve before touching custody
-
-`data/learnings.md` in a home that has hit this records the companion hazard: fix-round commits live only in the gate repo, not on the lane's branch, and `axi abort` deletes that checkout.
-Rescue anything that exists only there before the abort in step 1, not after.
