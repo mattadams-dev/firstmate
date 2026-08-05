@@ -69,6 +69,11 @@ saving per session = block tokens x P(this session never fires the trigger)
 
 A trigger that fires in nearly every session saves nearly nothing and adds a tool round trip, however cleanly the block splits into law and verb.
 Estimate that probability before proposing an extraction, and prefer deleting a duplicate outright wherever an owner already exists, because a doc read on demand carries no such discount.
+
+A new skill also carries a fixed resident tax, paid from the first turn whether or not it ever loads: its `description:` frontmatter sits in the harness's skill listing, its trigger line sits in `AGENTS.md` section 13, and its stub sits in the owning section.
+Measured, that tax runs 300 to 400 tokens, so an extraction needs roughly 1,500 bytes of genuinely removable procedure before it breaks even - and a four-sentence description alone measured 184 tokens against 107 for a two-sentence one.
+Write the shortest description that still states the trigger recognisably; verbose trigger prose is resident context charged to every session that never uses the skill.
+Measure a conversion rather than assuming it: the first attempt at this made the floor worse by 82 tokens.
 `docs/verification/agents-md-diet.md` holds the measurements behind this rule, including why a fresh-session birth-weight reading is an upper bound on a conversion's saving rather than the achieved figure.
 
 When in doubt, write the fact into the skill or doc first by patching that owner's existing language, and add only the one-line trigger to `AGENTS.md`.
