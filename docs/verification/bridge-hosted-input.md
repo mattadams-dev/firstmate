@@ -53,6 +53,10 @@ The same list is what lets `link()`'s `data-lavish-action` anchors keep their na
 **Consequence the board depends on:** an answer option rendered as `<button>` is the one thing on an ask row the captain cannot annotate.
 With the composer gone, that would have left the ask rows as the only dead spots on the surface, so the board renders answer options as plain non-control elements.
 
+The same exclusion covers `[data-lavish-action]`, which the board puts on links so their left-click navigates.
+That makes the asks-index rows non-annotatable by design - they are navigation - and it is why a ruling is placed on the **card**, where the ref and the answer options live.
+Both refs render, the index one to jump with and the card one to annotate.
+
 ## 2. A board rewrite destroys an in-progress annotation
 
 Lavish watches the hosted file (chokidar) and pushes a `reload` event on any change; the chrome answers it by resetting the artifact iframe.
@@ -163,6 +167,27 @@ The report belongs at https://github.com/kunchenguid/lavish-axi/issues, carries 
 Record the issue URL here once it is filed.
 
 Firstmate's own guard does not depend on that report: section 3 is why the tick skips the write, and that holds whatever upstream decides.
+
+## Running the live guard
+
+`tests/fm-bridge-lavish-annotation-live-e2e.test.sh` (opt-in: `FM_BRIDGE_LAVISH_LIVE_E2E=1`) re-checks the two vendor-owned facts above against the INSTALLED lavish-axi:
+
+1. that its annotation exclusion list is still the one the board is authored against, read out of the installed package - deterministic, and the part that catches an upstream change;
+2. that a real hosted session still opens an annotation card on a real ask row.
+
+The second half needs a browser that will actually render the page.
+Lavish holds an artifact behind a "waiting for fonts and final geometry" curtain until its layout check settles, and that check needs animation frames - which a browser does not give a tab that is not in front.
+In a headless browser with the tab backgrounded, the frame can stay blank indefinitely.
+
+The guard therefore reports **three** outcomes, not two: a card opened, a card did not open while the page was demonstrably ready, or the page was never in a state that could answer the question (exit 2, `COULD NOT OBSERVE`).
+That distinction is the point - the two failures look identical from the outside, and reporting a headless rendering problem as "the captain cannot answer an ask" would send the next reader hunting a defect in the board.
+
+Point it at a browser that renders in the foreground:
+
+```sh
+CHROME_DEVTOOLS_AXI_BROWSER_URL=http://127.0.0.1:9222 \
+  FM_BRIDGE_LAVISH_LIVE_E2E=1 bash tests/fm-bridge-lavish-annotation-live-e2e.test.sh
+```
 
 ## The guards, proven to fire
 
