@@ -26,10 +26,11 @@ B=$(start "$TMP/home-link/state" "$TMP/b.out")
 C=$(start "$HOME_DIR/./state" "$TMP/c.out")
 sleep 2
 live=0; for p in $A $B $C; do kill -0 "$p" 2>/dev/null && live=$((live+1)); done
+b1=$live
 echo "live watchers on the same physical state dir: $live (expect 1)"
 [ "$live" -eq 1 ] && echo "  B1: singleton HELD across differing path strings" \
                   || echo "  B1: singleton FAILED across differing path strings"
-kill $A $B $C 2>/dev/null; wait $A $B $C 2>/dev/null
+kill $A $B $C 2>/dev/null; wait $A $B $C 2>/dev/null || true
 sleep 0.5
 
 echo "--- B2: one logical home, two state addresses ---"
@@ -45,4 +46,18 @@ echo "live watchers across two state addresses: $live (2 = address-keyed, not id
 echo "  process table shows: $(pgrep -fc 'fm-watch\.sh' 2>/dev/null || echo '?') matching 'fm-watch.sh'"
 echo "  lock A holder=$(cat "$HOME_DIR/state/.watch.lock/pid" 2>/dev/null || echo none) home=$(cat "$HOME_DIR/state/.watch.lock/fm-home" 2>/dev/null || echo none)"
 echo "  lock B holder=$(cat "$ALT/.watch.lock/pid" 2>/dev/null || echo none) home=$(cat "$ALT/.watch.lock/fm-home" 2>/dev/null || echo none)"
-kill $D $E 2>/dev/null; wait $D $E 2>/dev/null
+b2=$live
+kill $D $E 2>/dev/null; wait $D $E 2>/dev/null || true
+
+# `wait` returns 127 for a pid that is not this shell's child, and the watchers
+# are started through a command substitution, so the bare waits above used to
+# leak 127 as this probe's exit status on a fully successful run. State the
+# verdict explicitly instead, so a caller reading the exit code reads the probe
+# rather than the last cleanup command.
+echo
+if [ "$b1" -eq 1 ] && [ "$b2" -eq 2 ]; then
+  echo "RESULT: H1 PROVEN - one physical state dir takes one lock, but two state addresses each take their own while both record the same fm-home"
+  exit 0
+fi
+echo "RESULT: H1 INCONCLUSIVE - B1=$b1 (expected 1), B2=$b2 (expected 2)"
+exit 1
