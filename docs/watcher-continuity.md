@@ -127,6 +127,8 @@ It was already sitting in the run record while the alarm counted up across two o
 Only a step the record marks `completed` is ever listed, so a running, pending, or gate-parked step never becomes grounds to clear an alarm.
 Two records from different runs are not comparable and read as unknown.
 The read happens at most once per escalation interval, at the moment the ratchet would turn, so the bounded pipeline call stays off the per-poll path.
+Like the sampled reset, it is gated to the `liveness` alarm alone: the busy alarm's counterpart is a completed *turn*, not a completed pipeline step.
+A reset here restarts the wedge timer on the same path the sampled reset does, so the cleared count begins its next window from now.
 
 The baseline it compares against is recorded at each escalation attempt, so "since" is measured in escalations, not in polls or seconds.
 That keeps the reset an *event* - one more step finished than last time - and never an interval, so the never-by-elapsed-time prohibition holds unchanged.

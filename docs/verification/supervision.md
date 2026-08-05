@@ -628,12 +628,16 @@ The wedge absorbed silently, which is why the reported reason is empty: a pardon
 With the fix in place: `tests/fm-watch-triage.test.sh` 54 `ok -` lines, `tests/fm-crew-state.test.sh` 53, `tests/fm-health-evidence.test.sh` 8, all exiting 0.
 That suite drives `health_evidence_reset` by extracting it from `bin/fm-watch.sh`, so it now extracts `clear_wedge_escalation` with it, and pins the same invariant one level down: the baseline survives every look that leaves the count standing and is gone the moment proven health clears it.
 
+The away-mode daemon's side of the same drop is pinned by `test_handle_wake_terminal_signal_clears_pause_tracking` in `tests/fm-daemon.test.sh`: a terminal signal that clears the watcher's wedge count must not leave the baseline behind it.
+That suite reads 113 `ok -` lines, exiting 0.
+
 Deterministic entry points for this contract:
 
 ```sh
 tests/fm-watch-triage.test.sh
 tests/fm-crew-state.test.sh
 tests/fm-health-evidence.test.sh
+tests/fm-daemon.test.sh
 ```
 
 ## Wedge-alarm channels
