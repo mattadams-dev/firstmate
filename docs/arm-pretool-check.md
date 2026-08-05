@@ -125,6 +125,10 @@ When the command carries such grammar and its raw bytes reference both a `fm-wat
 This backstop mirrors the protected-execution fail-closed rule and covers forms like `while true; do pkill -f fm-watch; done`, `for x in 1; do pkill -f fm-watch; done`, `case x in x) pkill -f fm-watch ;; esac`, and `until false; do kill $(pgrep -f fm-watch); done`.
 It is gated on the grammar being unsupported: in grammar the classifier does model, command-position analysis is authoritative, so data mentions such as `echo 'pkill -f fm-watch'` and a loop that only names the watcher without a kill verb such as `for f in 1; do echo fm-watch; done` remain allowed.
 
+A signal-0 probe is exempt from this backstop and from the modelled watcher-pid denial alike, because it is an observation and this boundary is drawn on what a command DOES, never on what text it sits near.
+`for f in fm-safe-kill fm-watcher-lock; do bash tests/$f.test.sh; kill -0 5; done` names two test files and probes an unrelated pid; refusing it would be a proximity rule wearing a targeting rule's clothes, and it would push liveness checks back onto `ps | grep`.
+Everything that can deliver a signal to a watcher pid stays absolutely denied - `kill -TERM $pid`, `kill -9`, a bare `kill $pid`, `kill $(pgrep -f fm-watch)`, and every `pkill`/`killall` form - because the reason that guard exists is that a pattern can reach a sibling firstmate home's supervisor, and signal 0 cannot.
+
 ## Process termination
 
 Every termination in a firstmate home goes through `bin/fm-safe-kill.sh`, and this guard is what makes that unavoidable from the harness.
@@ -157,7 +161,8 @@ Signal 0 is the one exception to that fail-closed rule, and it is exactly one si
 That road is already recorded: a pattern census counted four supervise daemons where zero existed.
 So a signal-0 probe is allowed in every grammar position, and nothing else is: `kill -0` inside a loop is allowed, while `kill -9`, a bare `kill <pid>`, `kill -0 -9 <pid>`, a probe whose signal comes out of a substitution, and every pattern-kill form stay denied there.
 `kill -l` and job specs keep the narrower rule - allowed only where the grammar is modelled - because neither is load-bearing for liveness.
-The exemption also does not reach `broad-watcher-kill` or `pattern-kill`: the modelled path denies a kill that names a watcher pid at any signal, and the fallback is never more permissive than the grammar it stands in for.
+The exemption reaches `broad-watcher-kill` on both its paths - the modelled watcher-pid denial and the raw fallback - because signal 0 cannot terminate a watcher any more than it can terminate anything else, so refusing it there conceded nothing and cost the fleet its liveness idiom.
+It does not reach `pattern-kill`: `pkill` and `killall` select their target by matching text whatever signal they carry, and `kill -0 $(pgrep -f fm-watch)` is target-selection by pattern with a harmless signal attached, which is still the shape that produced this fleet's phantom census.
 
 ## Stable reason codes
 
@@ -170,7 +175,7 @@ Every semantic deny includes one stable code in square brackets before its prose
 | `watcher-redirection` | A protected execution uses shell redirection. |
 | `watcher-bundled` | The outer command list is not the blessed setup-plus-final tree. |
 | `watcher-nested` | A wrapper, group, substitution, nested shell, `eval`, or constructed dynamic payload executes the protected command. |
-| `broad-watcher-kill` | An actual broad process kill targets the watcher. |
+| `broad-watcher-kill` | An actual broad process kill targets the watcher. A signal-0 probe delivers nothing and is never denied by this code. |
 | `pattern-kill` | A termination selects its target by matching process text. |
 | `unverified-kill` | A termination by pid; use `bin/fm-safe-kill.sh`, which takes its authority from the lock naming the target. A signal-0 probe is not a termination and is never denied by this code. |
 | `unclassifiable-protected-command` | Malformed or unsupported syntax contains a protected command and cannot be safely classified. |

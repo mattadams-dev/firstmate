@@ -166,6 +166,14 @@ matrix_case K26 deny 'if kill -0"9" 5; then :; fi'
 matrix_case K27 deny 'if kill -0 $(kill -9 6); then :; fi'
 matrix_case K28 deny 'for p in 1 2; do kill -s TERM $p; done'
 matrix_case K29 deny 'while true; do kill -0 5; pkill -f node; done'
+# The watcher-pid guard keeps its absolute half. Signal 0 is exempt from it;
+# nothing that delivers a signal is, whether the pid was resolved into a
+# variable, taken straight from a substitution, or sent with no signal named at
+# all. K33 holds the fallback's half of the same boundary.
+matrix_case K30 deny 'pid=$(pgrep -f fm-watch); kill -TERM $pid'
+matrix_case K31 deny 'pid=$(pgrep -f fm-watch); kill $pid'
+matrix_case K32 deny 'kill -0 $(pgrep -f fm-watch)'
+matrix_case K33 deny 'for f in fm-watcher-lock; do bash tests/$f.test.sh; kill -9 5; done'
 
 # L-series is the mirror image, and it is the half that gets missed: a guard
 # that refuses every kill leaves supervision unrecoverable and every liveness
@@ -203,6 +211,16 @@ matrix_case L19 allow 'for p in 1 2; do kill -0 $p; done'
 matrix_case L20 allow 'while kill -0 5; do sleep 1; done'
 matrix_case L21 allow 'if kill -s 0 "$pid"; then echo alive; fi'
 matrix_case L22 allow 'until kill -0 5; do sleep 1; done'
+# The last place the probe was still refused, and it was refused for PROXIMITY:
+# the raw scan fires on the bytes `fm-watch` co-occurring with a kill verb, so
+# L17 plus a liveness check denied, while the same two commands outside a loop
+# allowed. The boundary belongs on what a command does - observe versus act - so
+# signal 0 is exempt from the watcher-pid guard as well. K30-K33 keep that guard
+# absolute for everything that delivers a signal.
+matrix_case L23 allow 'for f in fm-safe-kill fm-watcher-lock; do bash tests/$f.test.sh; kill -0 5; done'
+matrix_case L24 allow 'pid=$(pgrep -f fm-watch); kill -0 $pid'
+matrix_case L25 allow 'for w in 1; do echo fm-watch-arm; kill -0 5; done'
+matrix_case L26 allow 'kill -0 5; echo fm-watch-arm'
 
 matrix_case E01 allow "bin/fm-watch-checkpoint.sh --seconds '180;still-one-arg'"
 matrix_case E02 allow "bin/fm-watch-checkpoint.sh --label 'fm-watch-arm.sh; literal argument'"

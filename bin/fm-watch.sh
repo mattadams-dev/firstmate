@@ -830,7 +830,20 @@ fm_supervisor_singleton_acquire "$WATCH_LOCK" watcher "$FM_HOME" "$STATE" "$WATC
 case $? in
   0) ;;
   1)
-    if [ -n "${FM_SINGLETON_PEER_PID:-}" ]; then
+    # Standing down is right in every case here, but "already running" is a claim
+    # about WHAT holds the lock, and the holder is not always a watcher: the
+    # standalone PR-check migration takes this same lock as an exclusion. Saying
+    # "watcher" for it would report a world-state nobody observed, which is the
+    # false-confidence direction this seam already fixed on the health side. A
+    # holder that publishes no role predates the field, so the peer wording -
+    # which is what it almost always is - stays the honest default there.
+    if [ -n "${FM_SINGLETON_PEER_ROLE:-}" ] && [ "${FM_SINGLETON_PEER_ROLE:-}" != watcher ]; then
+      if [ -n "${FM_SINGLETON_PEER_PID:-}" ]; then
+        echo "watcher: lock $WATCH_LOCK is held by $FM_SINGLETON_PEER_ROLE pid $FM_SINGLETON_PEER_PID, not by a watcher; not starting"
+      else
+        echo "watcher: lock $WATCH_LOCK is held by $FM_SINGLETON_PEER_ROLE, not by a watcher; not starting"
+      fi
+    elif [ -n "${FM_SINGLETON_PEER_PID:-}" ]; then
       echo "watcher: already running pid $FM_SINGLETON_PEER_PID"
     else
       echo "watcher: already running"

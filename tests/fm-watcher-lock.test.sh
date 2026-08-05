@@ -184,13 +184,20 @@ test_lock_publishes_its_real_holder_identity() {
 # for the wrong reason - the holder is gone by then, so the health check fails on
 # liveness and never reaches the question this case exists to ask. The beacon is
 # seeded fresh for the same reason: a watcher that was just paused leaves one.
+#
+# A real watcher is started inside that same window for the second half: it must
+# stand down, and it must not report the holder as a running watcher. Standing
+# down is correct; saying "already running" about the migration exclusion is a
+# world-state nobody observed.
 test_migration_exclusion_never_reads_as_a_healthy_watcher() {
-  local dir state fakebin verdict real_stat snapshot
+  local dir state fakebin verdict real_stat snapshot bound
   dir=$(make_case migration-not-a-watcher)
   state="$dir/state"
   fakebin="$dir/fakebin"
   snapshot="$dir/held-lock-verdict"
   real_stat=$(command -v stat) || { pass "stat not available, skipping"; return; }
+  bound=
+  command -v timeout >/dev/null 2>&1 && bound="timeout 30"
 
   cat > "$fakebin/stat" <<SH
 #!/usr/bin/env bash
@@ -208,6 +215,11 @@ if [ ! -e "$snapshot" ] && [ -s "$state/.watch.lock/pid" ]; then
       printf "verdict=no-healthy-watcher\n"
     fi
   ' _ "$LIB" "$state" "$ROOT/bin/fm-watch.sh" "$dir" > "$snapshot" 2>/dev/null
+  printf 'standdown-start\n' >> "$snapshot"
+  $bound env FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_POLL=5 FM_SIGNAL_GRACE=1 \\
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \\
+    bash "$ROOT/bin/fm-watch.sh" >> "$snapshot" 2>&1
+  printf 'standdown-rc=%s\n' "\$?" >> "$snapshot"
 fi
 exec "$real_stat" "\$@"
 SH
@@ -226,7 +238,14 @@ SH
   verdict=$(sed -n 's/^verdict=\([^ ]*\).*/\1/p' "$snapshot")
   [ "$verdict" = no-healthy-watcher ] \
     || fail "the migration's exclusion read as this home's healthy watcher: $(tr '\n' '|' < "$snapshot")"
-  pass "the PR-check migration's exclusion never reads as this home's healthy watcher"
+  grep -q '^standdown-rc=0$' "$snapshot" \
+    || fail "a watcher started against the held exclusion did not stand down cleanly: $(tr '\n' '|' < "$snapshot")"
+  grep -q '^watcher: .*pr-check-migration.*not starting$' "$snapshot" \
+    || fail "the stand-down line did not name the migration as the holder: $(tr '\n' '|' < "$snapshot")"
+  if grep -q '^watcher: already running' "$snapshot"; then
+    fail "the stand-down line reported a running watcher where only the migration exclusion held the lock: $(tr '\n' '|' < "$snapshot")"
+  fi
+  pass "the PR-check migration's exclusion never reads as this home's healthy watcher, and a stood-down watcher names it"
 }
 
 # A lock held by a live process that publishes NO identity cannot be judged

@@ -86,7 +86,10 @@ test_existing_singleton_watcher_is_not_success() {
   # singleton is undecidable rather than peer-held. Both outcomes must reach the
   # same place: a failed checkpoint that says why, never a quiet success.
   assert_contains "$(cat "$err")" "not starting a second supervisor" "undecidable singleton was not explained"
-  assert_contains "$(cat "$err")" "outside this foreground checkpoint" "singleton watcher failure was not explained"
+  assert_contains "$(cat "$err")" "does not own this home's watcher cycle" "singleton failure was not explained"
+  # An undecidable singleton is not a running watcher, and the summary must not
+  # say it is: nothing here observed one.
+  assert_not_contains "$(cat "$err")" "watcher is already running" "an undecidable singleton was reported as a running watcher"
   pass "checkpoint rejects an undecidable watcher singleton as unowned"
 }
 
@@ -114,7 +117,7 @@ test_live_peer_singleton_is_not_success() {
   wait "$peer" 2>/dev/null || true
   expect_code 1 "$status" "live-peer checkpoint exit"
   assert_contains "$(cat "$out")" "watcher: already running" "peer stand-down was not passed through"
-  assert_contains "$(cat "$err")" "outside this foreground checkpoint" "peer singleton failure was not explained"
+  assert_contains "$(cat "$err")" "does not own this home's watcher cycle" "peer singleton failure was not explained"
   pass "checkpoint rejects a verified-live peer singleton as unowned"
 }
 

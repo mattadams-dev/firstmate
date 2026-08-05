@@ -418,7 +418,7 @@ This is why `bin/fm-safe-kill.sh` accepts only a pid a role lock already names, 
 ### Guard-class mutation results
 
 One mutation per protection, each applied to its own copy of the tree, never to a working checkout.
-Baselines read against: `tests/fm-watcher-lock.test.sh` 39 `ok -` lines, `tests/fm-safe-kill.test.sh` 13, `tests/fm-arm-pretool-check.test.sh` 197, all exiting 0.
+Baselines read against: `tests/fm-watcher-lock.test.sh` 39 `ok -` lines, `tests/fm-safe-kill.test.sh` 13, `tests/fm-arm-pretool-check.test.sh` 205, all exiting 0.
 A failing case aborts its suite, so each mutation was run twice: once to see which case it kills, once with that case's invocation removed to prove nothing else depends on the mutated protection.
 Both directions are covered deliberately: a guard that refuses everything is the same failure as one that permits everything, and it is the direction that gets missed.
 
@@ -436,6 +436,11 @@ Both directions are covered deliberately: a guard that refuses everything is the
 | The unmodelled-grammar fallback stops exempting the sanctioned helper | refuses too much | matrix `L13`, and `L14`-`L17` with it | 181 clean |
 | The unmodelled-grammar fallback stops exempting signal-0 probes | refuses too much | matrix `L18`, and `L19`-`L22` with it | 192 clean |
 | The signal-0 exemption stops requiring plain targets after the signal | permits too much | matrix `K25` (`kill -0 -TERM $p`) | 196 clean |
+| The modelled watcher-pid guard stops exempting signal-0 probes | refuses too much | matrix `L24` (`pid=$(pgrep -f fm-watch); kill -0 $pid`) | 204 clean |
+| The raw fallback stops exempting signal-0 probes beside `fm-watch` text | refuses too much | matrix `L23`, then `L25` | 203 clean |
+| The watcher-pid guard exempts every kill, not signal 0 alone | permits too much | none alone; redundantly guarded, see below | 205, unchanged |
+| The stand-down line reports every holder as a running watcher | permits too much | `test_migration_exclusion_never_reads_as_a_healthy_watcher` (its stand-down half) | 38 clean |
+| A real watcher peer gets the non-watcher holder wording | refuses too much | `test_singleton_start` | not chased to a clean suite |
 | Elapsed time alone resets the wedge alarm | permits too much | `test_a_frozen_lane_is_never_pardoned` | 2 before the kill |
 | Nothing resets the wedge alarm | refuses too much | `test_a_busy_pane_still_escalates_while_its_cpu_advances` (its liveness half) | 7 before the kill |
 | The pane reset also clears the home's failure episode | boundary crossing | `test_the_two_resets_do_not_touch_each_others_state` | 6 before the kill |
@@ -473,7 +478,42 @@ A guard whose refusal pushes callers onto the road it was built to close is a sa
 Signal 0 is now exempt in every grammar position, and it is exactly one signal wide.
 `L18`-`L22` are the probe direction; `K24`-`K29` are the laundering direction, and each one is a shape that textually contains a probe: a probe standing next to a real kill, a second signal riding behind the `-0` (`kill -0 -TERM $p`), a `-0` glued to a signal by quoting (`kill -0"9" 5`), a kill inside the probe's own substitution, a non-null `-s`, and a `pkill` sharing the loop.
 Only the kill VERB is dropped by the exemption, never its arguments, which is what keeps the substitution case denied.
-The pattern scan and the broad-watcher scan deliberately do not take the exemption at all: the modelled path denies a kill naming a watcher pid at any signal, and a fallback that is more permissive than the grammar it stands in for is not a fallback.
+
+### The last refusal was drawn on proximity, not on targeting
+
+The first pass at the exemption withheld it from the broad-watcher guard, on the reasoning that the modelled path denies a kill naming a watcher pid at any signal, so a fallback taking the exemption would be more permissive than the grammar it stands in for.
+Measured, that reasoning was inverted for the case that actually bites.
+The raw scan fires on the CO-OCCURRENCE of the bytes `fm-watch` with a kill verb, not on a reference to a watcher pid, so the fallback was STRICTER than the modelled path, not looser: `kill -0 5; echo fm-watch-arm` allowed, and the same two commands inside a loop denied as `broad-watcher-kill`.
+That second shape is fixture `L17` plus a liveness check - naming a watcher test file and a safe-kill test file in one loop is the exact command pair recorded above as having fired twice against ordinary work.
+
+The boundary belongs on what a command DOES - observe versus act - and never on what text it happens to sit near.
+Refusing an observation primitive because `fm-watch` appears elsewhere in the same command re-draws it on proximity, which is the substring-versus-position defect tracked as `fm-guard-command-vs-data-position`.
+So signal 0 is now exempt from the watcher-pid guard on both its paths, and the deny text, the policy comment, and the behaviour say the same thing.
+This concedes nothing: signal 0 cannot terminate a watcher any more than it can terminate anything else.
+
+What the guard exists for is untouched, and `K30`-`K33` hold it: a pid resolved off a watcher `pgrep` into a variable and then sent `-TERM`, the same pid sent a bare `kill` with no signal named, `kill -0 $(pgrep -f fm-watch)` - which is target selection by pattern with a harmless signal attached, still the census shape - and a real `kill -9` beside a watcher test file in unmodelled grammar.
+`pattern-kill` therefore keeps no exemption at all, since `pkill` and `killall` select by matching text whatever signal they carry.
+`L23`-`L26` are the probe direction, including the modelled `pid=$(pgrep -f fm-watch); kill -0 $pid` that both paths used to deny.
+The guard has two paths and each has its own fixture: removing the modelled exemption kills `L24` alone with 204 clean, and removing the raw fallback's kills `L23` and then `L25` with 203 clean.
+
+The permits-too-much direction here is REDUNDANTLY GUARDED, and it is recorded that way rather than dressed up as a proof.
+Exempting every kill from the watcher-pid guard regardless of signal changes nothing the suite can see: `kill -TERM $pid` and `kill $pid` off a watcher `pgrep` are still denied, by the by-pid termination rule instead, and the matrix stays at 205.
+Dropping the probe test's requirement that the target be a word this layer can see is the same story: `kill -0 $(pgrep -f fm-watch)` falls to `pattern-kill` instead, and the matrix stays at 205.
+Only the combined mutation - the watcher guard exempting everything AND the termination classifier disabled - lets those commands through, and it does: both classify as `allow`, with `D30` the first case the suite reaches.
+`K30`-`K33` are therefore held by two independent rules each.
+That is the intended design, so the honest statement is that no single mutation kills them, not a number shaped to look like the rows above.
+
+### The stand-down line said "watcher" about something that was not one
+
+While the standalone migration holds the lock, a starting watcher correctly stands down - and printed `watcher: already running pid N`, which `bin/fm-watch-checkpoint.sh` then reported as a watcher running outside the checkpoint.
+The behaviour was right and the report was not: no watcher was running in that window.
+That is the same false-confidence class this round fixed on the health-predicate side, one layer up, and `FM_SINGLETON_PEER_ROLE` - populated only once the seed and the reader agreed on the field name - is the only thing that can tell the two worlds apart.
+A non-watcher holder now gets a line that names it, a holder publishing no role keeps the peer wording that is honest for the pre-upgrade case, and the checkpoint's own summary claims only what it established: that this checkpoint does not own the cycle.
+
+Both directions are single-mutation proofs here, and the observation is taken inside the real window: a watcher is started while the real migration holds the lock, from the same `stat` shim, and its stand-down line is read from that run.
+Making the stand-down report every holder as a running watcher kills that half with the defect printed verbatim - `role=pr-check-migration` alongside `watcher: already running pid 921121`, the same pid.
+Giving a real watcher peer the non-watcher wording instead kills `test_singleton_start`, which is the mirror: a guard that can never say "a watcher is already running" breaks the arm layer's attach path as surely as one that always says it.
+That mirror mutation was not chased to a clean suite, and that is recorded as measured rather than assumed.
 
 ### A non-watcher holder of the watcher lock
 
@@ -508,7 +548,7 @@ It passed standalone and failed under load - a verdict that depended on ambient 
 Each test now observes the process it claims to: a `sleep` for a frozen pane, a spin loop for a busy one.
 Verified by six consecutive runs against four competing CPU loaders, zero failures.
 
-Eight of the seventeen are the mirror-image or boundary-crossing direction on purpose.
+Eleven of the twenty-two are the mirror-image or boundary-crossing direction on purpose.
 A supervisor that can never arm and a helper that can never terminate anything are the same failure as their opposites, one mirror over, and they fail silently rather than loudly.
 
 Two mutations are broad by nature and are reported as such rather than forced into a one-to-one claim.
