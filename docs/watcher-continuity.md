@@ -78,14 +78,16 @@ The rule is stated once, in `bin/fm-wake-lib.sh` above `fm_failure_episode_reset
 | | subject | state cleared | evidence |
 | --- | --- | --- | --- |
 | `fm_failure_episode_reset` | the home's supervision chain - is anything supervising at all? | `.turnend-claude-blocks`, `.claude-autoarm-failure-notified`, `.claude-autoarm-failure-alarmed` | `fm_watcher_healthy`: a verified live identity-matched watcher with a fresh beacon |
-| `health_evidence_reset` | one crewmate's pane - is that worker wedged? | `.wedge-escalations-<key>`, `.stale-since-<key>` | that pane's own rendered output, process-tree CPU, or live descendants, compared across two samples |
-| `step_evidence_reset` | the same pane, same question | the same state | a step this lane's own no-mistakes run record marks completed since the previous escalation |
+| `health_evidence_reset` | one crewmate's pane - is that worker wedged? | `.wedge-escalations-<key>`, `.stale-since-<key>`, `.step-evidence-<key>` | that pane's own rendered output, process-tree CPU, or live descendants, compared across two samples |
+| `step_evidence_reset` | the same pane, same question | `.wedge-escalations-<key>`, having first advanced `.step-evidence-<key>` to the reading that cleared it | a step this lane's own no-mistakes run record marks completed since the previous escalation |
 
 The first two are deliberately separate functions rather than one.
 A single reset spanning both would dispatch on subject into branches sharing no evidence and no state - two mechanisms wearing one name, which hides the boundary instead of making it checkable.
 Neither signal can answer the other's question: a healthy watcher is no evidence that a given crewmate is unstuck, and a computing crewmate is no evidence that the home is supervised.
 
 The third shares the second's subject and state, because it answers the same question from a different kind of evidence - see "Two kinds of evidence for the pane alarm" below.
+Sharing a subject means sharing its state: the escalation count and the baseline that step evidence is measured from are one piece of state and are dropped together, wherever the count is dropped.
+A baseline that outlived its count would describe an alarm window that has already ended, and pre-window evidence would then pardon a wedge inside the next one - the eager direction, which is the dangerous one.
 
 A beacon *freshness* requirement is not a time-based amnesty.
 Requiring recent positive evidence is the opposite of pardoning elapsed silence, and the two must not be confused when reading `fm_watcher_healthy` as an evidence source.

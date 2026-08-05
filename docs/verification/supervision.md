@@ -609,11 +609,31 @@ The baseline-never-advances mutation is the one worth recording in its own right
 It clears the alarm correctly the first time and then pardons the lane on every later escalation, so the alarm reads as working while it can no longer sound.
 Nothing in the suite caught it until the reset case was extended to run one more round with no further step completed, which is the property that separates clearing an alarm from disabling it.
 
+### The alarm window the baseline belongs to
+
+Verified 2026-08-05, in review of the above.
+A fourth mutant of the same eager direction survived that matrix: the baseline was dropped nowhere the escalation count was dropped except by the step reset itself.
+A count cleared by proven health ends an alarm window, so a baseline that outlived it let a step completed while the lane was demonstrably healthy pardon the wedge raised afterwards.
+The count and the baseline are one piece of state and are now dropped together, through `clear_wedge_escalation` in `bin/fm-watch.sh`, at every site that drops the count - including the away-mode daemon's `clear_pause_tracking`.
+
+`test_health_reset_drops_the_step_evidence_baseline` builds exactly that path: escalation 1 records the baseline, the lane proves its health through the CPU channel behind a static pane, the test step then completes, and the lane hangs inside the next step.
+It proves health through CPU rather than rendered output deliberately, because that is what keeps the lane on the same-hash path where the baseline could survive - and it is the shape measured on the live fleet.
+Run against the fix removed (`rm -f "$since_file" "$escalation_file"` restored in `health_evidence_reset`), it is the only case that fails, after 21 clean ones:
+
+```text
+not ok - a step completed before the health reset pardoned a later wedge:
+```
+
+The wedge absorbed silently, which is why the reported reason is empty: a pardoned alarm produces no output at all.
+With the fix in place: `tests/fm-watch-triage.test.sh` 54 `ok -` lines, `tests/fm-crew-state.test.sh` 53, `tests/fm-health-evidence.test.sh` 8, all exiting 0.
+That suite drives `health_evidence_reset` by extracting it from `bin/fm-watch.sh`, so it now extracts `clear_wedge_escalation` with it, and pins the same invariant one level down: the baseline survives every look that leaves the count standing and is gone the moment proven health clears it.
+
 Deterministic entry points for this contract:
 
 ```sh
 tests/fm-watch-triage.test.sh
 tests/fm-crew-state.test.sh
+tests/fm-health-evidence.test.sh
 ```
 
 ## Wedge-alarm channels

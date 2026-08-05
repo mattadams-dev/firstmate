@@ -481,7 +481,7 @@ if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && command -v no-mistakes >/dev/n
     run_branch=$(strip_quotes "$(nm_field branch)")
     if [ -n "$run_branch" ] && [ "$run_branch" = "$CREW_BRANCH" ] && nm_run_head_matches_worktree; then
       HAVE_RUN=1
-    else
+    elif [ "$MODE" != steps ]; then
       # The active-or-most-recent run is for another branch, or same branch with
       # a rewritten/diverged head (the CLI is alive and answered; only the
       # attribution missed) - try the coarse fallback.
@@ -489,6 +489,11 @@ if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && command -v no-mistakes >/dev/n
       # primary call means the CLI itself did not respond, so retrying it
       # immediately with a second bounded call would just double the wait
       # for no better answer.
+      # Skipped entirely in --steps mode: a coarse row carries a status word and
+      # no step detail, so emit_completed_steps can never speak from one and the
+      # second bounded call would be paid for an answer that is discarded - in
+      # the watcher's poll loop, on exactly the busy-fleet case this fallback
+      # exists for.
       COARSE_STATUS=$(nm_runs_status_for_branch "$CREW_BRANCH")
       if [ -n "$COARSE_STATUS" ]; then
         HAVE_RUN=1

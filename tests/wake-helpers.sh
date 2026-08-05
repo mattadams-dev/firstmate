@@ -82,6 +82,11 @@ fi
 if [ "${1:-}" = "display-message" ]; then
   case "$*" in
     *pane_current_command*) printf '%s\n' "${FM_FAKE_TMUX_CURRENT_COMMAND:-}"; exit 0 ;;
+    # The pane's process, for the health-evidence CPU and children channels.
+    # Unset answers empty, which fm_health_target_pid rejects exactly as the
+    # unanswered command below did - so a suite that sets nothing still samples
+    # those two channels as "could not be seen".
+    *pane_pid*) printf '%s\n' "${FM_FAKE_TMUX_PANE_PID:-}"; exit 0 ;;
   esac
 fi
 exit 1

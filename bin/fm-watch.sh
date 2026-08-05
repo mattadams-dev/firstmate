@@ -289,11 +289,26 @@ recorded_windows() {
 # below).
 FM_WEDGE_DEMAND_INSPECT_COUNT=${FM_WEDGE_DEMAND_INSPECT_COUNT:-3}
 
+# The escalation count and the step-evidence baseline are ONE piece of state.
+# The baseline means "what this lane's run record said at the escalation this
+# count is measured from", so a baseline that outlives its count describes an
+# alarm window that has already ended, and pre-window evidence would then pardon
+# a fresh wedge - the eager direction, which is the dangerous one. Every site
+# that drops the count drops the baseline with it, through here.
+# step_evidence_reset is the one exception, and only because it rewrites the
+# baseline to the current reading before it drops the count: that baseline
+# belongs to the window the reset opens, not to the one it closes.
+clear_wedge_escalation() {  # <key>
+  rm -f "$STATE/.wedge-escalations-$1" "$STATE/.step-evidence-$1"
+}
+
 # Repeat-poll wedge-timer bookkeeping for an already-classified stale hash
 # absorbed as provably-working - repairs a missing/corrupt timer (self-heals a
 # watcher restart between recording the hash and recording the timer), or
-# escalates once STALE_ESCALATE_SECS have elapsed. Never re-reads the crew
-# state (the costly check already ran once, at classification time). Shared by
+# escalates once STALE_ESCALATE_SECS have elapsed. Re-reads the crew state only
+# at the moment the ratchet would turn, at most once per escalation interval
+# (see step_evidence_reset); the per-poll path never re-reads it, because the
+# costly classification check already ran once, at classification time. Shared by
 # both places a hash can be absorbed this way: the plain non-terminal path,
 # and the stale_is_terminal-overridden path (a captain-relevant status-log
 # line that an active run/busy pane outranked).
@@ -321,7 +336,8 @@ health_evidence_reset() {  # <window> <rendered-hash> <since-file> <escalation-c
   [ "$verdict" -eq 0 ] || return 1
   n=$(cat "$escalation_file" 2>/dev/null || echo 0)
   case "$n" in ''|*[!0-9]*) n=0 ;; esac
-  rm -f "$since_file" "$escalation_file"
+  rm -f "$since_file"
+  clear_wedge_escalation "$key"
   # Logged as a transition, not merely dropped, so the alarm history stays
   # reconstructable: a count that silently vanishes is indistinguishable from
   # one that was never raised.
@@ -501,8 +517,8 @@ handle_paused_stale() {  # <window> <task> <hash>
   key=$(printf '%s' "$win" | tr ':/.' '___')
   printf '%s' "$h" > "$STATE/.stale-$key"
   : > "$STATE/.paused-$key"
-  rm -f "$STATE/.stale-since-$key" "$STATE/.wedge-escalations-$key" "$STATE/.health-sample-$key" \
-    "$STATE/.step-evidence-$key"
+  rm -f "$STATE/.stale-since-$key" "$STATE/.health-sample-$key"
+  clear_wedge_escalation "$key"
   statusf="$STATE/$task.status"
   mtime=$(stat_mtime "$statusf")
   case "$mtime" in ''|*[!0-9]*) mtime=$(date +%s) ;; esac
@@ -572,8 +588,8 @@ clear_pause_tracking() {  # <window>
   key=${key//\//_}
   key=${key//./_}
   clear_pause_state "$win"
-  rm -f "$STATE/.stale-$key" "$STATE/.stale-since-$key" "$STATE/.wedge-escalations-$key" "$STATE/.health-sample-$key" \
-    "$STATE/.step-evidence-$key"
+  rm -f "$STATE/.stale-$key" "$STATE/.stale-since-$key" "$STATE/.health-sample-$key"
+  clear_wedge_escalation "$key"
 }
 
 # Reconcile a declared pause or captain-held status with authoritative crew state.
@@ -1342,7 +1358,8 @@ EOF
         if [ "$busy_now" -eq 0 ] && busy_turn_over_age "$task"; then
           wedge_timer_check "$w" "$ssf" "busy (no completed turn)" "$ewf" turn-completion
         else
-          rm -f "$ssf" "$ewf"
+          rm -f "$ssf"
+          clear_wedge_escalation "$key"
         fi
         if [ -e "$pf" ] && { [ "$n" -ge 2 ] || ! status_is_paused_or_captain_held "$(last_status_line "$STATE/$(window_to_task "$w" "$STATE").status")"; }; then
           clear_pause_tracking "$w"
@@ -1354,7 +1371,8 @@ EOF
       if [ "$busy_now" -eq 0 ] && busy_turn_over_age "$task"; then
         wedge_timer_check "$w" "$ssf" "busy (no completed turn)" "$ewf" turn-completion
       else
-        rm -f "$ssf" "$ewf"
+        rm -f "$ssf"
+        clear_wedge_escalation "$key"
       fi
       task=$(window_to_task "$w" "$STATE")
       if ! afk_present && status_is_paused_or_captain_held "$(last_status_line "$STATE/$task.status")" && [ "$busy_now" -ne 0 ]; then

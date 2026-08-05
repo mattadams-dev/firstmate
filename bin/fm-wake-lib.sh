@@ -479,11 +479,12 @@ fm_lock_release() {
 # slow failure an alarm exists to catch, and does it silently. "Unknown" clears
 # nothing, and it accelerates nothing.
 #
-# The rule has exactly two applications, with disjoint subjects and disjoint
-# state. They are deliberately NOT one function: a single reset spanning both
-# would dispatch on subject into two branches that share no evidence and no
-# state, which is two mechanisms wearing one name - it would hide this boundary
-# rather than make it checkable.
+# The rule has exactly two SUBJECTS, with disjoint state, answered by three
+# applications: one for the home's supervision chain, and two evidence sources
+# for one crewmate's pane. The two subjects are deliberately NOT one function: a
+# single reset spanning both would dispatch on subject into two branches that
+# share no evidence and no state, which is two mechanisms wearing one name - it
+# would hide this boundary rather than make it checkable.
 #
 #   fm_failure_episode_reset      (here)
 #     subject   the HOME's supervision chain - is anything supervising at all?
@@ -496,7 +497,8 @@ fm_lock_release() {
 #
 #   health_evidence_reset         (bin/fm-watch.sh)
 #     subject   ONE crewmate's pane - is that worker wedged?
-#     state     .wedge-escalations-<key>, .stale-since-<key>
+#     state     .wedge-escalations-<key>, .stale-since-<key>,
+#               .step-evidence-<key>
 #     evidence  that pane's own rendered output, process-tree CPU, or live
 #               descendants, compared across two samples.
 #     sibling   step_evidence_reset (same file) answers the SAME subject from a
@@ -504,6 +506,10 @@ fm_lock_release() {
 #               marks completed since the previous escalation. A recorded
 #               outcome, not a sample, and still an event rather than an
 #               interval, so the never-by-elapsed-time rule holds unchanged.
+#               Sharing one subject means sharing its state: the escalation
+#               count and the baseline that step evidence is measured from are
+#               dropped together, so evidence from before an alarm window can
+#               never pardon a wedge inside the next one.
 #
 # THE BOUNDARY: neither reset may touch the other's state. A healthy watcher is
 # no evidence that crewmate X is unstuck, and a computing crewmate is no evidence
