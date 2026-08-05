@@ -1339,8 +1339,18 @@ test_completed_step_transition_clears_wedge_escalation() {
   grep -E "wedge escalation reset by completed pipeline step.*completed: test" "$LANE_STATE/.watch-triage.log" >/dev/null \
     || fail "the reset log did not name the step that completed"
 
+  # Round 3, no further step completed: the reset cleared the alarm, it did not
+  # disable it. A lane that finishes one step and then wedges inside the next
+  # must still escalate, so the baseline has to advance with each reading -
+  # otherwise every later round would keep comparing against the pre-reset
+  # record and pardon the lane forever.
+  wedge_round
+  [ "$WEDGE_VERDICT" = escalated ] || fail "the lane never escalated again after a reset: $(cat "$LANE_OUT")"
+  grep -F "escalation 1" "$LANE_OUT" >/dev/null \
+    || fail "the escalation after a reset did not restart the count: $(cat "$LANE_OUT")"
+
   clear_step_fixture_env
-  pass "a completed pipeline step since the previous escalation clears the wedge escalation counter"
+  pass "a completed pipeline step clears the wedge escalation counter without disabling the alarm"
 }
 
 test_unchanged_run_record_does_not_clear_wedge_escalation() {
