@@ -40,7 +40,9 @@ When any diagnostic needs captain attention, report the plain consequence and re
   This is not a clean sweep and must never be reported as one: fix the named cause, or tell the captain that fork's freshness is currently unknown.
   The sweep stays due until a reading actually succeeds, so an unresolved cause reappears rather than lapsing into silence.
 - `FORK_FRESHNESS: <owner/repo> status=ignored reason=<text>` - an archived fork or one listed in `config/fork-sweep-ignore`; no action, it is printed only so a skipped fork is never a silent absence.
-  `docs/fork-freshness.md` owns the contract; a `BACKLOG_MANUAL:` line beside these means the sync task exists but its backlog entry must be added by hand.
+  `docs/fork-freshness.md` owns the contract.
+- `BACKLOG_MANUAL: add <id> to the backlog by hand`, `WAKE_MANUAL: <owner/repo> raised no wake entry; carry sync task <id> forward by hand`, or `BRIDGE_MANUAL: <owner/repo> has no Bridge row; put sync task <id> to the captain by hand` beside a `FORK_FRESHNESS:` reading whose action carries `MANUAL=<step>[+<step>]` - the sync task and its instructions exist, but that many of its three notifications did not land.
+  Do the named step by hand now, in this session: the task is real and the brief is at `data/<id>/brief.md`, but nothing else will raise it again, so an unhandled line here is exactly the tracked-but-untracked item the sweep exists to prevent.
 - `PR_CHECK_MIGRATION: canonical polls rebuilt and armed; resume supervision for this home` - the non-executing migration rebuilt canonical task polls from validated metadata, and those polls are already armed.
   Independently verify the private per-task outcome record, then resume the emitted supervision protocol after finishing the session-start wake handling.
 - `PR_CHECK_MIGRATION: validated replacement polls armed; resume supervision for this home` - a retry proved canonical publication provenance, metadata identity binding, and single-link integrity for a replacement poll resolving an earlier ambiguous migration outcome.
