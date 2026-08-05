@@ -1231,9 +1231,11 @@ test_steps_lists_only_completed_steps() {
   fm_write_meta "$d/state/feat-steps.meta" "window=fm:fm-feat-steps" "worktree=$d/wt" "kind=ship"
   FM_FAKE_AXI_STATUS="$(run_ci_monitoring fm/feat-steps)"
   out=$(run_crew_state "$d" feat-steps --steps)
-  assert_contains "$out" "run=01RUN" "--steps names the run the evidence came from"
-  assert_contains "$out" "completed=intent,review,push" "--steps lists the completed steps"
-  assert_not_contains "$out" "ci" "a still-running step is not completed evidence"
+  # Exact, because what must NOT appear matters as much as what must: the run's
+  # fourth step is ci,running, and a still-running step is not a finished unit
+  # of work.
+  [ "$out" = "run=01RUN completed=intent,review,push" ] \
+    || fail "--steps did not report exactly this run's completed steps: $out"
   pass "--steps reports the completed steps of this lane's own run"
 }
 
