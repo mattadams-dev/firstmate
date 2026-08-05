@@ -19,11 +19,20 @@ extend:
 - every fork owned by the sweep owner, read through the authenticated repository
   list so private repositories are included,
 - every fork that is the origin of a clone under this home's `projects/`,
+- every project registered in this home's `data/projects.md` that it has not
+  cloned, qualified with the sweep owner,
 - every entry in `config/maintained-forks`, for a fork this home neither owns nor
   has cloned,
 - minus every entry in `config/fork-sweep-ignore`.
 
 The sweep owner defaults to the account that owns this home's own `origin`.
+
+A registered project this home *has* cloned is identified by its clone's origin,
+which is the fork's real identity rather than a name qualified with a guessed
+owner. A project registered `local-only` and not cloned here has no forge
+repository to read at all, so it is reported as ignored by name rather than read
+as a 404: a permanent false unknown would withhold the completion stamp on every
+sweep forever.
 
 Nothing drops out silently. An ignored fork, an archived fork, and a fork whose
 reading failed each get their own output line, and the closing
@@ -104,6 +113,32 @@ never costs the task its brief.
 Because the id is derived from the fork, a second sweep finds the first sweep's
 task instead of creating another, and a sync already under way is left alone.
 
+### The guard expires
+
+`data/<id>/` is never deleted - teardown keeps it as the task's evidence
+custodian - so a guard that meant only "this file exists" would outlive the
+episode that created it. The fork gets synced, the task closes, and months later
+the same fork falls fifty behind while every sweep prints `already queued` over a
+backlog item, a wake and a Bridge row that no longer exist. That is the
+instrument decaying back into the warning it replaced, and it is exactly the
+failure the ordering contract above is built to prevent one episode earlier.
+
+So the guard has a lifetime. The first reading that comes back `behind=0` with no
+sync in flight (no `state/<id>.meta`) ends the episode and retires it: the brief
+is moved aside to `data/<id>/brief.retired-<stamp>.md` - kept, not deleted,
+because it carries the reading that opened the task and the directory is
+evidence - and the reading says so:
+
+```
+FORK_FRESHNESS: acme/widget status=in-sync behind=0 ahead=0 upstream=up/widget compare=main...main action=task fm-sync-acme-widget retired
+```
+
+The fork's next episode then materialises a real task. A retirement that could
+not be performed is reported the same way a missing artifact is - `RETIRE_MANUAL:`
+on stderr and `action=task <id> NOT retired: ...` on the reading - because a
+stale guard left silently in place is the same false `already queued`, one
+episode later.
+
 The sweep does not launch the worker by default. The sync pushes a merge commit
 straight to a default branch, which is not something this fleet does without a
 person saying go; the task waits, tracked, until someone does. A home that wants
@@ -135,6 +170,13 @@ cannot be bypassed:
   `FM_FORK_SWEEP_PR_TIMEOUT` (default 45 seconds), so an unreachable forge costs
   an unknown reading rather than a hung task, and it can never fail arming the
   merge watch.
+
+  This gate reports and creates work; it never blocks or fails the pull request,
+  and there is nothing to override. It is also deliberately **un-ignorable**: it
+  does not consult `config/fork-sweep-ignore`, because a pull request landing
+  against an ignored fork is precisely the moment the reading is wanted. Ignoring
+  a fork means "do not chase this one weekly", not "do not tell me when I am
+  about to merge into it".
 - **Weekly**: the locked session-start sweep in `bin/fm-bootstrap.sh` runs
   `sweep --if-due`, which is silent between cadences. A read-only session (one
   that could not take the fleet lock) never runs it, exactly like every other
@@ -156,7 +198,7 @@ All optional, all under this home's gitignored `config/`, one value per line.
 | --- | --- |
 | `fork-sweep-owner` | login whose forks are swept; defaults to this home's own origin owner |
 | `maintained-forks` | extra `owner/repo` (or bare `repo`) candidates, one per line |
-| `fork-sweep-ignore` | `owner/repo` or bare `repo` candidates to skip; each is still reported |
+| `fork-sweep-ignore` | `owner/repo` or bare `repo` candidates the **weekly sweep** skips; each is still reported. The pre-PR gate ignores this file by design (see above) |
 | `fork-sweep-interval-days` | `--if-due` cadence in whole days, default 7 |
 | `fork-sync-harness` | harness `--dispatch` launches the sync worker on |
 
