@@ -333,7 +333,10 @@ Idempotence and the receipt are mutated in both directions, because each has a w
 `continue-past-failed-receipt-write` lets the run survive the failure it just reported, and only the mid-run case can see it, since no other case loses a writable receipt.
 `report-healthy-record-as-disposition` is the false-positive direction of the accounting rule: it reports a record that was in fact processed normally as needing a human decision, and is caught by the two cases that assert a healthy record is accounted for without being a disposition.
 
-Existing guard suites were re-run unchanged: `fm-teardown-endpoint-safety` (5 ok), `fm-teardown-evidence` (6 ok), `fm-backend-herdr` (159 ok).
+Existing guard suites were re-run unchanged: `fm-teardown-endpoint-safety` (5 ok), `fm-teardown-evidence` (6 ok), `fm-backend-herdr` (161 ok).
+
+The whole set above was re-verified on 2026-08-05 after this branch was rebased onto `main` at `ffc0fe9`, which is where the herdr count moved from 159 to 161.
+Those two added cases are `main`'s rule-framed composer work; this branch does not touch `tests/fm-backend-herdr.test.sh`, and the count is restated here rather than left stale because a verification record that reports a superseded number is asserting a fact it no longer observed.
 
 ## Why there is no one-shot guard
 
