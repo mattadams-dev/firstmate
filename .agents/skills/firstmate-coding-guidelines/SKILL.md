@@ -60,7 +60,17 @@ The model to copy is `AGENTS.md` section 8's "Away-mode stub": it keeps only the
 Apply the decision tree above to every line you are about to add to `AGENTS.md`.
 If an addition needs more than a few lines of conditional detail (detail that matters only in a specific situation) or reference detail (a wire format, an exact schema, historical rationale), you are almost certainly adding it to the wrong file.
 `AGENTS.md`'s token cost is paid by every session of every fleet member, every time, whether or not that session ever hits the situation the new lines describe.
-A skill's cost is paid only by the sessions that actually load it.
+A skill's cost is paid only by the sessions that actually load it - but in those sessions it is paid in full, on every turn from the load onward, exactly as if the text had been in `AGENTS.md` all along.
+Moving a block into a skill therefore does not remove its cost, it makes the cost conditional:
+
+```
+saving per session = block tokens x P(this session never fires the trigger)
+```
+
+A trigger that fires in nearly every session saves nearly nothing and adds a tool round trip, however cleanly the block splits into law and verb.
+Estimate that probability before proposing an extraction, and prefer deleting a duplicate outright wherever an owner already exists, because a doc read on demand carries no such discount.
+`docs/verification/agents-md-diet.md` holds the measurements behind this rule, including why a fresh-session birth-weight reading is an upper bound on a conversion's saving rather than the achieved figure.
+
 When in doubt, write the fact into the skill or doc first by patching that owner's existing language, and add only the one-line trigger to `AGENTS.md`.
 
 ## Trigger hygiene
