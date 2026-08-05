@@ -74,12 +74,17 @@ Detection is not gated - a session is marked due whoever is watching - so an att
 
 ### Execution
 
-Nothing is terminated anywhere in this path.
+The session is never terminated.
 The exit is **asked for**: the harness's own exit command is typed into the composer that was just proven empty, which is why the composer read is load-bearing twice, as the proof and as the channel.
 
 [`bin/fm-safe-kill.sh`](../bin/fm-safe-kill.sh), the fleet's single owner of termination, refuses to signal a live harness session, and that refusal is correct - whether ending a given process is safe was never something process inspection could establish.
 So a session that ignores its exit command produces an armed record that expires and a rebirth the daemon re-attempts on its next tick.
 Never a kill, never a pattern match, never a judgement made by looking at a process.
+
+One process does have to go, and it goes through that same helper.
+A watcher armed by the dying session outlives it, keeps refreshing its beacon, and keeps holding the home's watcher lock, so the successor's turn-end guard reads supervision as healthy and does not arm its own - while the wake that watcher eventually produces is addressed to a session that no longer exists.
+The wrapper retires it by the pid `state/.watch.lock` already names, and the helper owns every judgement about whether that pid is safe to signal.
+A refusal is reported and left alone: the wrapper does not retry it, does not signal anything itself, and does not go looking for another pid, but it does still relaunch, because leaving the home with no session at all is worse than leaving behind a watcher it was not authorised to end.
 
 Start the session through the wrapper instead of running the harness directly:
 

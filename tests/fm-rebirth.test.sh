@@ -503,10 +503,10 @@ SH
   pass "execution: an armed rebirth relaunches the session exactly once"
 }
 
-# The whole path asks; it never imposes. bin/fm-safe-kill.sh refuses to signal a
-# live harness session by design, so a rebirth that needed a kill would be a
-# rebirth that could not happen.
-test_the_rebirth_path_terminates_nothing() {
+# The SESSION is never terminated. bin/fm-safe-kill.sh refuses to signal a live
+# harness session by design, so a rebirth that needed one would be a rebirth that
+# could not happen - the exit is asked for through the composer instead.
+test_the_rebirth_path_never_terminates_the_session() {
   local home runs
   home=$(armable_home)
   runs=$home/runs
@@ -520,8 +520,77 @@ SH
   FM_STATE_OVERRIDE="$home/state" FM_SESSION_LAUNCH_REBIRTH="$ROOT/bin/fm-rebirth.sh" \
     "$ROOT/bin/fm-session-launch.sh" --min-uptime 0 -- "$home/session" >/dev/null 2>&1
   assert_absent "$home/state/.safe-kill.log" \
-    "a full rebirth cycle must record no termination at all - the exit is asked for, never imposed"
-  pass "execution: a full arm-to-relaunch cycle signals nothing and leaves no kill record"
+    "with no watcher lock in the home there is nothing to retire, so nothing may be signalled"
+  pass "execution: a rebirth cycle with no watcher to retire signals nothing at all"
+}
+
+# A watcher armed by the dying session outlives it, keeps its beacon fresh, and
+# keeps the home's watcher lock - so the successor reads supervision as healthy
+# while that watcher's eventual wake is addressed to a session that is gone.
+# Retiring it is the one termination in the path, and it goes through the helper
+# with the pid the LOCK names, never one this wrapper picked by inspection.
+test_the_predecessor_watcher_is_retired_through_the_helper() {
+  local home runs args
+  home=$(armable_home)
+  runs=$home/runs
+  args=$home/safe-kill-args
+  arm "$home" >/dev/null || fail "precondition: the home must arm"
+  mkdir -p "$home/state/.watch.lock"
+  printf '4242\n' > "$home/state/.watch.lock/pid"
+  cat > "$home/safe-kill" <<SH
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$args"
+exit 0
+SH
+  chmod +x "$home/safe-kill"
+  cat > "$home/session" <<SH
+#!/usr/bin/env bash
+echo run >> "$runs"
+exit 0
+SH
+  chmod +x "$home/session"
+  FM_STATE_OVERRIDE="$home/state" FM_SESSION_LAUNCH_REBIRTH="$ROOT/bin/fm-rebirth.sh" \
+    FM_SESSION_LAUNCH_SAFE_KILL="$home/safe-kill" \
+    "$ROOT/bin/fm-session-launch.sh" --min-uptime 0 -- "$home/session" >/dev/null 2>&1
+  assert_present "$args" "the predecessor watcher must be retired through the termination helper"
+  assert_grep "--pid 4242" "$args" "the pid must come from the watcher lock, not from process inspection"
+  assert_grep "--role watcher" "$args" "authority must be claimed from the watcher role lock"
+  assert_grep "--reason" "$args" "every termination must carry the reason it was given"
+  pass "execution: the predecessor's watcher is retired through the termination helper, by the pid its lock names"
+}
+
+# A refusal is escalated, not worked around. The wrapper must not retry, must not
+# signal anything itself, and must still bring the home back up - leaving it with
+# no session at all would be worse than leaving a watcher it could not end.
+test_a_refused_watcher_retirement_is_escalated_not_worked_around() {
+  local home runs calls out
+  home=$(armable_home)
+  runs=$home/runs
+  calls=$home/safe-kill-calls
+  arm "$home" >/dev/null || fail "precondition: the home must arm"
+  mkdir -p "$home/state/.watch.lock"
+  printf '4242\n' > "$home/state/.watch.lock/pid"
+  cat > "$home/safe-kill" <<SH
+#!/usr/bin/env bash
+echo call >> "$calls"
+exit 3
+SH
+  chmod +x "$home/safe-kill"
+  cat > "$home/session" <<SH
+#!/usr/bin/env bash
+echo run >> "$runs"
+exit 0
+SH
+  chmod +x "$home/session"
+  out=$(FM_STATE_OVERRIDE="$home/state" FM_SESSION_LAUNCH_REBIRTH="$ROOT/bin/fm-rebirth.sh" \
+    FM_SESSION_LAUNCH_SAFE_KILL="$home/safe-kill" \
+    "$ROOT/bin/fm-session-launch.sh" --min-uptime 0 -- "$home/session" 2>&1)
+  [ "$(wc -l < "$calls")" -eq 1 ] \
+    || fail "a refusal must not be retried; the helper was called $(wc -l < "$calls") times"
+  assert_contains "$out" "could not be retired" "the refusal must be reported, not swallowed"
+  [ "$(wc -l < "$runs")" -eq 2 ] \
+    || fail "the home must still come back up; leaving it with no session is worse than a stray watcher"
+  pass "execution: a refused watcher retirement is reported and left alone, and the home still comes back up"
 }
 
 test_claim_is_single_shot() {
@@ -626,7 +695,9 @@ test_exit_commands_match_the_verified_adapters
 test_arm_refuses_a_due_marker_with_no_reading
 test_wrapper_exits_with_the_session_when_no_rebirth_was_armed
 test_wrapper_relaunches_exactly_once_per_armed_rebirth
-test_the_rebirth_path_terminates_nothing
+test_the_rebirth_path_never_terminates_the_session
+test_the_predecessor_watcher_is_retired_through_the_helper
+test_a_refused_watcher_retirement_is_escalated_not_worked_around
 test_claim_is_single_shot
 test_an_expired_arm_is_not_claimable
 test_wrapper_refuses_a_continuation_flag

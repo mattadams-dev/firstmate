@@ -67,6 +67,17 @@ Timing - a mutant that reborns a session mid-decision or over a live composer:
 | An `unknown` composer verdict is counted as empty | `test_arm_refuses_an_unproven_composer` |
 | The undelivered-escalation check is removed | `test_arm_refuses_an_undelivered_escalation` |
 
+Execution - a mutant that terminates the wrong thing, or terminates it the wrong way.
+These were applied to `bin/fm-session-launch.sh`:
+
+| Mutant | Tests failed |
+| --- | --- |
+| The watcher pid is chosen by matching processes instead of read from the lock | `test_the_rebirth_path_never_terminates_the_session`, `test_the_predecessor_watcher_is_retired_through_the_helper` |
+| The watcher retirement is dropped entirely | `test_the_predecessor_watcher_is_retired_through_the_helper`, `test_a_refused_watcher_retirement_is_escalated_not_worked_around` |
+| A refusal is retried instead of escalated | `test_a_refused_watcher_retirement_is_escalated_not_worked_around` |
+
+The pattern-match mutant is caught by the no-watcher case as well as the retirement case, and that is the point: in a home with no watcher lock a pattern match still finds something to signal, while reading the lock finds nothing to do.
+
 Every failing set names the guard the mutant broke and nothing else.
 The three-test sets are the decision guard's own pair plus the status-fold property it depends on: the paired positive exists so the negative cannot pass vacuously, so a mutant that disables the guard is expected to take both halves with it.
 
@@ -85,7 +96,7 @@ Observed, in order:
 2. `bin/fm-rebirth.sh arm` with an open `needs-decision` refused: `not armed: a decision is still open: work: needs-decision [key=shape] ...`, and nothing was typed into the pane.
 3. After a matching `resolved` line the same command armed, typed `/exit`, and submitted it - the pane recorded `TYPED /exit` then `ENTER`.
 4. `bin/fm-session-launch.sh` saw the session end, claimed the rebirth, and launched exactly one replacement.
-5. `state/.safe-kill.log` did not exist: nothing was signalled anywhere in the cycle.
+5. `state/.safe-kill.log` did not exist: the home had no watcher lock, so there was nothing to retire and nothing was signalled.
 6. `bin/fm-session-start.sh` printed the successor block naming the predecessor session, its 368,381 tokens, and the Bridge command for a records gap.
 7. The successor's first turn end recorded its own 61,602 reading and posted `session reborn: 61602 tokens, down from 368381` to the Bridge, then removed the handoff and the due marker.
 
