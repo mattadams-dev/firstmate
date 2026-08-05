@@ -691,8 +691,8 @@ escalate_flush() {  # <state>
 # flash stay exactly as before.
 #
 # Config: config/wedge-alarm (local, gitignored), one channel directive per
-# non-empty, non-comment line. FM_WEDGE_ALARM_CHANNEL overrides the file with a
-# single directive. Directives:
+# non-empty, non-comment line. FM_WEDGE_ALARM_CHANNEL overrides the file and is
+# read the same way, one directive per non-empty line. Directives:
 #   off              disable the active alert entirely, regardless of position
 #                    (marker + flash remain)
 #   auto | default   platform default: macOS -> osascript; otherwise none
@@ -717,8 +717,8 @@ fm_trim_ws() {  # <text> -> text
 }
 
 # Print the configured channel directives, one per line. FM_WEDGE_ALARM_CHANNEL
-# wins (a single directive); else each non-empty, non-comment line of
-# config/wedge-alarm; else "auto".
+# wins (each of its non-empty lines is a directive); else each non-empty,
+# non-comment line of config/wedge-alarm; else "auto".
 wedge_alarm_configured_channels() {
   local cfg line found=
   if [ -n "${FM_WEDGE_ALARM_CHANNEL:-}" ]; then

@@ -9,7 +9,7 @@ The durable marker and tmux flash remain as additional signals.
 
 `config/wedge-alarm` is local and gitignored.
 It lists channel directives, one per non-empty, non-comment line, and every listed non-`off` channel fires best-effort.
-`FM_WEDGE_ALARM_CHANNEL` overrides the file with one directive for focused testing.
+`FM_WEDGE_ALARM_CHANNEL` overrides the file for focused testing; each non-empty line of it is a directive, and surrounding whitespace is ignored on a directive from either source.
 
 - `off` disables every active alert while retaining the durable marker and tmux flash.
 - `auto` or `default` resolves to `osascript` on macOS.
@@ -44,6 +44,7 @@ FMWEDGE/1 severity=<LOW|MEDIUM|HIGH|UNKNOWN> count=<n> kinds=<a,b> age=<n>s: <pr
 Severity is assessed from the buffered escalations at the moment the alarm fires, where their content is known, and is never re-derived by a channel.
 It is the strongest buffered item: a held captain decision, a blocked lane, or a failure is `HIGH`, and parked-lane rechecks and idle flags are `LOW`.
 Every other item, including work ready for review and an item the classifier cannot place, is `MEDIUM`; an unplaceable item appears in `kinds` as `unclassified`, so the alert never reports a calm it did not assess.
+The slug vocabulary is `decision`, `blocked`, `failed`, `ready`, `check`, `pause-recheck`, `stale-idle`, and `unclassified`, plus `none` and `unknown` for the two empty readings below.
 An idle pane flagged as a possible wedge is `stale-idle` whichever internal path escalated it, so severity never depends on which part of the daemon noticed the condition.
 A buffer that was read and named no item reports `severity=UNKNOWN count=0 kinds=none`, and a buffer that could not be read at all reports `severity=UNKNOWN count=unknown kinds=unknown`.
 Those are different observations and the summary words them apart rather than reporting an unread buffer as a counted zero.
