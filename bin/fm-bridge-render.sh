@@ -1277,10 +1277,14 @@ def link(href, label=None, external=None):
 
     It exempts that anchor from annotation capture and nothing else: every other
     element stays annotatable, which is the whole input path this board has.
-    This is the ONLY place the attribute is used, and a link is the only thing
-    that earns it - an anchor's own job is to navigate, so trading its
-    annotatability for a working left-click is a fair trade nothing else on the
-    board can make.
+    ANCHORS ARE THE ONLY THING ON THIS BOARD THAT CARRY THE ATTRIBUTE, and an
+    anchor is the only thing that earns it - an anchor's own job is to navigate,
+    so trading its annotatability for a working left-click is a fair trade
+    nothing else on the board can make. A few anchors with structured inner
+    markup are emitted by hand rather than through here (the header tally and
+    the two index lists); they are still anchors, and the guard suite pins both
+    halves of the rule - every anchor carries the attribute, and nothing that is
+    not an anchor does.
 
     External links open in a new tab because the board is served in an iframe,
     and a same-tab navigation would replace the board with the PR.
@@ -1968,17 +1972,106 @@ ledger_signature() {
 # is a comparison, and an unchanged board is left alone rather than replaced
 # with a copy of itself. Returns 0 when the board is current, whether or not
 # this call is what made it so.
+#
+# Every failure path says on stderr WHAT failed, because the caller records that
+# sentence and it is the only thing a later reader has to go on: "the board did
+# not render" and "the board's directory is a file" send someone to two very
+# different places.
 write_board() {  # <folded-at>
   local board tmp
   board=$(fm_bridge_board_path)
-  mkdir -p "$(dirname "$board")" || return 1
+  mkdir -p "$(dirname "$board")" \
+    || { printf 'cannot create the board directory %s\n' "$(dirname "$board")" >&2; return 1; }
   tmp="$board.tmp.$$"
-  emit_html "$1" > "$tmp" || { rm -f "$tmp"; return 1; }
+  emit_html "$1" > "$tmp" \
+    || { rm -f "$tmp"; printf 'the fold or the render failed for %s\n' "$board" >&2; return 1; }
   if [ -f "$board" ] && cmp -s "$tmp" "$board"; then
     rm -f "$tmp"
     return 0
   fi
-  mv -f "$tmp" "$board" || { rm -f "$tmp"; return 1; }
+  mv -f "$tmp" "$board" \
+    || { rm -f "$tmp"; printf 'cannot replace %s with the rendered board\n' "$board" >&2; return 1; }
+  return 0
+}
+
+# --- the tick's own failure record -----------------------------------------
+#
+# A board that renders fine and a board whose render has been failing for an
+# hour LOOK IDENTICAL to the reader: the content clock reads an older time, and
+# an older time is also what a quiet fleet looks like. Silence there is a stale
+# surface wearing a freshness promise, so the tick records its own failures
+# where the reason is still in hand, and alarms.
+#
+# THREE CONSECUTIVE, not one. A single failed render is transient - a full disk
+# that drained, a directory mid-replacement - and the next tick retries by
+# itself; alarming on it trains the reader to ignore the alarm. Three in a row
+# is a broken board.
+#
+# THE ALARM CARRIES THE REASON. An alarm that only says a render failed sends
+# the reader off to reproduce what the tick already knew.
+#
+# EVIDENCE OF HEALTH RESETS IT, THE PASSAGE OF TIME NEVER DOES: only a render
+# that actually landed clears the count, and the reset is logged before the
+# counter is dropped so the episode stays reconstructable afterwards.
+#
+# No rate limit lives here on purpose. The supervision cycle runs this tick at
+# most once per FM_BRIDGE_INTERVAL, so that gate already caps how often the
+# alarm can fire; a second limiter would be a second owner of one noise budget,
+# and the one that stayed quiet would be the one nobody remembered.
+TICK_FAILURES="$STATE_DIR/.bridge-tick-failures"
+TICK_LOG="$STATE_DIR/.bridge-tick.log"
+TICK_LOG_MAX_BYTES=${FM_BRIDGE_TICK_LOG_MAX_BYTES:-131072}
+ALARM_AFTER_FAILURES=3
+
+# Bounded, best-effort, append-only. Never fatal: a log that cannot be written
+# must not be the reason the board stops rendering.
+tick_log() {  # <line>
+  local sz
+  mkdir -p "$STATE_DIR" 2>/dev/null || return 0
+  printf '[%s] %s\n' "$(fm_bridge_now)" "$1" >> "$TICK_LOG" 2>/dev/null || return 0
+  sz=$(wc -c < "$TICK_LOG" 2>/dev/null | tr -d '[:space:]')
+  case "$sz" in ''|*[!0-9]*) return 0 ;; esac
+  if [ "$sz" -ge "$TICK_LOG_MAX_BYTES" ]; then
+    tail -n 500 "$TICK_LOG" > "$TICK_LOG.tmp" 2>/dev/null \
+      && mv -f "$TICK_LOG.tmp" "$TICK_LOG" 2>/dev/null
+    rm -f "$TICK_LOG.tmp" 2>/dev/null || true
+  fi
+  return 0
+}
+
+# One line, so a reason survives being carried as a wake payload and a log entry.
+one_line() { printf '%s' "$1" | tr '\n\t' '  ' | tr -s ' ' | sed 's/^ *//; s/ *$//'; }
+
+consecutive_tick_failures() {
+  local n
+  n=$(cut -f1 "$TICK_FAILURES" 2>/dev/null | head -1)
+  case "$n" in ''|*[!0-9]*) printf '0' ;; *) printf '%s' "$n" ;; esac
+}
+
+# Prints the alarm on stderr, prefixed so a caller can recognize it without
+# parsing prose. The count is in the record because "how long has this been
+# broken" is the second question every reader asks.
+note_tick_failure() {  # <reason>
+  local reason n
+  reason=$(one_line "$1")
+  [ -n "$reason" ] || reason='the render failed without saying why'
+  n=$(( $(consecutive_tick_failures) + 1 ))
+  mkdir -p "$STATE_DIR" 2>/dev/null || true
+  printf '%s\t%s\n' "$n" "$reason" > "$TICK_FAILURES" 2>/dev/null || true
+  tick_log "render FAILED ($n in a row): $reason"
+  if [ "$n" -ge "$ALARM_AFTER_FAILURES" ]; then
+    printf 'bridge-alarm: the captain board has failed to render %s times in a row: %s\n' \
+      "$n" "$reason" >&2
+  fi
+  return 0
+}
+
+note_tick_success() {
+  local n
+  n=$(consecutive_tick_failures)
+  [ "$n" -gt 0 ] || return 0
+  tick_log "render RECOVERED after $n consecutive failures; the count is back to 0"
+  rm -f "$TICK_FAILURES" 2>/dev/null || true
   return 0
 }
 
@@ -1998,12 +2091,32 @@ write_board() {  # <folded-at>
 # state/.last-watcher-beat and the guard that alarms on a lapsed chain - which
 # answer it durably and cost the captain nothing. The ledger keeps every tick's
 # material for audit; the board never was that record.
+#
+# Every way this can fail is funnelled through note_tick_failure with the reason
+# it failed for, INCLUDING the ones that used to die() straight out of the
+# process: the supervision cycle runs this with output discarded, so a message
+# that only reached stderr reached nobody. The counter is what turns a transient
+# failure into an alarm once it stops being transient.
 do_tick() {
-  local verbose=$1 now sig prev board
-  require_python
+  local verbose=$1 now sig prev board err errf status
+  if ! err=$(require_python 2>&1); then
+    note_tick_failure "$err"
+    return 1
+  fi
   now=$(fm_bridge_now)
   board=$(fm_bridge_board_path)
-  sig=$(ledger_signature)
+  # The signature IS this call's stdout, so its stderr goes to a file rather
+  # than into the value - a diagnostic folded into the signature would read as
+  # a ledger change and rewrite the board for nothing.
+  errf="${TMPDIR:-/tmp}/fm-bridge-tick.$$.err"
+  sig=$(ledger_signature 2>"$errf") || status=$?
+  if [ "${status:-0}" -ne 0 ]; then
+    err=$(cat "$errf" 2>/dev/null || true)
+    rm -f "$errf"
+    note_tick_failure "$err"
+    return 1
+  fi
+  rm -f "$errf"
   prev=$(cat "$STAMP" 2>/dev/null || true)
 
   if [ "$sig" = "$prev" ] && [ -f "$board" ]; then
@@ -2014,7 +2127,11 @@ do_tick() {
   # The stamp is written only after the board actually landed, so a failed
   # render leaves the signature stale and the NEXT tick retries instead of
   # concluding nothing changed and skipping forever.
-  write_board "$now" || return 1
+  if ! err=$(write_board "$now" 2>&1); then
+    note_tick_failure "$err"
+    return 1
+  fi
+  note_tick_success
   mkdir -p "$STATE_DIR" 2>/dev/null || true
   printf '%s' "$sig" > "$STAMP" 2>/dev/null || true
   [ "$verbose" -eq 1 ] && printf 'bridge: rendered %s\n' "$board"

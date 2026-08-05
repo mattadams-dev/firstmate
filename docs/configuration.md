@@ -539,6 +539,7 @@ FM_BRIDGE_CAP_EVENTS=12   # notable events shown on the board before the zone ov
 FM_BRIDGE_CAP_FLEET_CLOSED=6        # rows shown per closed fleet group (landed, discarded, ended-unknown)
 FM_BRIDGE_CAP_RESOLVED_DECISIONS=3  # rows shown per closed decision or critical group
 FM_BRIDGE_MAX_RECORD_BYTES=3800   # per-record bound that keeps one ledger append atomic under O_APPEND
+FM_BRIDGE_TICK_LOG_MAX_BYTES=131072   # size cap for state/.bridge-tick.log, the render-failure and recovery history behind the board's alarm (docs/bridge.md)
 FM_PROCEVENT_MAX_OUTPUT_BYTES=1048576   # bound on one captured process-to-event result
 FM_PROCEVENT_CLAIM_ROOT=                # machine-wide source claim root; default $XDG_STATE_HOME/firstmate/procevent-claims
 FM_CODEX_WATCH_CHECKPOINT=180   # seconds per foreground watcher checkpoint in Codex primary supervision

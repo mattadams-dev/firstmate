@@ -555,6 +555,83 @@ FM_BRIDGE_NOW=2026-07-31T12:09:00Z FM_HOME=$HOME11 "$RENDER" --tick >/dev/null
 grep -q 'hand edit' "$BOARD" && fail "tick: a hand edit to the generated board survived"
 pass "a hand edit to the board is overwritten by the next tick"
 
+# --- 11b. a board that stopped rendering alarms, and says why ---------------
+#
+# A board rendering fine and a board whose render has been failing for an hour
+# look IDENTICAL to the reader: the content clock says an older time, which is
+# also what a quiet fleet looks like. Silence here is a stale surface wearing a
+# freshness promise, so the tick counts its own consecutive failures.
+#
+# Three directions, because each one is a different lie:
+#   - three in a row passing quietly is the missed alarm,
+#   - one transient failure alarming is the false alarm that trains the reader
+#     to ignore the real one,
+#   - an alarm that does not carry the reason is a content-free alarm: it sends
+#     the reader off to reproduce what the tick already observed.
+# And the reset is evidence-based: a render that LANDS clears the count; the
+# passage of time never does.
+
+HOME11B=$(new_home)
+FM_HOME=$HOME11B "$BRIDGE" ask -q --id alarm-one --project orca \
+  --title "something to render" --answer "A" >/dev/null
+
+# A FILE where the board's directory would have to be, so the write fails the
+# same way on every run and for every user, root included.
+BLOCKED="$HOME11B/blocked"
+: > "$BLOCKED"
+FAILURES="$HOME11B/state/.bridge-tick-failures"
+TICKLOG="$HOME11B/state/.bridge-tick.log"
+
+failing_tick() {  # -> the tick's stderr; the tick itself fails
+  { FM_BRIDGE_BOARD="$BLOCKED/bridge.html" FM_HOME=$HOME11B "$RENDER" --tick >/dev/null; } 2>&1
+}
+
+first=$(failing_tick)
+case "$first" in
+  *bridge-alarm:*) fail "tick: a single transient render failure raised the alarm; the next tick retries by itself" ;;
+esac
+[ "$(cut -f1 "$FAILURES" 2>/dev/null)" = 1 ] \
+  || fail "tick: the first render failure was not recorded, so nothing can count to three"
+second=$(failing_tick)
+case "$second" in
+  *bridge-alarm:*) fail "tick: two render failures raised the alarm; the threshold is three" ;;
+esac
+[ "$(cut -f1 "$FAILURES" 2>/dev/null)" = 2 ] || fail "tick: the second consecutive failure was not counted"
+pass "one and two failed renders stay quiet, and both are counted"
+
+third=$(failing_tick)
+case "$third" in
+  *bridge-alarm:*) : ;;
+  *) fail "tick: three consecutive failed renders raised no alarm at all: $third" ;;
+esac
+case "$third" in
+  *"3 times in a row"*) : ;;
+  *) fail "tick: the alarm does not say how long the board has been failing: $third" ;;
+esac
+case "$third" in
+  *"$BLOCKED"*) : ;;
+  *) fail "tick: the alarm names no reason, so it only says a failure happened: $third" ;;
+esac
+pass "the third consecutive failure alarms, and the alarm carries what actually failed"
+
+grep -q 'render FAILED (3 in a row)' "$TICKLOG" \
+  || fail "tick: the failures are not in the log, so the episode cannot be reconstructed"
+
+# Evidence of health, not the passage of time, is what clears an alarm.
+FM_HOME=$HOME11B "$RENDER" --tick >/dev/null 2>&1 \
+  || fail "tick: the render did not recover once the board path was writable again"
+[ -f "$FAILURES" ] && fail "tick: a successful render left the failure count standing"
+grep -q 'render RECOVERED after 3 consecutive failures' "$TICKLOG" \
+  || fail "tick: the reset was not logged, so the alarm history stops being reconstructable"
+pass "a render that lands resets the count and logs the transition"
+
+fourth=$(failing_tick)
+case "$fourth" in
+  *bridge-alarm:*) fail "tick: a failure after a recovery alarmed immediately; the reset did not really restart the count" ;;
+esac
+[ "$(cut -f1 "$FAILURES" 2>/dev/null)" = 1 ] || fail "tick: the count did not restart at one after the recovery"
+pass "after a recovery the count restarts, so the next alarm needs three fresh failures"
+
 # --- 12. caps overflow to the record; they never truncate in silence --------
 
 HOME12=$(new_home)
@@ -747,6 +824,17 @@ if not anchors:
 for tag in anchors:
     if "data-lavish-action" not in tag:
         sys.exit("anchor without Lavish pass-through, unclickable for the captain: %s" % tag)
+# The other half of the same rule. The attribute buys a working left-click by
+# spending the element's annotatability, and annotation is the board's ONLY
+# input path - so an anchor, whose own job is to navigate, is the one thing that
+# can afford the trade. On anything else it would silently create a dead spot
+# the captain cannot rule on.
+for tag in re.findall(r"<[a-zA-Z][^>]*>", html):
+    if "data-lavish-action" not in tag:
+        continue
+    if not re.match(r"<a[ >]", tag):
+        sys.exit("data-lavish-action on a non-anchor makes it un-annotatable, "
+                 "and annotation is the only way the captain answers: %s" % tag)
 external = [t for t in anchors if 'href="http' in t]
 if not external:
     sys.exit("no external link in the fixture, so the pass-through guard proves nothing")

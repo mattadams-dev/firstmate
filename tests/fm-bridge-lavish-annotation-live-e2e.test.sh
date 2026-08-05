@@ -101,34 +101,21 @@ export CHROME_DEVTOOLS_AXI_SESSION="$SESSION_NAME"
 chrome-devtools-axi open "$SESSION_URL" >/dev/null 2>&1 \
   || fail "no reachable browser for the live guard (set CHROME_DEVTOOLS_AXI_BROWSER_URL at a Chrome with remote debugging)"
 
+# EVERY HELPER IS DEFINED HERE, ABOVE THE FIRST LINE THAT CALLS ONE. This script
+# runs under `set -u` and not `set -e`, so a call to a not-yet-defined function
+# does not stop it: bash reports "command not found", returns 127, and the script
+# carries on into the assertions below with the exit it was supposed to take
+# never taken. That is how the COULD-NOT-OBSERVE outcome - the whole reason this
+# guard has three outcomes and not two - would come out as a plain FAILURE.
+
 # uids are only valid against the snapshot that produced them, so every click
 # re-snapshots first.
 snap() { chrome-devtools-axi snapshot 2>&1; }
-uid_of() { snap | grep -oE "uid=[^ ]+ $1" | head -1 | sed -E 's/uid=([^ ]+).*/\1/'; }
 
-# Lavish holds the artifact behind a "waiting for fonts and final geometry"
-# curtain until its own layout check settles, which on a headless browser can
-# take a while - and it offers its own "Show anyway" reveal for exactly that.
-# Waiting for the reveal, and saying so if it never comes, keeps "not revealed
-# yet" from being reported as "the board rendered no ask", which would send the
-# next reader after entirely the wrong thing.
-revealed=0
-attempt=0
-while [ "$attempt" -lt 45 ]; do
-  current=$(snap)
-  case "$current" in
-    *'"O1: A: retire it"'*) revealed=1; break ;;
-  esac
-  reveal_uid=$(printf '%s\n' "$current" | grep -oE 'uid=[^ ]+ button "Show anyway"' \
-    | head -1 | sed -E 's/uid=([^ ]+).*/\1/')
-  if [ -n "$reveal_uid" ]; then
-    chrome-devtools-axi click "@$reveal_uid" >/dev/null 2>&1 || true
-  fi
-  attempt=$((attempt + 1))
-  sleep 2
-done
-[ "$revealed" -eq 1 ] \
-  || could_not_observe "whether the board's ask rows can be annotated"
+# The uid out of a snapshot line. One extractor, used everywhere, because the
+# lines differ in what picks them (first match, last match, role check first)
+# but never in where the uid sits.
+uid_in() { printf '%s' "$1" | sed -E 's/.*uid=([^ ]+).*/\1/'; }
 
 # THREE OUTCOMES, NOT TWO. "No annotation card" is only alarming if the page was
 # actually in a state where a card could have opened: the artifact frame loaded,
@@ -182,10 +169,33 @@ could_not_observe() {  # <what was being checked>
 
 dismiss_card() {
   local cancel
-  cancel=$(snap | grep -oE 'uid=[^ ]+ button "Cancel"' | head -1 | sed -E 's/uid=([^ ]+).*/\1/')
-  [ -n "$cancel" ] && chrome-devtools-axi click "@$cancel" >/dev/null 2>&1
+  cancel=$(snap | grep -oE 'uid=[^ ]+ button "Cancel"' | head -1)
+  [ -n "$cancel" ] && chrome-devtools-axi click "@$(uid_in "$cancel")" >/dev/null 2>&1
   return 0
 }
+
+# Lavish holds the artifact behind a "waiting for fonts and final geometry"
+# curtain until its own layout check settles, which on a headless browser can
+# take a while - and it offers its own "Show anyway" reveal for exactly that.
+# Waiting for the reveal, and saying so if it never comes, keeps "not revealed
+# yet" from being reported as "the board rendered no ask", which would send the
+# next reader after entirely the wrong thing.
+revealed=0
+attempt=0
+while [ "$attempt" -lt 45 ]; do
+  current=$(snap)
+  case "$current" in
+    *'"O1: A: retire it"'*) revealed=1; break ;;
+  esac
+  reveal_line=$(printf '%s\n' "$current" | grep -oE 'uid=[^ ]+ button "Show anyway"' | head -1)
+  if [ -n "$reveal_line" ]; then
+    chrome-devtools-axi click "@$(uid_in "$reveal_line")" >/dev/null 2>&1 || true
+  fi
+  attempt=$((attempt + 1))
+  sleep 2
+done
+[ "$revealed" -eq 1 ] \
+  || could_not_observe "whether the board's ask rows can be annotated"
 
 # Three different worlds, three different readings. "No card opened" alone
 # cannot tell them apart, and reporting the wrong one sends the next reader
@@ -200,9 +210,7 @@ case "$option_line" in
   Lavish skips controls when deciding what may be annotated, so this option -
   on an ask the captain has to rule on - cannot be annotated at all." ;;
 esac
-option_uid=$(printf '%s' "$option_line" | sed -E 's/.*uid=([^ ]+).*/\1/')
-
-annotation_card_opened "$option_uid"
+annotation_card_opened "$(uid_in "$option_line")"
 case "$?" in
   0) : ;;
   2) could_not_observe "whether an answer option can be annotated" ;;
@@ -222,9 +230,9 @@ pass "a real hosted session opens an annotation card on a real ask's answer opti
 # NOT annotatable - that attribute is exactly the "let this click navigate"
 # exemption, and it is the right trade for a link. The card is where a ruling is
 # placed, and the card comes after the index in document order.
-ref_uid=$(snap | grep -E 'uid=[^ ]+ [A-Za-z]+ "O1"' | tail -1 | sed -E 's/.*uid=([^ ]+).*/\1/')
-[ -n "$ref_uid" ] || fail "the hosted board rendered no visible ref for the ask"
-annotation_card_opened "$ref_uid"
+ref_line=$(snap | grep -E 'uid=[^ ]+ [A-Za-z]+ "O1"' | tail -1)
+[ -n "$ref_line" ] || fail "the hosted board rendered no visible ref for the ask"
+annotation_card_opened "$(uid_in "$ref_line")"
 case "$?" in
   0) : ;;
   2) could_not_observe "whether an ask's visible ref can be annotated" ;;

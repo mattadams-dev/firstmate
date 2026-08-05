@@ -34,6 +34,8 @@ They resolve per home, so a secondmate reads and writes its own and never the pa
 | Ledger | `$FM_HOME/data/bridge/ledger.jsonl` | append-only, one JSON object per line |
 | Board | `$FM_HOME/data/bridge/bridge.html` | generated; rewritten only when the ledger content changed |
 | Change stamp | `$FM_HOME/state/.bridge-render` | content digest of the ledger; drives skip-when-unchanged |
+| Failure count | `$FM_HOME/state/.bridge-tick-failures` | consecutive failed renders and the reason; absent means the last render landed |
+| Tick log | `$FM_HOME/state/.bridge-tick.log` | bounded history of render failures and recoveries |
 
 Ask the scripts rather than hardcoding: `bin/fm-bridge.sh path ledger` and `bin/fm-bridge.sh path board`.
 
@@ -369,6 +371,19 @@ Ordinary secondary text, including a record's `note`, is dim rather than accente
   The writer therefore compares before it replaces, and an unchanged board keeps its mtime.
 - The board shows one time, `content as of`, and it moves only when the content did.
   Supervision liveness is the beacon's and the guard's to answer, not this page's.
+
+### When the render itself stops working
+
+A board rendering fine and a board whose render has been failing for an hour look identical to whoever is reading it: the content clock says an older time, which is also exactly what a quiet fleet looks like.
+Silence there would be a stale surface wearing a freshness promise, so the tick records its own failures where the reason is still in hand.
+
+- Each failed tick appends to `$FM_HOME/state/.bridge-tick.log` (bounded) and increments the consecutive-failure count in `$FM_HOME/state/.bridge-tick-failures`, which also holds the reason it last failed for.
+- The **third consecutive** failure raises `bridge-alarm: ...` on the tick's stderr, naming what failed.
+  `bin/fm-watch.sh` relays that one line verbatim as an actionable `check:` wake, and `bin/fm-session-start.sh` prints the reason instead of telling the reader to go reproduce it.
+- One failure is transient - the next tick retries by itself - and alarming on it is how a reader learns to ignore the alarm that matters.
+- A render that **lands** resets the count, and the reset is logged before the counter is dropped, so the episode stays reconstructable afterwards.
+  Evidence of health clears it; the passage of time never does.
+- There is no rate limit on the alarm itself: `FM_BRIDGE_INTERVAL` already caps how often the tick can run, and a second limiter would be a second owner of one noise budget.
 
 ## Checking it
 
