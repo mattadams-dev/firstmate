@@ -81,11 +81,25 @@ materialises, idempotently, under the deterministic task id
 `fm-sync-<owner>-<repo>` (owner-qualified so two forks sharing a repository name
 under different accounts cannot collide into one task):
 
-- `data/<id>/brief.md`, carrying the proven sync procedure and the reading that
-  opened the task,
-- a backlog item (or a loud `BACKLOG_MANUAL:` line if the backlog write failed),
+- a backlog item,
 - a durable notification, so the result survives a restart,
-- a Bridge item addressed to the captain.
+- a Bridge item addressed to the captain,
+- and last, `data/<id>/brief.md`, carrying the proven sync procedure and the
+  reading that opened the task.
+
+The order is the contract, not an implementation detail. The brief is also the
+idempotency guard, so it is rendered beside itself and moved into place - one
+atomic move, same directory - only after the other three have been attempted. A
+materialisation cut short by a timeout or a session kill therefore leaves no
+guard and no half-written procedure, and the next sweep redoes the whole thing
+rather than reporting `already queued` over a task nobody was told about.
+
+`action=task <id> queued` asserts all four. Any of the first three that did not
+happen is reported instead of assumed: a loud `BACKLOG_MANUAL:`, `WAKE_MANUAL:`
+or `BRIDGE_MANUAL:` line on stderr saying what to do by hand, and a
+`MANUAL=<step>[+<step>]` marker on the reading itself, so the line never claims
+an artifact nobody observed. None of the three is fatal - a failed notification
+never costs the task its brief.
 
 Because the id is derived from the fork, a second sweep finds the first sweep's
 task instead of creating another, and a sync already under way is left alone.

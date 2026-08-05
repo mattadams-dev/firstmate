@@ -43,14 +43,20 @@
 # freshness result invoke this with `|| true` and relay the lines.
 #
 # behind > 0 materialises a durable sync task, idempotently, under the
-# deterministic id fm-sync-<owner>-<repo>: data/<id>/brief.md carrying the proven sync
-# procedure, a backlog item, a check wake, and a Bridge item. Re-running never
-# creates a second task for the same fork. --dispatch additionally launches the
-# worker through bin/fm-spawn.sh when this home has a clone of that fork and
-# FM_FORK_SYNC_HARNESS or config/fork-sync-harness names the harness to use;
-# without it the task stays queued, because the sync pushes a merge commit
-# straight to a default branch and that is not a dispatch this fleet makes
-# without a person saying go. Either way the task exists and is tracked.
+# deterministic id fm-sync-<owner>-<repo>: a backlog item, a check wake, a Bridge
+# item, and last data/<id>/brief.md carrying the proven sync procedure. Last,
+# because the brief is also the idempotency guard, and it is moved into place in
+# one atomic move: a materialisation cut short leaves no guard and no half-written
+# procedure, and the next sweep redoes all of it. A backlog, wake or Bridge step
+# that failed prints BACKLOG_MANUAL:, WAKE_MANUAL: or BRIDGE_MANUAL: on stderr
+# (stdout is the reading) and marks the reading itself with
+# MANUAL=<step>[+<step>], because "queued" claims all four artifacts.
+# Re-running never creates a second task for the same fork. --dispatch
+# additionally launches the worker through bin/fm-spawn.sh when this home has a
+# clone of that fork and FM_FORK_SYNC_HARNESS or config/fork-sync-harness names
+# the harness to use; without it the task stays queued, because the sync pushes
+# a merge commit straight to a default branch and that is not a dispatch this
+# fleet makes without a person saying go. Either way the task exists and is tracked.
 #
 # This script never performs a sync: it neither fetches, merges, nor pushes any
 # repository. It only reads compare-status and creates work.
@@ -337,28 +343,44 @@ backlog_add() {
 
 bridge_ask() {
   local slug=$1 title=$2 body=$3
-  [ -x "$SCRIPT_DIR/fm-bridge.sh" ] || return 0
+  [ -x "$SCRIPT_DIR/fm-bridge.sh" ] || return 1
   "$SCRIPT_DIR/fm-bridge.sh" ask --project "${slug##*/}" --title "$title" \
-    --body "$body" --answer "sync now" --answer "hold" --quiet >/dev/null 2>&1 || true
+    --body "$body" --answer "sync now" --answer "hold" --quiet >/dev/null 2>&1
 }
 
 queue_wake() {
   local payload=$1
   # shellcheck source=bin/fm-wake-lib.sh disable=SC1091
-  . "$SCRIPT_DIR/fm-wake-lib.sh"
-  fm_wake_append check fork-freshness "$payload" >/dev/null 2>&1 || true
+  . "$SCRIPT_DIR/fm-wake-lib.sh" || return 1
+  fm_wake_append check fork-freshness "$payload" >/dev/null 2>&1
 }
 
 dispatch_harness() {
   printf '%s\n' "${FM_FORK_SYNC_HARNESS:-$(config_value fork-sync-harness || true)}"
 }
 
+BRIEF_TMP=
+
+brief_tmp_cleanup() {
+  [ -z "$BRIEF_TMP" ] || rm -f -- "$BRIEF_TMP"
+  BRIEF_TMP=
+}
+
 # ensure_sync_task <slug> <upstream> <fork-branch> <upstream-branch> <behind> <ahead> <status>
 # Echoes the action taken. Idempotent by construction: the task id is derived
 # from the fork, so a second sweep finds the first sweep's task.
+#
+# data/<id>/brief.md is both the task's instructions and that idempotency guard,
+# so it is rendered beside itself and moved into place - atomically, same
+# directory - only once the backlog item, the wake entry and the Bridge ask have
+# been attempted. A materialisation cut short therefore leaves no guard and no
+# half-written procedure behind it, and the next sweep redoes the whole thing.
+# Whichever of the three did not happen is named on stderr and marked on the
+# reading itself: "queued" claims four artifacts, and it may not be printed over
+# one nobody observed.
 ensure_sync_task() {
   local slug=$1 up=$2 fork_branch=$3 up_branch=$4 behind=$5 ahead=$6 status=$7
-  local id brief taken harness clone
+  local id brief taken harness clone manual=""
   id=$(sync_task_id "$slug")
   brief="$DATA/$id/brief.md"
 
@@ -373,36 +395,60 @@ ensure_sync_task() {
 
   taken=$(date -u -d "@$(now_epoch)" '+%Y-%m-%d %H:%M UTC' 2>/dev/null ||
     date -u '+%Y-%m-%d %H:%M UTC')
-  if ! write_sync_brief "$brief" "$slug" "$up" "$fork_branch" "$up_branch" \
+  trap brief_tmp_cleanup EXIT
+  trap 'exit 1' HUP INT TERM
+  if ! mkdir -p "$DATA/$id" 2>/dev/null ||
+    ! BRIEF_TMP=$(mktemp "$DATA/$id/.brief.XXXXXX" 2>/dev/null); then
+    printf 'task %s NOT created: instructions could not be written\n' "$id"
+    return 1
+  fi
+  if ! write_sync_brief "$BRIEF_TMP" "$slug" "$up" "$fork_branch" "$up_branch" \
     "$behind" "$ahead" "$status" "$taken"; then
+    brief_tmp_cleanup
     printf 'task %s NOT created: instructions could not be written\n' "$id"
     return 1
   fi
 
   backlog_add "$id" "Sync $slug from $up" \
-    "Reading $taken: behind $behind, ahead $ahead - $status. Instructions: data/$id/brief.md. Sync pushes a true merge commit directly to $fork_branch, never through a PR." ||
+    "Reading $taken: behind $behind, ahead $ahead - $status. Instructions: data/$id/brief.md. Sync pushes a true merge commit directly to $fork_branch, never through a PR." || {
     printf 'BACKLOG_MANUAL: add %s to the backlog by hand\n' "$id" >&2
-  queue_wake "fork-freshness: $slug is behind $up by $behind (ahead $ahead) - sync task $id"
+    manual="$manual+backlog"
+  }
+  queue_wake "fork-freshness: $slug is behind $up by $behind (ahead $ahead) - sync task $id" || {
+    printf 'WAKE_MANUAL: %s raised no wake entry; carry sync task %s forward by hand\n' "$slug" "$id" >&2
+    manual="$manual+wake"
+  }
   bridge_ask "$slug" "$slug is behind $up by $behind commits" \
-    "Reading $taken: behind $behind, ahead $ahead - $status. Sync task $id is queued with the procedure; it pushes a merge commit straight to $fork_branch, so it waits for a go."
+    "Reading $taken: behind $behind, ahead $ahead - $status. Sync task $id is queued with the procedure; it pushes a merge commit straight to $fork_branch, so it waits for a go." || {
+    printf 'BRIDGE_MANUAL: %s has no Bridge row; put sync task %s to the captain by hand\n' "$slug" "$id" >&2
+    manual="$manual+bridge"
+  }
+  [ -z "$manual" ] || manual=" MANUAL=${manual#+}"
+
+  if ! mv -f "$BRIEF_TMP" "$brief" 2>/dev/null; then
+    brief_tmp_cleanup
+    printf 'task %s NOT created: instructions could not be placed%s\n' "$id" "$manual"
+    return 1
+  fi
+  BRIEF_TMP=
 
   harness=$(dispatch_harness)
   if [ "$DISPATCH" != 1 ]; then
-    printf 'task %s queued\n' "$id"
+    printf 'task %s queued%s\n' "$id" "$manual"
     return 0
   fi
   if ! clone=$(clone_dir_for "$slug"); then
-    printf 'task %s queued (no local copy of %s in this home)\n' "$id" "${slug##*/}"
+    printf 'task %s queued (no local copy of %s in this home)%s\n' "$id" "${slug##*/}" "$manual"
     return 0
   fi
   if [ -z "$harness" ]; then
-    printf 'task %s queued (no fork-sync-harness configured)\n' "$id"
+    printf 'task %s queued (no fork-sync-harness configured)%s\n' "$id" "$manual"
     return 0
   fi
   if "$SCRIPT_DIR/fm-spawn.sh" "$id" "$clone" --harness "$harness" >/dev/null 2>&1; then
-    printf 'task %s dispatched\n' "$id"
+    printf 'task %s dispatched%s\n' "$id" "$manual"
   else
-    printf 'task %s queued (worker could not be launched)\n' "$id"
+    printf 'task %s queued (worker could not be launched)%s\n' "$id" "$manual"
   fi
 }
 
