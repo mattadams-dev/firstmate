@@ -2,7 +2,28 @@
 
 This record holds the empirical facts the `AGENTS.md` context diet acts on: the birth-weight measurement instrument, and the cross-harness skill-listing coverage that decides whether section 13's trigger index may be replaced by a pointer.
 
-`.agents/skills/firstmate-coding-guidelines/SKILL.md` owns the knowledge-placement policy this diet applies.
+`.agents/skills/firstmate-coding-guidelines/SKILL.md` owns the knowledge-placement policy this diet applies, including the extraction break-even and the two-sentence description cap that came out of these measurements.
+
+## Where the remaining value is - read this before resuming
+
+The diet's remaining scope is **duplicate removal, not extraction**.
+
+Extraction is now measured as a poor lever: a new skill costs a fixed 300 to 400 resident tokens whether or not it ever loads, so nothing below roughly 1,500 bytes of removable procedure can pay for itself at any trigger rarity.
+Removing a duplicate whose owner already exists carries no such tax and returns its full size.
+
+The two results in this record are the comparison:
+
+| Move | Class | Saving per call |
+| --- | --- | --- |
+| Section 2 operational-home tree | duplicate, owner already existed | 4,228 tokens |
+| Section 7 supersession sequence | extraction behind a new trigger | 77 tokens |
+
+Do not resume hunting extractions in `AGENTS.md`.
+Section 7 was assessed block by block and yielded exactly one qualifying block out of seventeen, because the file's remaining bulk is contract rather than mechanics, and a contract clause has no trigger - it is what makes a trigger recognisable.
+Look for content that is restated from an owner declared elsewhere, which is what the section 2 tree turned out to be.
+
+Prose trimming is close to done regardless: `AGENTS.md` finished this work at 53,628 bytes against an original ~25K aspiration and a revised ~45K target, neither of which is reachable without moving laws behind triggers.
+The remaining floor is the tool-schema surface, tracked separately as `fm-tool-schema-surface-diet`.
 
 ## Birth-weight measurement instrument
 

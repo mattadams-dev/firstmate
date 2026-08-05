@@ -70,10 +70,21 @@ saving per session = block tokens x P(this session never fires the trigger)
 A trigger that fires in nearly every session saves nearly nothing and adds a tool round trip, however cleanly the block splits into law and verb.
 Estimate that probability before proposing an extraction, and prefer deleting a duplicate outright wherever an owner already exists, because a doc read on demand carries no such discount.
 
-A new skill also carries a fixed resident tax, paid from the first turn whether or not it ever loads: its `description:` frontmatter sits in the harness's skill listing, its trigger line sits in `AGENTS.md` section 13, and its stub sits in the owning section.
-Measured, that tax runs 300 to 400 tokens, so an extraction needs roughly 1,500 bytes of genuinely removable procedure before it breaks even - and a four-sentence description alone measured 184 tokens against 107 for a two-sentence one.
-Write the shortest description that still states the trigger recognisably; verbose trigger prose is resident context charged to every session that never uses the skill.
-Measure a conversion rather than assuming it: the first attempt at this made the floor worse by 82 tokens.
+### The extraction break-even, and it is a hard floor
+
+A new skill carries a fixed resident tax, paid from the first turn whether or not it ever loads.
+Its `description:` frontmatter sits in the harness's skill listing, its trigger line sits in `AGENTS.md` section 13, and its inline stub sits in the owning section.
+That tax measures 300 to 400 tokens.
+
+**An extraction needs roughly 300 to 400 tokens - about 1,500 bytes - of genuinely removable procedure to break even, and no extraction below that floor is worth making at any trigger rarity.**
+Rarity raises what a qualifying extraction returns; it cannot pay the fixed tax.
+Measure the conversion rather than assuming it: the first attempt at the one qualifying extraction in `AGENTS.md` section 7 made the floor 82 tokens *worse* before it was tuned.
+
+Prefer the dedup class instead.
+Content that already has an owner elsewhere carries no resident tax at all and returns its full size, because removing a duplicate adds nothing back.
+That is the larger lever by a wide margin: removing `AGENTS.md`'s duplicated operational-home tree returned 4,228 tokens per call, against 77 for the section 7 extraction.
+Look for a duplicate before you look for something to extract.
+
 `docs/verification/agents-md-diet.md` holds the measurements behind this rule, including why a fresh-session birth-weight reading is an upper bound on a conversion's saving rather than the achieved figure.
 
 When in doubt, write the fact into the skill or doc first by patching that owner's existing language, and add only the one-line trigger to `AGENTS.md`.
@@ -83,6 +94,12 @@ When in doubt, write the fact into the skill or doc first by patching that owner
 A new skill is dead weight if nothing loads it.
 Every new skill needs its load trigger declared inline: section 13 for agent-only reference skills, or the relevant operating section for anything else.
 State the trigger as a condition ("load before X", "load on Y wake"), never as a vague pointer.
+
+**Cap a skill's `description:` frontmatter at two sentences.**
+The description is resident in the harness's skill listing from the first turn, so every session pays for it including every session that never loads the skill.
+The cost is real and invisible, which is why this is a cap rather than a preference: a four-sentence description measured 184 tokens against 107 for the two-sentence rewrite that replaced it, and that difference alone was the difference between an extraction that helped and one that made the floor worse.
+Spend those two sentences on the trigger condition and what the skill owns; everything else belongs in the body, where only the sessions that load it pay.
+
 Briefs for tasks that touch firstmate's own tracked material should tell the crewmate to load this skill.
 `bin/fm-brief.sh`'s `REPO` argument is a caller-supplied string with no reliable signal that it names firstmate's own repo, unlike a project registered in `data/projects.md`, so there is no clean point inside the scaffold to detect this case automatically.
 Firstmate adds this skill's load instruction to firstmate-repo briefs by hand instead.
