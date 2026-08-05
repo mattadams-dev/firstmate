@@ -48,29 +48,40 @@
 # freshness result invoke this with `|| true` and relay the lines.
 #
 # behind > 0 materialises a durable sync task, idempotently, under the
-# deterministic id fm-sync-<owner>-<repo>: a backlog item, a check wake, a Bridge
-# item, and last data/<id>/brief.md carrying the proven sync procedure. Last,
-# because the brief is also the idempotency guard, and it is moved into place in
-# one atomic move: a materialisation cut short leaves no guard and no half-written
-# procedure, and the next sweep redoes all of it. A backlog, wake or Bridge step
-# that failed prints BACKLOG_MANUAL:, WAKE_MANUAL: or BRIDGE_MANUAL: on stderr
-# (stdout is the reading) and marks the reading itself with
-# MANUAL=<step>[+<step>], because "queued" claims all four artifacts.
-# Re-running never creates a second task for the same fork.
+# deterministic id fm-sync-<owner>-<repo>: data/<id>/brief.md carrying the proven
+# sync procedure, a backlog item, a check wake and a Bridge item.
 #
-# The brief proves the task was created; whether that task is still OPEN is asked
-# of the task system (tasks-axi) on every reading, because a guard that never
-# expires turns the instrument back into the warning it replaced - "already
-# queued" printed over a backlog item that closed months ago. An open task (or a
-# worker holding state/<id>.meta) short-circuits with its evidence. A task the
-# backlog reports done, or does not have at all, makes the marker spent: it is
-# moved aside to data/<id>/brief.retired-<stamp>.md - kept, never deleted - and a
-# fresh sync task is materialised, with RETIRED=<file> and the reason recorded on
-# that same reading, because retiring a guard removes what was suppressing the
-# work. A liveness question that could not be answered creates nothing and
-# duplicates nothing: it says so, on the reading and as GUARD_UNKNOWN: on stderr.
-# A retirement that could not be performed says so too (RETIRE_MANUAL:) rather
-# than leaving a spent guard silently in place. --dispatch
+# Two questions are kept apart here, because conflating them is what this
+# instrument got wrong three times running. "Is a sync owed?" is the forge's
+# answer - behind > 0. "Does open work already carry it?" is the TASK SYSTEM's
+# answer, asked directly by id on every reading, with nothing on disk gating it:
+# a marker existing was never the same question as the work being owed. An open
+# task, or a worker holding state/<id>.meta, short-circuits with its evidence.
+#
+# data/<id>/brief.md therefore guards nothing. It is the worker's instructions,
+# rendered beside itself and moved into place in one atomic move so a
+# materialisation cut short can never leave a half-written procedure - and it is
+# placed BEFORE the task exists, because a task discoverable without readable
+# instructions is the harmful order, while a brief with no task behind it
+# suppresses nothing. A brief left from a closed episode is superseded, not
+# spent: it is kept as data/<id>/brief.retired-<stamp>.md - never deleted - and
+# named SUPERSEDED=<file> on the reading.
+#
+# An absent task is created and a closed one is REOPENED, because `tasks-axi add`
+# is create-only: over an existing id it returns 0 having transitioned nothing.
+# Whichever primitive ran, the post-state is read back and the reading is keyed
+# on what was found, never on the exit status - "queued" only when the task
+# system confirms it open, "NOT queued" with the state actually found, and
+# "queue-state unknown" when the post-state could not be read at all. The
+# alternative is the failure this replaced: `queued` printed over a task that
+# stayed done, on every sweep, forever.
+#
+# The wake and the Bridge row rest on the forge reading, not on the bookkeeping,
+# so a backlog step that failed can never also silence the alarm that this fork
+# is behind. Any step that did not happen prints TASK_MANUAL:, TASK_UNCONFIRMED:,
+# TASK_UNKNOWN:, ARCHIVE_MANUAL:, WAKE_MANUAL: or BRIDGE_MANUAL: on stderr
+# (stdout is the reading) and marks the reading with MANUAL=<step>[+<step>].
+# Re-running never creates a second task for the same fork. --dispatch
 # additionally launches the worker through bin/fm-spawn.sh when this home has a
 # clone of that fork and FM_FORK_SYNC_HARNESS or config/fork-sync-harness names
 # the harness to use; without it the task stays queued, because the sync pushes
@@ -371,7 +382,14 @@ BRIEF
   } > "$path"
 }
 
-backlog_add() {
+# backlog_create <id> <title> <note>: create a task the reading found ABSENT.
+#
+# `add` is create-only. Over an id that already exists it prints `already: true`
+# and returns 0 having transitioned nothing and discarded the new body
+# (docs/verification/fork-freshness.md). Its status therefore cannot tell a
+# created task from a discarded call, which is why no caller here infers the
+# result from it - the post-state is read back instead.
+backlog_create() {
   local id=$1 title=$2 note=$3
   command -v tasks-axi >/dev/null 2>&1 || return 1
   # `add <id> "<title>" [flags]`: the id is positional. There is no --id flag,
@@ -380,12 +398,37 @@ backlog_add() {
   ( cd "$FM_HOME" && tasks-axi add "$id" "$title" --body "$note" ) >/dev/null 2>&1
 }
 
+# backlog_reopen <id> <note>: return a CLOSED task to the queue for a fresh
+# episode, and refresh its body to the reading that opened that episode.
+#
+# `add` cannot do this at all, so a closed task needs the primitive that
+# actually transitions. The superseded body is archived rather than overwritten,
+# so the reading of the episode that closed stays recoverable from the task
+# itself - which is also why a failure to archive the previous brief file is
+# reported and survivable rather than fatal: the task carries that record too.
+#
+# Returns 1 when the transition itself failed, 2 when the task was reopened but
+# its body still holds the previous episode's reading. Callers still confirm the
+# post-state; this return only distinguishes which part needs a hand.
+backlog_reopen() {
+  local id=$1 note=$2
+  command -v tasks-axi >/dev/null 2>&1 || return 1
+  ( cd "$FM_HOME" && tasks-axi reopen "$id" ) >/dev/null 2>&1 || return 1
+  ( cd "$FM_HOME" && tasks-axi update "$id" --body "$note" --archive-body ) \
+    >/dev/null 2>&1 || return 2
+}
+
 # task_liveness <id>: what the task system says about that sync task -
 # "open <state>", "closed <state>", "absent", or "unknown <reason>". The backlog
 # is the fleet's record of open work, so it is what "already queued" has to be
-# true of; a file on disk can only prove the task was once created. Read from
-# $FM_HOME, the same working directory backlog_add writes from, so the two are
-# asking the same backend by construction.
+# true of; a file on disk can only prove a task was once created. Read from
+# $FM_HOME, the same working directory the backlog writes go through, so the two
+# are asking the same backend by construction.
+#
+# The states are exactly queued, in_flight and done. Hold is an ORTHOGONAL
+# field, not a state: a held task still reads `state: queued`, so it reaches the
+# open arm below and is correctly counted as open work
+# (docs/verification/fork-freshness.md).
 task_liveness() {
   local id=$1 out state
   command -v tasks-axi >/dev/null 2>&1 || {
@@ -397,7 +440,7 @@ task_liveness() {
       LC_ALL=C sed -n 's/^[[:space:]]*state:[[:space:]]*//p' |
       head -1 | LC_ALL=C tr -d '"[:space:]')
     case "$state" in
-      queued|in_flight|held) printf 'open %s\n' "$state" ;;
+      queued|in_flight) printf 'open %s\n' "$state" ;;
       done) printf 'closed %s\n' "$state" ;;
       '') printf 'unknown %s\n' "$(clean_reason "tasks-axi named no state for $id")" ;;
       *) printf 'unknown %s\n' "$(clean_reason "tasks-axi named an unrecognised state: $state")" ;;
@@ -435,36 +478,15 @@ brief_tmp_cleanup() {
   BRIEF_TMP=
 }
 
-# guard_verdict <id>: whether the brief standing in data/<id>/ is still backed by
-# open work - "live <evidence>", "spent <evidence>" or "unknown <reason>".
+# archive_brief <id>: move a superseded brief aside, printing the name it was
+# kept under. Never a delete: the brief carries the reading that opened its
+# episode, and an episode that has been replaced must stay discoverable
+# afterwards rather than being overwritten in place.
 #
-# The brief proves the task was CREATED, and it keeps that job. It cannot answer
-# whether the task is still OPEN, and those are different questions: the fork is
-# synced, the task closes, data/<id>/ stays (teardown keeps it as the evidence
-# custodian), and a guard keyed on the file alone then suppresses every later
-# episode of the same fork - "already queued" printed over a backlog item, a wake
-# and a Bridge row that closed months ago. So liveness is asked of the task
-# system, and a marker no open task backs is spent.
-guard_verdict() {
-  local id=$1 probe
-  if [ -f "$STATE/$id.meta" ]; then
-    printf 'live a worker holds state/%s.meta\n' "$id"
-    return 0
-  fi
-  probe=$(task_liveness "$id")
-  case "$probe" in
-    'open '*) printf 'live the backlog reports it %s\n' "${probe#open }" ;;
-    'closed '*) printf 'spent the backlog reports it %s\n' "${probe#closed }" ;;
-    absent) printf 'spent the backlog has no task %s\n' "$id" ;;
-    *) printf 'unknown %s\n' "${probe#unknown }" ;;
-  esac
-}
-
-# retire_guard <id>: move the spent brief aside, printing the name it was kept
-# under. Never a delete: retiring a guard removes the thing that was preventing
-# work, so a retirement that turns out to have been wrong must stay discoverable
-# afterwards, and the brief carries the reading that opened its episode.
-retire_guard() {
+# This is record-keeping, not a lock. The brief guards nothing - see
+# ensure_sync_task - so a failure to archive costs the previous reading's copy
+# on disk and nothing else, and it never blocks the sync it used to block.
+archive_brief() {
   local id=$1 stamp name
   stamp=$(date -u -d "@$(now_epoch)" '+%Y%m%dT%H%M%SZ' 2>/dev/null ||
     date -u '+%Y%m%dT%H%M%SZ')
@@ -475,149 +497,214 @@ retire_guard() {
 
 # ensure_sync_task <slug> <upstream> <fork-branch> <upstream-branch> <behind> <ahead> <status>
 # Echoes the action taken. Idempotent by construction: the task id is derived
-# from the fork, so a second sweep finds the first sweep's task.
+# from the fork, so a second sweep addresses the first sweep's task.
 #
-# data/<id>/brief.md is both the task's instructions and that idempotency guard,
-# so it is rendered beside itself and moved into place - atomically, same
-# directory - only once the backlog item, the wake entry and the Bridge ask have
-# been attempted. A materialisation cut short therefore leaves no guard and no
-# half-written procedure behind it, and the next sweep redoes the whole thing.
-# Whichever of the three did not happen is named on stderr and marked on the
-# reading itself: "queued" claims four artifacts, and it may not be printed over
-# one nobody observed.
+# THE TWO QUESTIONS, KEPT APART
 #
-# A brief already in place is not by itself a reason to stay quiet. It proves a
-# task was created; guard_verdict asks the task system whether that task is still
-# open. Open short-circuits with its evidence, spent retires the marker and
-# materialises a fresh task - recorded on this same reading, because retirement
-# removes the thing that was suppressing the work - and unknown does neither,
-# because duplicating a live task and silently sitting on a dead one are both
-# worse than saying which of the two could not be told apart.
+# "Is a sync owed?" is answered by the forge: this function is only reached with
+# behind > 0. "Does open work already carry it?" is answered by the task system,
+# asked directly and asked FIRST - nothing on disk gates it. That separation is
+# the whole point: a marker existing was never the same question as the work
+# being owed, and keying the second on the first is the conflation this sweep
+# carried through three rounds, one layer further downstream each time.
+#
+# So data/<id>/brief.md guards nothing. It is the worker's instructions, and its
+# atomic move exists only so a materialisation cut short can never leave a
+# half-written procedure for a worker to act on. Creation-atomicity and liveness
+# are separate concerns and no longer share an artifact.
+#
+# Because the brief is not a guard, it is placed BEFORE the task exists rather
+# than last. A task that is discoverable before its instructions are readable is
+# the harmful order; a brief standing with no task behind it suppresses nothing
+# and the next sweep simply rewrites it.
+#
+# MAKING ONE EXIST, AND CONFIRMING IT
+#
+# The primitive is matched to what the task system said - `add` creates, and
+# only `reopen` can return a closed task to the queue. Whichever ran, the
+# post-state is READ BACK before anything is claimed, because `tasks-axi add`
+# returns 0 over an existing id having transitioned nothing: exit status cannot
+# tell "a sync is now owed" from "nothing was queued at all", and a reading that
+# cannot separate those two worlds may not print the definite word for either.
+# Confirmed open reads "queued", confirmed not-open reads "NOT queued" with the
+# state that was actually found, and an unreadable post-state reads "unknown".
+#
+# The wake and the Bridge row are raised on the strength of the forge reading,
+# not of the bookkeeping, so a backlog step that failed can never also silence
+# the alarm that this fork is behind. Each artifact that did not happen is named
+# on stderr and marked MANUAL=<step>[+<step>] on the reading itself.
 ensure_sync_task() {
   local slug=$1 up=$2 fork_branch=$3 up_branch=$4 behind=$5 ahead=$6 status=$7
-  local id brief taken harness clone manual="" verdict name retired=""
+  local id brief taken harness clone manual="" name archived="" verb
+  local standing need rc=0 confirmed title note
   id=$(sync_task_id "$slug")
   brief="$DATA/$id/brief.md"
 
+  # A worker holding the runtime record outranks every other reading: this work
+  # is not merely owed, it is being done.
   if [ -f "$STATE/$id.meta" ]; then
     printf 'task %s already under way\n' "$id"
     return 0
   fi
-  if [ -f "$brief" ]; then
-    verdict=$(guard_verdict "$id")
-    case "$verdict" in
-      'live '*)
-        printf 'task %s already queued (%s)\n' "$id" "${verdict#live }"
-        return 0
-        ;;
-      'unknown '*)
-        printf 'GUARD_UNKNOWN: %s is behind and data/%s/brief.md is in place, but whether that sync task is still open could not be read (%s); confirm the task by hand, because this reading created nothing\n' \
-          "$slug" "$id" "${verdict#unknown }" >&2
-        printf 'task %s not re-queued: its brief is in place and whether it is still open could not be read (%s)\n' \
-          "$id" "${verdict#unknown }"
-        return 0
-        ;;
-    esac
-    if ! name=$(retire_guard "$id"); then
-      printf 'RETIRE_MANUAL: %s is behind and no open task backs data/%s/brief.md (%s), but it could not be moved aside; move it by hand or every later sweep will report this fork queued\n' \
-        "$slug" "$id" "${verdict#spent }" >&2
-      printf 'task %s NOT created: a spent brief (%s) is in the way and could not be moved aside\n' \
-        "$id" "${verdict#spent }"
-      return 1
-    fi
-    retired=" RETIRED=$name (${verdict#spent })"
-  fi
+
+  standing=$(task_liveness "$id")
+  case "$standing" in
+    'open '*)
+      printf 'task %s already queued (the backlog reports it %s)\n' \
+        "$id" "${standing#open }"
+      return 0
+      ;;
+    'unknown '*)
+      printf 'TASK_UNKNOWN: %s is behind and whether sync task %s is already open could not be read (%s); confirm it by hand, because this reading created nothing\n' \
+        "$slug" "$id" "${standing#unknown }" >&2
+      printf 'task %s not queued: whether it is already open could not be read (%s)\n' \
+        "$id" "${standing#unknown }"
+      return 0
+      ;;
+    absent) need=create ;;
+    *) need=reopen ;;
+  esac
 
   taken=$(date -u -d "@$(now_epoch)" '+%Y-%m-%d %H:%M UTC' 2>/dev/null ||
     date -u '+%Y-%m-%d %H:%M UTC')
+  title="Sync $slug from $up"
+  note="Reading $taken: behind $behind, ahead $ahead - $status. Instructions: data/$id/brief.md. Sync pushes a true merge commit directly to $fork_branch, never through a PR."
+
+  # A brief from a closed episode is superseded, not spent: it is kept under a
+  # stamped name rather than overwritten. Failing to keep it costs that copy and
+  # nothing else - it blocks no sync, and the reading it carried is archived
+  # into the task body by backlog_reopen as well - so it is reported, not fatal.
+  if [ -f "$brief" ]; then
+    if name=$(archive_brief "$id"); then
+      archived=" SUPERSEDED=$name"
+    else
+      printf 'ARCHIVE_MANUAL: %s has a superseded data/%s/brief.md that could not be moved aside, so this episode overwrites it; the reading it carried survives in the task body\n' \
+        "$slug" "$id" >&2
+      manual="$manual+brief"
+    fi
+  fi
+
   trap brief_tmp_cleanup EXIT
   trap 'exit 1' HUP INT TERM
   if ! mkdir -p "$DATA/$id" 2>/dev/null ||
     ! BRIEF_TMP=$(mktemp "$DATA/$id/.brief.XXXXXX" 2>/dev/null); then
-    printf 'task %s NOT created: instructions could not be written%s\n' "$id" "$retired"
+    printf 'task %s NOT queued: instructions could not be written%s\n' "$id" "$archived"
     return 1
   fi
   if ! write_sync_brief "$BRIEF_TMP" "$slug" "$up" "$fork_branch" "$up_branch" \
     "$behind" "$ahead" "$status" "$taken"; then
     brief_tmp_cleanup
-    printf 'task %s NOT created: instructions could not be written%s\n' "$id" "$retired"
+    printf 'task %s NOT queued: instructions could not be written%s\n' "$id" "$archived"
     return 1
   fi
-
-  backlog_add "$id" "Sync $slug from $up" \
-    "Reading $taken: behind $behind, ahead $ahead - $status. Instructions: data/$id/brief.md. Sync pushes a true merge commit directly to $fork_branch, never through a PR." || {
-    printf 'BACKLOG_MANUAL: add %s to the backlog by hand\n' "$id" >&2
-    manual="$manual+backlog"
-  }
-  queue_wake "fork-freshness: $slug is behind $up by $behind (ahead $ahead) - sync task $id" || {
-    printf 'WAKE_MANUAL: %s raised no wake entry; carry sync task %s forward by hand\n' "$slug" "$id" >&2
-    manual="$manual+wake"
-  }
-  bridge_ask "$slug" "$slug is behind $up by $behind commits" \
-    "Reading $taken: behind $behind, ahead $ahead - $status. Sync task $id is queued with the procedure; it pushes a merge commit straight to $fork_branch, so it waits for a go." || {
-    printf 'BRIDGE_MANUAL: %s has no Bridge row; put sync task %s to the captain by hand\n' "$slug" "$id" >&2
-    manual="$manual+bridge"
-  }
-  [ -z "$manual" ] || manual=" MANUAL=${manual#+}"
-
   # The move is checked by its result, not only by its status: mv onto an
   # existing directory succeeds by moving the file INSIDE it, which would leave
   # the brief somewhere nobody looks while the reading says queued.
   if ! mv -f "$BRIEF_TMP" "$brief" 2>/dev/null || [ ! -f "$brief" ]; then
     brief_tmp_cleanup
-    printf 'task %s NOT created: instructions could not be placed%s%s\n' "$id" "$manual" "$retired"
+    printf 'task %s NOT queued: instructions could not be placed%s\n' "$id" "$archived"
     return 1
   fi
   BRIEF_TMP=
 
+  case "$need" in
+    create) backlog_create "$id" "$title" "$note" || rc=$? ;;
+    reopen) backlog_reopen "$id" "$note" || rc=$? ;;
+  esac
+  [ "$rc" != 2 ] || manual="$manual+note"
+
+  # Never inferred from $rc: confirmed.
+  confirmed=$(task_liveness "$id")
+
+  queue_wake "fork-freshness: $slug is behind $up by $behind (ahead $ahead) - sync task $id" || {
+    printf 'WAKE_MANUAL: %s raised no wake entry; carry sync task %s forward by hand\n' "$slug" "$id" >&2
+    manual="$manual+wake"
+  }
+  bridge_ask "$slug" "$slug is behind $up by $behind commits" \
+    "Reading $taken: behind $behind, ahead $ahead - $status. Sync task $id carries the procedure; it pushes a merge commit straight to $fork_branch, so it waits for a go." || {
+    printf 'BRIDGE_MANUAL: %s has no Bridge row; put sync task %s to the captain by hand\n' "$slug" "$id" >&2
+    manual="$manual+bridge"
+  }
+
+  case "$confirmed" in
+    'open '*) verb="queued" ;;
+    'unknown '*)
+      printf 'TASK_UNCONFIRMED: %s is behind and the %s of sync task %s could not be confirmed afterwards (%s); check the backlog by hand rather than reading this as queued\n' \
+        "$slug" "$need" "$id" "${confirmed#unknown }" >&2
+      manual="$manual+backlog"
+      [ -z "$manual" ] || manual=" MANUAL=${manual#+}"
+      printf 'task %s queue-state unknown after %s (%s)%s%s\n' \
+        "$id" "$need" "${confirmed#unknown }" "$manual" "$archived"
+      return 0
+      ;;
+    *)
+      printf 'TASK_MANUAL: %s is behind but sync task %s did not %s - the backlog still reports it %s; queue it by hand\n' \
+        "$slug" "$id" "$need" "$confirmed" >&2
+      manual="$manual+backlog"
+      [ -z "$manual" ] || manual=" MANUAL=${manual#+}"
+      printf 'task %s NOT queued: the backlog still reports it %s after %s%s%s\n' \
+        "$id" "$confirmed" "$need" "$manual" "$archived"
+      return 1
+      ;;
+  esac
+  [ -z "$manual" ] || manual=" MANUAL=${manual#+}"
+
   harness=$(dispatch_harness)
   if [ "$DISPATCH" != 1 ]; then
-    printf 'task %s queued%s%s\n' "$id" "$manual" "$retired"
+    printf 'task %s %s%s%s\n' "$id" "$verb" "$manual" "$archived"
     return 0
   fi
   if ! clone=$(clone_dir_for "$slug"); then
-    printf 'task %s queued (no local copy of %s in this home)%s%s\n' "$id" "${slug##*/}" "$manual" "$retired"
+    printf 'task %s %s (no local copy of %s in this home)%s%s\n' "$id" "$verb" "${slug##*/}" "$manual" "$archived"
     return 0
   fi
   if [ -z "$harness" ]; then
-    printf 'task %s queued (no fork-sync-harness configured)%s%s\n' "$id" "$manual" "$retired"
+    printf 'task %s %s (no fork-sync-harness configured)%s%s\n' "$id" "$verb" "$manual" "$archived"
     return 0
   fi
   if "$SCRIPT_DIR/fm-spawn.sh" "$id" "$clone" --harness "$harness" >/dev/null 2>&1; then
-    printf 'task %s dispatched%s%s\n' "$id" "$manual" "$retired"
+    printf 'task %s dispatched%s%s\n' "$id" "$manual" "$archived"
   else
-    printf 'task %s queued (worker could not be launched)%s%s\n' "$id" "$manual" "$retired"
+    printf 'task %s %s (worker could not be launched)%s%s\n' "$id" "$verb" "$manual" "$archived"
   fi
 }
 
 # retire_sync_task <slug>
-# The level-fork half of the same lifetime. A fork that reads behind=0 while its
-# marker is backed by no open task has nothing left to guard, so the marker goes
-# now rather than waiting for the fork's next episode to discover it. An open
-# task keeps its brief - the worker may still be reading it - and a liveness
-# question that could not be answered changes nothing, because at behind=0 no
-# work is being suppressed and a wrong retirement would be.
+# The level-fork half of the lifetime, and now only record hygiene: a brief
+# standing beside a closed task is a stale instruction sheet, so it is filed
+# under its stamped name rather than left looking current.
+#
+# It no longer has to run for the behind path to work. Under the old design the
+# marker was the guard, so a marker that outlived its episode suppressed every
+# later one and only this function could clear it - which made an actively
+# moving upstream, never observed level, keep a stale guard alive forever. The
+# behind path now supersedes its own brief, so the two paths are independent and
+# neither depends on the other having had its chance.
+#
+# An open task keeps its brief - the worker is reading it - and an unanswerable
+# liveness question changes nothing.
 #
 # Prints the action when there was one, nothing when there was nothing to do, and
-# returns non-zero having printed why when a spent marker could not be moved.
+# returns non-zero having printed why when a superseded brief could not be moved.
 retire_sync_task() {
-  local slug=$1 id brief verdict name
+  local slug=$1 id brief standing name
   id=$(sync_task_id "$slug")
   brief="$DATA/$id/brief.md"
   [ -f "$brief" ] || return 0
-  verdict=$(guard_verdict "$id")
-  case "$verdict" in
-    'spent '*) ;;
+  [ ! -f "$STATE/$id.meta" ] || return 0
+  standing=$(task_liveness "$id")
+  case "$standing" in
+    'closed '*|absent) ;;
     *) return 0 ;;
   esac
 
-  if ! name=$(retire_guard "$id"); then
-    printf 'RETIRE_MANUAL: %s is level again and no open task backs data/%s/brief.md (%s), but it could not be moved aside; move it by hand or the next behind reading will report this fork queued\n' \
-      "$slug" "$id" "${verdict#spent }" >&2
-    printf 'task %s NOT retired: spent instructions could not be moved aside\n' "$id"
+  if ! name=$(archive_brief "$id"); then
+    printf 'ARCHIVE_MANUAL: %s is level again and its data/%s/brief.md is superseded (%s), but it could not be moved aside; file it by hand so it stops reading as the current procedure\n' \
+      "$slug" "$id" "$standing" >&2
+    printf 'task %s NOT retired: superseded instructions could not be moved aside\n' "$id"
     return 1
   fi
-  printf 'task %s retired RETIRED=%s (%s)\n' "$id" "$name" "${verdict#spent }"
+  printf 'task %s retired RETIRED=%s (%s)\n' "$id" "$name" "$standing"
 }
 
 # --- one fork ---------------------------------------------------------------
