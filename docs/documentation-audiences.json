@@ -329,6 +329,10 @@
       "audience": "operator-current"
     },
     {
+      "path": "docs/verification/agents-md-diet.md",
+      "audience": "maintainer-verification"
+    },
+    {
       "path": "docs/verification/bridge-hosted-input.md",
       "audience": "maintainer-verification"
     },
