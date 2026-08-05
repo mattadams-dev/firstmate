@@ -2,8 +2,9 @@
 
 Audience: maintainer verification.
 
-One-shot repair of `endpoint_task_id=` in `state/<id>.meta` records created before `bin/fm-spawn.sh` began writing that field.
-Run 2026-08-01 against the primary home.
+Repeatable repair of `endpoint_task_id=` in `state/<id>.meta` records created before `bin/fm-spawn.sh` began writing that field.
+Re-running is harmless by construction rather than by memory of a previous run; "one-shot" appears below only where the deleted guard is being discussed.
+First applied 2026-08-01 against the primary home.
 
 Unlike its sibling records, this one embeds captured live tool output, whose paths and identifiers are the evidence itself and are never edited; the siblings' zero-absolute-path form binds prose only.
 That divergence is declared here so a later path-counting audit reads it as deliberate rather than as a defect, which is what an undeclared divergence is indistinguishable from.
@@ -158,10 +159,75 @@ observe-ocr-bakeoff:
 
 The refusal half matters as much as the acceptance half: without it, acceptance afterwards would not show the guard had been active.
 
+## Every record is accounted for
+
+A later review found that the shapes above were not the only silent skips: a record with no `window=` line, a record that could not be read, and a dangling symlink were each dropped with no line at all - not on stdout and not in the receipt.
+
+That matters more than it looks, because the ruling below made the receipt THE record of a run.
+A receipt that omits entries is not a record; it is a record-shaped object that lies by omission, and a reader cannot tell a record that was skipped from one that never existed.
+It would leave exactly the stranded-and-invisible state the deleted guard was reaching for.
+
+Every file the `state/*.meta` glob matches now produces exactly one outcome line, on stdout and in the receipt: `MIGRATED`, `WOULD-MIGRATE`, `NOT-REQUIRED`, or `DISPOSITION`.
+No path through the loop skips a record in silence.
+
+| Shape | Outcome | Why |
+| --- | --- | --- |
+| no `window=` line | `DISPOSITION` | names no endpoint for a binding to describe; teardown refuses it too |
+| could not be read | `DISPOSITION` | nothing was observed, so nothing is claimed about what it holds |
+| dangling symlink | `DISPOSITION` | the entry exists, the record does not |
+| symlink to a live target | `DISPOSITION` | see below; never written |
+| unterminated last line | `DISPOSITION` | see below; never appended to |
+| legacy tmux record | `NOT-REQUIRED` | the validator binds it by window name |
+| already carries the binding | `NOT-REQUIRED` | not a candidate, and nothing is wrong with it |
+
+`meta_count` used to return an empty string for an unreadable file, so `[ "" -ge 1 ]` both errored to stderr and evaluated false - an unreadable record silently read as "no window line".
+It now distinguishes `grep -c`'s "no match" (exit 1, count 0) from its "cannot read" (exit 2) and fails rather than returning a count, so a read failure can never be reported as a fact about the record's contents.
+
+The other direction is guarded too: `healthy_record_is_never_a_disposition` asserts a healthy, observable record still produces its normal outcome and no disposition item, so the accounting rule cannot degenerate into calling every record a disposition.
+
+## Unknown is not absent
+
+`fm_backend_herdr_workspace_find_all` returns 0 with EMPTY output when `herdr workspace list` fails (`bin/backends/herdr.sh`, `|| return 0`), and the migration masked its non-zero return on top of that.
+With the herdr server stopped, herdr uninstalled, or jq missing, every record therefore emitted the definite claim `workspace <ws> is not a live workspace of this home in session <s>` - to stdout and into the durable receipt.
+
+That is "could not look" reported as "looked and it was not there".
+Two different world-states produced the same reading, and the stronger one was written permanently into the record.
+
+The migration now makes the workspace read itself, checks its exit status, checks the tool availability first, and checks the exit status of every `jq` parse rather than letting a swallowed parse failure become an empty inventory.
+Each of those conditions yields an explicit UNKNOWN disposition naming it; none of them yields an absence claim.
+The two worlds are now distinguishable in the receipt, which is where the distinction has to survive:
+
+```
+DISPOSITION	alpha	could not list live workspaces in session 1, so whether workspace wB is still live is UNKNOWN, not absent
+DISPOSITION	alpha	workspace wB is not a live workspace of this home in session 1
+```
+
+The first is an unreachable backend, the second a genuine absence, and `unreachable_backend_is_unknown_not_absent` asserts the first world never produces the second reading.
+
+## Two shapes that are refused rather than repaired
+
+**A symlinked record is never written.**
+`write_binding`'s `mv -f` replaces the LINK itself with a regular file holding the target's content plus the new binding, and `fm_backend_validate_task_endpoint` refuses a symlinked record outright (`[ -f "$meta" ] && [ ! -L "$meta" ]`).
+One `--apply` would therefore have converted a record teardown REFUSES into one teardown ACCEPTS, acting on a worktree path imported from outside `state/` - defeating the standing constraint that this work must not weaken teardown's requirement, by side effect rather than by intent.
+The record is now detected with the same test teardown applies, reported, and left exactly as found; `symlinked_record_refused_and_stays_a_symlink` runs the real validator afterwards and asserts it still refuses.
+
+**A record whose last line has no terminating newline is never appended to.**
+The append would concatenate the binding onto the partial line, producing something like `traceparendpoint_task_id=alpha`: the preceding key is corrupted, `^endpoint_task_id=` still matches zero lines, so the record stays a candidate and every later run appends again.
+That is the one way the structural idempotence this change rests on can fail, so the record is refused as already malformed rather than repaired by guessing where the truncated line ended.
+The idempotence claim in the script header is scoped accordingly: it is stated for a well-formed record, which is the only shape the script writes.
+
+## A receipt that fails mid-run stops the run
+
+`receipt_open` failing was already fatal, but every later append discarded its exit status.
+If the receipt became unwritable after the run started, the per-record lines and the `run end=` line were dropped while the run continued, printed its receipt path, and exited 0 - contradicting the script's own "a run that cannot write its receipt does not run" and its claim that the receipt "can never become a second and divergent account of what the run did".
+
+Every append is now checked, and a failed one stops the run with a `REFUSED` on stderr and a non-zero exit.
+`receipt_failure_mid_run_is_not_silent` makes the receipt unwritable after the start line and before the first outcome, and asserts the run neither reports success nor reaches its summary.
+
 ## Guard-class evidence: mutation testing, both directions
 
-The output below is the suite and mutation harness as they stand with all four refusal shapes reporting, no one-shot guard, and idempotence and the receipt carrying its job.
-The twelve-case output captured against the script at the moment of the applied run is superseded by it; the run's own captured output above is unchanged.
+The output below is the suite and mutation harness as they stand with every record accounted for, unknown distinguished from absent, symlinked and unterminated records refused, no one-shot guard, and idempotence and the receipt carrying its job.
+Earlier captures against the script at the moment of the applied run are superseded by it; the run's own captured output above is unchanged.
 
 Behavior suite, driven through a fake herdr CLI serving canned inventory by content:
 
@@ -169,11 +235,13 @@ Behavior suite, driven through a fake herdr CLI serving canned inventory by cont
 $ bash tests/fm-migrate-endpoint-binding.test.sh
 ok - absent_endpoint_refused
 ok - ambiguous_pane_refused
+ok - dangling_symlink_reported_not_skipped
 ok - dry_run_writes_nothing
 ok - duplicated_binding_reported_not_skipped
 ok - empty_binding_reported_not_skipped
 ok - existing_binding_untouched
 ok - foreign_workspace_refused
+ok - healthy_record_is_never_a_disposition
 ok - interrupted_run_resumes
 ok - label_names_other_task_refused
 ok - mismatched_binding_reported_not_skipped
@@ -181,30 +249,37 @@ ok - observable_binding_migrates
 ok - observe_reports_unbound_record_on_partial_home
 ok - pane_mismatch_refused
 ok - receipt_accumulates_across_runs
+ok - receipt_failure_mid_run_is_not_silent
 ok - receipt_written_for_apply_run
 ok - receipt_written_for_observe_run
 ok - repeated_apply_is_idempotent
 ok - repeated_apply_is_not_refused
+ok - symlinked_record_refused_and_stays_a_symlink
 ok - teardown_validator_accepts_migrated_record
 ok - teardown_validator_rejects_unmigrated_record
 ok - tmux_reported_not_silent
 ok - unobservable_backend_refused
+ok - unreachable_backend_is_unknown_not_absent
+ok - unreadable_record_reported_not_skipped
+ok - unterminated_record_refused
 ok - valid_binding_is_not_a_disposition
+ok - windowless_record_reported_not_skipped
 
-all 23 cases passed
+all 31 cases passed
 ```
 
 The empty-binding and duplicated-binding fixtures are synthetic on purpose, because zero real specimens existed in the migrated home.
 A refusal shape without a fixture proving it fires is how the silent-skip hole survived review the first time.
-`valid_binding_is_not_a_disposition` proves the other direction: a correctly bound record is simply not a candidate, so reporting the three broken shapes did not turn every bound record into a disposition item.
+The same reasoning applies to the windowless, unreadable, dangling-symlink, symlinked, and unterminated fixtures: none of them is produced by any current `bin/fm-spawn.sh` writer, so each is defensive, and each has a case that would notice if it stopped being reported.
+`valid_binding_is_not_a_disposition` and `healthy_record_is_never_a_disposition` prove the other direction: a correctly bound record and a healthy observable record produce their normal outcomes, so reporting the broken shapes did not turn every record into a disposition item.
 
 Mutation experiment.
-Each mutation neutralises one guard by replacing its condition with `true`, leaving the refusal block intact, and is pinned to its target line by content so a drifted line number fails loudly rather than silently mutating unrelated code.
+Each mutation neutralises one guard, leaving the surrounding block intact, and is pinned to its target line by content so a drifted line number fails loudly rather than silently mutating unrelated code.
 
 ```
 $ bash tests/fm-migrate-endpoint-binding-mutation.sh
 == baseline: unmutated script ==
-BASELINE green (23)
+BASELINE green (31)
 
 == mutations that let an unobserved value be written ==
 CAUGHT   value-from-filename-not-label      failing: label_names_other_task_refused
@@ -212,31 +287,51 @@ CAUGHT   skip-pane-identity-check           failing: pane_mismatch_refused
 CAUGHT   skip-home-workspace-check          failing: foreign_workspace_refused
 CAUGHT   accept-ambiguous-pane              failing: ambiguous_pane_refused
 
+== mutations that report an unobservable world as a definite absence ==
+CAUGHT   unreachable-backend-read-as-absent failing: unreachable_backend_is_unknown_not_absent
+
 == mutations that turn a refusal shape back into a silent skip ==
 CAUGHT   silent-skip-empty-binding          failing: empty_binding_reported_not_skipped
 CAUGHT   silent-skip-duplicated-binding     failing: duplicated_binding_reported_not_skipped
 
+== mutations that let a record vanish from the account entirely ==
+CAUGHT   silent-skip-windowless-record      failing: windowless_record_reported_not_skipped
+CAUGHT   silent-skip-unreadable-record      failing: unreadable_record_reported_not_skipped
+CAUGHT   silent-skip-dangling-symlink       failing: dangling_symlink_reported_not_skipped
+CAUGHT   silent-skip-symlinked-record       failing: symlinked_record_refused_and_stays_a_symlink
+CAUGHT   launder-symlinked-record           failing: symlinked_record_refused_and_stays_a_symlink
+CAUGHT   append-onto-unterminated-record    failing: unterminated_record_refused
+
 == mutations on idempotence and the receipt, in both directions ==
 CAUGHT   double-write-already-bound-record  failing: existing_binding_untouched interrupted_run_resumes repeated_apply_is_idempotent repeated_apply_is_not_refused
 CAUGHT   reintroduce-one-shot-refusal       failing: repeated_apply_is_idempotent repeated_apply_is_not_refused
-CAUGHT   run-without-writing-receipt        failing: receipt_accumulates_across_runs receipt_written_for_apply_run receipt_written_for_observe_run
+CAUGHT   run-without-writing-receipt        failing: receipt_accumulates_across_runs receipt_failure_mid_run_is_not_silent receipt_written_for_apply_run receipt_written_for_observe_run unreachable_backend_is_unknown_not_absent
+CAUGHT   continue-past-failed-receipt-write failing: receipt_failure_mid_run_is_not_silent
+
+== the false-positive direction: a healthy record reported as a decision ==
+CAUGHT   report-healthy-record-as-disposition failing: existing_binding_untouched valid_binding_is_not_a_disposition
 
 == control: a blanket bypass should be caught broadly, not narrowly ==
-CAUGHT   blanket-write-without-observation  failing: absent_endpoint_refused ambiguous_pane_refused foreign_workspace_refused label_names_other_task_refused pane_mismatch_refused
+CAUGHT   blanket-write-without-observation  failing: absent_endpoint_refused ambiguous_pane_refused foreign_workspace_refused label_names_other_task_refused pane_mismatch_refused unreachable_backend_is_unknown_not_absent
 
 RESULT: every mutation was caught by exactly the expected case(s)
 ```
 
 Both directions hold.
-A genuinely observable binding still migrates (baseline green, twenty cases).
+A genuinely observable binding still migrates (baseline green, 31 cases).
 Each mutation that would let an unobserved value be written is caught by exactly the case that owns that guard, so the suite identifies which protection is missing rather than going uniformly red.
 
 The `value-from-filename-not-label` mutation is the one that matters most: it is precisely "assertion instead of observation", and it is caught by exactly one case.
-The two silent-skip mutations restore the original blind spot by dropping a report and skipping the record, and each is caught by exactly the fixture that owns that refusal shape.
+`unreachable-backend-read-as-absent` restores the masking that let an unreachable herdr be written into the receipt as a definite absence, and is caught by the case that owns that distinction.
+The silent-skip mutations restore a blind spot by dropping a report and skipping the record; each is caught by exactly the fixture that owns that shape, which is what the per-shape cases are for.
+`silent-skip-dangling-symlink` and `launder-symlinked-record` each break only their own case because the two symlink shapes are branched apart rather than sharing one guard - dropping the dangling report leaves the record caught by the live-symlink branch, so the line that appears would name the wrong fact, which is why that case pins the reason text and not merely the presence of a line.
+`append-onto-unterminated-record` removes the only guard standing between a truncated record and an append that corrupts the preceding key while leaving the record a candidate forever.
 Idempotence and the receipt are mutated in both directions, because each has a way to fail that the other cannot see.
 `double-write-already-bound-record` is expected to break every case holding a correctly bound record, not the idempotence case alone: dropping the skip sends each of them back through observation.
 `reintroduce-one-shot-refusal` is expected to break only the two cases that run `--apply` twice against a fully migrated home; `interrupted_run_resumes` still holds an unbound record, so that form of the guard never fires there and listing it would be an expectation the experiment could satisfy only by accident - the same rule the blanket-bypass control follows for `unobservable_backend_refused`.
-`run-without-writing-receipt` is expected to break the three receipt cases and no others, since no metadata behaviour changes.
+`run-without-writing-receipt` is expected to break every case that reads a receipt, which now includes `unreachable_backend_is_unknown_not_absent`: that case asserts the durable receipt carries the unknown/absent distinction, not only stdout.
+`continue-past-failed-receipt-write` lets the run survive the failure it just reported, and only the mid-run case can see it, since no other case loses a writable receipt.
+`report-healthy-record-as-disposition` is the false-positive direction of the accounting rule: it reports a record that was in fact processed normally as needing a human decision, and is caught by the two cases that assert a healthy record is accounted for without being a disposition.
 
 Existing guard suites were re-run unchanged: `fm-teardown-endpoint-safety` (5 ok), `fm-teardown-evidence` (6 ok), `fm-backend-herdr` (159 ok).
 
