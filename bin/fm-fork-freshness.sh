@@ -338,7 +338,10 @@ BRIEF
 backlog_add() {
   local id=$1 title=$2 note=$3
   command -v tasks-axi >/dev/null 2>&1 || return 1
-  ( cd "$FM_HOME" && tasks-axi add "$title" --id "$id" --body "$note" ) >/dev/null 2>&1
+  # `add <id> "<title>" [flags]`: the id is positional. There is no --id flag,
+  # and tasks-axi rejects an unknown flag outright, so the wrong shape costs the
+  # backlog item on every real behind reading.
+  ( cd "$FM_HOME" && tasks-axi add "$id" "$title" --body "$note" ) >/dev/null 2>&1
 }
 
 bridge_ask() {
