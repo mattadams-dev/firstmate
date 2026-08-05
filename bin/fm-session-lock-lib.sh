@@ -52,7 +52,14 @@ FM_HARNESS_IS_CLAUDE=0
 fm_harness_process_matches() {  # <comm> <args>
   local comm=$1 args=$2 base argv0 name
   FM_HARNESS_IS_CLAUDE=0
-  base=$(basename -- "$comm")
+  # Parameter expansion rather than a basename fork, and not for tidiness: this
+  # predicate is a universal refusal inside bin/fm-safe-kill.sh, evaluated after
+  # the decision to stop a process but before the signal is delivered. Every
+  # subprocess spawned on that path is time the target keeps running, and the
+  # window is observable - tests/fm-pr-check-security.test.sh catches a legacy
+  # check executing inside it. ${comm##*/} is exactly basename for the paths ps
+  # reports here, so the matching semantics above are unchanged.
+  base=${comm##*/}
   if printf '%s' "$base" | grep -qE "$FM_HARNESS_RE"; then
     case "$base" in *claude*) FM_HARNESS_IS_CLAUDE=1 ;; esac
     return 0
