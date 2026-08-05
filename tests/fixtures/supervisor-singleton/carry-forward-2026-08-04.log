@@ -130,3 +130,72 @@ comes first. Do not treat upstream as authoritative merely because it is
 upstream, nor this branch because it is newer. Do not drop the lab reproduction
 fixture beside this file - it is the evidence the cause was proven rather than
 inferred, and it survives any rebase.
+
+===============================================================================
+CAPTAIN'S AMENDMENT TO PART 4, received after the rebase: ONE reset owner
+===============================================================================
+"Either compose your wedge-escalation reset into upstream's existing turn-end
+recovery progression, or prove they are genuinely different seams and document
+the boundary; two resetters coexisting is not an acceptable outcome, and the
+both-directions mutation proof applies to the composed result rather than to
+your half."
+
+The classification called these COMPLEMENTARY. That answer is not sufficient as
+it was written: it asserted the separation rather than proving it, and it left
+two reset mechanisms live on one seam with nothing enforcing that they stay out
+of each other's state.
+
+THE ANSWER, argued from the property rather than convenience: they are genuinely
+different seams, and composing them into one function would make things worse.
+
+  upstream  fm_failure_episode_reset
+            subject  : the HOME's supervision chain - is anything supervising?
+            state    : .turnend-claude-blocks, .claude-autoarm-failure-notified,
+                       .claude-autoarm-failure-alarmed
+            evidence : fm_watcher_healthy - a verified live identity-matched
+                       watcher with a fresh beacon
+            consumers: the Claude Stop hook and the turn-end guard
+
+  this lane health_evidence_reset
+            subject  : ONE crewmate's pane - is that worker wedged?
+            state    : .wedge-escalations-<key>, .stale-since-<key>
+            evidence : that pane's own rendered output, process-tree CPU, live
+                       descendants
+            consumers: the watcher's stale triage
+
+Neither signal can answer the other's question. A healthy watcher says nothing
+about whether crewmate X is stuck, and crewmate X computing says nothing about
+whether the home is supervised at all. A single function spanning both would be
+a dispatcher with two disjoint branches - two mechanisms wearing one name, which
+HIDES the boundary instead of making it checkable. That is the failure mode the
+one-owner rule exists to prevent, arrived at from the other side.
+
+WHAT ONE-OWNER THEREFORE MEANS HERE, and what the rebuild must deliver:
+  1. One owner of the RULE, not two rules. The seam gets a single documented
+     reset principle - alarm state is cleared only by positive evidence about
+     the alarm's own subject, never by elapsed time - with two named
+     applications and one explicitly stated boundary between them.
+     Upstream already obeys that rule: fm_failure_episode_reset fires on
+     fm_watcher_healthy and never on a timer. So this is a rule the seam already
+     has, stated once and applied twice, not a rule this lane is inventing.
+  2. The boundary is PROVEN, not documented only. A test drives each reset with
+     the other's state present and asserts it is untouched:
+       - firing the failure-episode reset with a wedge ratchet present leaves
+         .wedge-escalations-<key> and .stale-since-<key> exactly as they were
+       - firing the health reset with a failure episode present leaves
+         .turnend-claude-blocks and both .claude-autoarm-failure-* records
+         exactly as they were
+     That converts "genuinely different seams" from a claim into a fixture.
+  3. The mutation proof covers the COMPOSED result, four mutants, not two:
+       - time alone resets                  (pardons a real slow wedge)
+       - nothing resets                     (restores the ratchet)
+       - the health reset also clears the failure episode   (crosses up)
+       - the failure-episode reset also clears the ratchet  (crosses down)
+     Each must break exactly its own test. The last two are the ones that only
+     exist because the amendment was made; without them the boundary is
+     unenforced no matter how carefully it is written down.
+
+NOT YET BUILT. The rebased tree still carries Part 4 in its pre-amendment form,
+including the busy-alarm-reset defect above. The amendment governs the rebuild;
+it is recorded here so it survives this round rather than living in a
+conversation.
