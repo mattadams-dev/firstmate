@@ -103,10 +103,31 @@ SH
 # the backlog step signals the shell that invoked it and the one above that, so
 # the materialisation stops between its first artifact and its last whichever
 # way the shell laid the call out.
+#
+# The fake also holds the real CLI's argument contract - `add <id> "<title>"
+# [flags]`, unknown flag means rc=2 - because a fake that exits 0 on any shape
+# lets a call the installed tasks-axi refuses pass the whole suite, and the
+# backlog item then goes missing only in production.
 install_fake_tasks_axi() {  # <bin-dir>
   cat > "$1/tasks-axi" <<'SH'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$FM_TEST_TASKS_LOG"
+if [ "${1:-}" = add ]; then
+  shift
+  case "${1:-}" in ''|-*) echo 'error: "add takes an id first"' >&2; exit 2 ;; esac
+  shift
+  case "${1:-}" in ''|-*) echo 'error: "add takes a title"' >&2; exit 2 ;; esac
+  shift
+  while [ "$#" -gt 0 ]; do
+    case $1 in
+      --body|--body-file|--kind|--repo|--pr|--report|--priority|--blocked-by|--prefix)
+        [ "$#" -ge 2 ] || { printf 'error: "%s needs a value"\n' "$1" >&2; exit 2; }
+        shift 2 ;;
+      --start|--queue|--mint|--json) shift ;;
+      *) printf 'error: "Unknown flag: %s"\n' "$1" >&2; exit 2 ;;
+    esac
+  done
+fi
 if [ -n "${FM_TEST_TASKS_KILL:-}" ]; then
   grandparent=$(ps -o ppid= -p "$PPID" 2>/dev/null | tr -d ' ')
   kill -TERM "$PPID" 2>/dev/null || true
@@ -208,6 +229,10 @@ test_behind_creates_a_sync_task() {
     "behind > 0 only reported; it must create the sync task"
   assert_present "$dir/home/data/fm-sync-acme-widget/brief.md" \
     "the sync task carries no instructions"
+  assert_grep "add fm-sync-acme-widget Sync acme/widget from " "$dir/tasks.log" \
+    "the backlog call did not reach tasks-axi in the shape the CLI accepts"
+  assert_not_contains "$out" "MANUAL=" \
+    "a reading that says queued must have all four artifacts, not a manual hand-off"
   assert_contains "$out" "behind=1 " "the coverage line lost the behind count"
   pass "fm-fork-freshness: behind > 0 creates the sync task and refuses to exit clean"
 }
