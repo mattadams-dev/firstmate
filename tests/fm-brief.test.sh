@@ -479,7 +479,7 @@ test_secondmate_no_projects_charter() {
   expect_code 1 "$status" "--no-projects combined with a project list must fail"
 
   # --no-projects applies only to secondmate charters, never a ship/scout brief.
-  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" oops3 somerepo --no-projects >/dev/null 2>&1; status=$?
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" oops3 somerepo --mode no-mistakes --no-projects >/dev/null 2>&1; status=$?
   expect_code 1 "$status" "--no-projects on a ship brief must fail"
 
   pass "fm-brief.sh: --no-projects scaffolds a project-less charter and guards misuse"
@@ -698,9 +698,9 @@ test_commit_discipline_in_ship_and_scout() {
   write_registry "$home"
 
   for id_args in \
-    "commit-ship-nomistakes:no-registry-proj" \
-    "commit-ship-directpr:direct-proj" \
-    "commit-ship-localonly:local-proj" \
+    "commit-ship-nomistakes:no-registry-proj --mode no-mistakes" \
+    "commit-ship-directpr:direct-proj --mode direct-PR" \
+    "commit-ship-localonly:local-proj --mode local-only" \
     "commit-scout:no-registry-proj --scout"; do
     id=${id_args%%:*}
     # shellcheck disable=SC2086 # Deliberate word splitting: the fixture carries an optional --scout flag.
@@ -750,7 +750,7 @@ test_commit_discipline_destination_follows_surviving_artifact() {
   # unresolved pattern would never match.
   home=$(cd "$home" && pwd -P)
 
-  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" dest-ship no-registry-proj >/dev/null 2>&1
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" dest-ship no-registry-proj --mode no-mistakes >/dev/null 2>&1
   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" dest-scout no-registry-proj --scout >/dev/null 2>&1
   ship="$home/data/dest-ship/brief.md"
   scout="$home/data/dest-scout/brief.md"
