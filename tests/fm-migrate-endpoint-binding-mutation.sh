@@ -103,10 +103,10 @@ echo "== mutations that let an unobserved value be written =="
 # instead of from the live label. This is exactly "assertion instead of
 # observation" - the field would be filled by belief and the check would still
 # pass. It must break the case that owns that property, and only that case.
-guard_line 276 'local observed_id=${observed_label#fm-}' &&
+guard_line 262 'local observed_id=${observed_label#fm-}' &&
 mutate value-from-filename-not-label \
   label_names_other_task_refused \
-  '276s/.*/  local observed_id=$id/'
+  '262s/.*/  local observed_id=$id/'
 
 # Each remaining mutation neutralises ONE guard by replacing its condition with
 # `true`, leaving the `|| { ... }` refusal block syntactically intact. A
@@ -114,24 +114,24 @@ mutate value-from-filename-not-label \
 # red, which proves nothing about any individual guard.
 
 # M2: stop requiring the live pane to be the recorded pane.
-guard_line 299 '[ "$observed_pane" = "$pane" ]' &&
+guard_line 285 '[ "$observed_pane" = "$pane" ]' &&
 mutate skip-pane-identity-check \
   pane_mismatch_refused \
-  '299s/.*/  true || {/'
+  '285s/.*/  true || {/'
 
 # M3: stop requiring the workspace to belong to this home. The fixture gives
 # the foreign workspace a correctly-labelled tab, so only this check stands
 # between the migration and another home's endpoint.
-guard_line 248 'grep -qx -- "$workspace"' &&
+guard_line 234 'grep -qx -- "$workspace"' &&
 mutate skip-home-workspace-check \
   foreign_workspace_refused \
-  '248s/.*/  true || {/'
+  '234s/.*/  true || {/'
 
 # M4: accept a tab that holds more than one pane instead of refusing ambiguity.
-guard_line 294 '"$pane_matches" | wc -l' &&
+guard_line 280 '"$pane_matches" | wc -l' &&
 mutate accept-ambiguous-pane \
   ambiguous_pane_refused \
-  '294s/.*/  true || {/'
+  '280s/.*/  true || {/'
 
 echo
 echo "== mutations that turn a refusal shape back into a silent skip =="
@@ -141,41 +141,57 @@ echo "== mutations that turn a refusal shape back into a silent skip =="
 # the record, which is the silent-skip class this migration must never have.
 
 # M6: an empty endpoint_task_id= line stops being reported.
-guard_line 356 'empty endpoint task binding' &&
+guard_line 342 'empty endpoint task binding' &&
 mutate silent-skip-empty-binding \
   empty_binding_reported_not_skipped \
-  '356s/.*/      continue/'
+  '342s/.*/      continue/'
 
 # M7: a duplicated endpoint_task_id= line stops being reported.
-guard_line 351 'ambiguous endpoint task binding' &&
+guard_line 337 'ambiguous endpoint task binding' &&
 mutate silent-skip-duplicated-binding \
   duplicated_binding_reported_not_skipped \
-  '351s/.*/    continue/'
+  '337s/.*/    continue/'
 
 echo
-echo "== mutations on the one-shot property, in both directions =="
+echo "== mutations on idempotence and the receipt, in both directions =="
 
-# M8: neuter the guard that refuses --apply against a fully migrated home.
-# Only the refusal case can see this: every other fixture home either has an
-# unbound candidate left or carries zero provenance lines, so the guard never
-# fires there and removing it changes nothing. Observe-only mode is unaffected
-# by construction, and the resume case expects the run to proceed anyway, so
-# listing either would be an expectation this experiment could satisfy only by
-# accident.
-guard_line 189 '"$unbound_candidates" -eq 0' &&
-mutate neuter-one-shot-guard \
-  one_shot_refuses_second_apply \
-  '189s/.*/if false; then/'
+# The one-shot guard was deleted; idempotence and the receipt are what replaced
+# it, so they are what these mutations have to prove are load-bearing.
 
-# M9: reintroduce the defect this guard was corrected for - refuse whenever any
-# provenance exists, ignoring whether unbound candidates remain. That strands
-# every record an interrupted run never reached. It must break exactly the
-# resume case; a fully migrated home refuses under both conditions, so the
-# refusal case cannot see this mutation.
-guard_line 189 '"$provenance_records" -gt 0' &&
-mutate refuse-on-any-prior-work \
-  one_shot_allows_resume_after_partial_run \
-  '189s/.*/if [ "$APPLY" -eq 1 ] \&\& [ "$provenance_records" -gt 0 ]; then/'
+# M8: let a repeated run double-write. Dropping the skip on an
+# already-correctly-bound record sends it back through observation and appends a
+# SECOND binding and provenance pair - corrupting exactly what a previous run
+# recorded, which is the property the deleted guard used to stand in for.
+#
+# Reachable set is wider than the idempotence case alone because every fixture
+# holding a correctly bound record now has it rewritten - including the
+# already-migrated record in the resume case. Listing only the idempotence case
+# would be an expectation this experiment could not satisfy.
+guard_line 350 'continue' &&
+mutate double-write-already-bound-record \
+  "existing_binding_untouched interrupted_run_resumes repeated_apply_is_idempotent repeated_apply_is_not_refused" \
+  '350s/.*/    :/'
+
+# M9, the mirror. Idempotence means safe to repeat, not clever about refusing,
+# so reintroducing one-shot behaviour must fail loudly. This restores the last
+# shipped form of the guard - refuse when provenance exists and nothing unbound
+# remains - because that is the most plausible way it would come back.
+#
+# interrupted_run_resumes is deliberately NOT expected: its home still holds an
+# unbound record, so this form of the guard never fires there. The two cases
+# that do run twice against a fully migrated home are the ones that can see it.
+guard_line 139 'RECEIPTS=' &&
+mutate reintroduce-one-shot-refusal \
+  "repeated_apply_is_idempotent repeated_apply_is_not_refused" \
+  '139s@.*@RECEIPTS="$FM_HOME/data/endpoint-binding-migration-receipts.log"; if [ "$APPLY" -eq 1 ] \&\& grep -q "^endpoint_task_id_provenance=" "$STATE"/*.meta 2>/dev/null \&\& ! grep -L "^endpoint_task_id=" "$STATE"/*.meta 2>/dev/null | grep -q .; then echo "REFUSED: already migrated" >\&2; exit 1; fi@'
+
+# M10: let a run complete without recording itself. An unrecorded run is the
+# state this design exists to make impossible, so every receipt case must see
+# it - and only those, since no metadata behaviour changes.
+guard_line 164 '>> "$RECEIPTS"' &&
+mutate run-without-writing-receipt \
+  "receipt_accumulates_across_runs receipt_written_for_apply_run receipt_written_for_observe_run" \
+  '164s|.*|  :|'
 
 echo
 echo "== control: a blanket bypass should be caught broadly, not narrowly =="
@@ -188,10 +204,10 @@ echo "== control: a blanket bypass should be caught broadly, not narrowly =="
 # set: a zellij record is turned away by the earlier backend branch and never
 # reaches this line, so this mutation genuinely cannot affect it. Listing it
 # anyway would be an expectation the experiment could only satisfy by accident.
-guard_line 382 'if ! result=$(observe_herdr_binding' &&
+guard_line 368 'if ! result=$(observe_herdr_binding' &&
 mutate blanket-write-without-observation \
   "absent_endpoint_refused ambiguous_pane_refused foreign_workspace_refused label_names_other_task_refused pane_mismatch_refused" \
-  '382s|.*|  result=$(observe_herdr_binding "$id" "$meta") \|\| result=$(printf "%s\\tsource=UNOBSERVED" "$id"); if false; then|'
+  '368s|.*|  result=$(observe_herdr_binding "$id" "$meta") \|\| result=$(printf "%s\\tsource=UNOBSERVED" "$id"); if false; then|'
 
 echo
 if [ "$overall" -eq 0 ]; then
