@@ -154,8 +154,10 @@ Break-even is therefore a relation and not a constant: **the net resident remova
 The three-state table above cannot isolate the two-sentence description, because it holds no row for the tuned `AGENTS.md` with the skill directory absent.
 That pair was therefore built and read separately, claude 2.1.222.
 
-Two trees were built from the same commit, each containing `AGENTS.md` and `.agents/skills` with its `.claude/skills` symlink, identical except that one has `.agents/skills/validation-supersession` removed.
+Two trees were built from commit `b7928302`, each containing `AGENTS.md` and `.agents/skills` with its `.claude/skills` symlink, identical except that one has `.agents/skills/validation-supersession` removed.
 `claude -p` was run in each and the first `message.usage` line summed, two rounds per tree with zero spread within each.
+
+That commit is named rather than left implicit because this pair is the most load-bearing measurement here - the 87 it yields replaced two figures that turned out to have been inferred rather than read - and it was checked to be an ancestor of the pipeline head, so the anchor survives in final history.
 
 | Tree | Birth weight |
 | --- | --- |
