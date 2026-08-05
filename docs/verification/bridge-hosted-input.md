@@ -85,6 +85,48 @@ Verbatim, from the same run:
 The loss is silent: no warning, no draft restored, nothing in the panel.
 The exposed window is exactly "typed into the annotation card and not yet queued".
 
+## 2b. The matrix, one session, one verdict per state
+
+Sections 1 and 2 were measured on a probe artifact.
+This run repeats the load-bearing states against **the board this renderer actually produces**, in a single hosted session, and records a verdict for each rather than inheriting any of them from the others.
+
+Setup: a seeded ledger with ask `O1` (`retire the legacy poll`, project orca) and task ask `t-pr`.
+Mid-run, two records land - a pinned critical in project `fleet` and an ask in a new project `alpha` - so the redraw moves `O1` down the page and renumbers nothing.
+
+| # | state | verdict |
+|---|---|---|
+| 1 | a ruling **queued** into the conversation panel, then the board is redrawn | **present after the redraw, and delivered on `lavish-axi poll`** |
+| 2 | a ruling **typed into the annotation box and not queued**, then the board is redrawn | **gone, silently** |
+| 3 | the delivered reference, resolved against the **redrawn** board | **lands on the ask it was placed on** |
+
+State 1 delivery, verbatim from `lavish-axi poll` after the redraw:
+
+```
+prompts[1]{uid,prompt,selector,tag,text}:
+  "1",RULING-O1-RETIRE-IT,"div#item-o-one > div:nth-of-type(3) > span:nth-of-type(2)",span,"O1: A: retire it"
+```
+
+State 3, that exact selector evaluated in the browser against the redrawn board:
+
+```
+{"resolves":true,"text":"O1: A: retire it","lands_on_item":"item-o-one",
+ "card_title":"retire the legacy poll","asks_on_board":["F1","O1","-","A1"]}
+```
+
+The reference holds because it is rooted at the per-item anchor `id="item-<id>"`, which the fold assigns from the ledger key and re-emits identically on every render, so sibling shifts above and around the ask cannot move it.
+What identifies the ruling therefore is the anchor plus the option's own text - and the option text carries the ask's visible ref (`O1: A: retire it`) for exactly this reason.
+The payload's `uid` is a per-load counter and does **not** survive a redraw; nothing should be keyed to it.
+
+Bounding sub-case, same session: with the ask then **resolved** and the board redrawn, the board withdraws its answer options by design, so a selector that pointed at an *option* stops resolving while the ask anchor itself is still there:
+
+```
+{"option_selector_resolves":false,"ask_anchor_still_present":true,
+ "card_title":"retire the legacy poll"}
+```
+
+So the promise is at ask granularity, not element granularity, and the delivered `text` is what preserves which answer was chosen when the row underneath has moved on.
+That is what the board's footer claims, and no more.
+
 ## 3. An identical-bytes rewrite reloads too
 
 The reload keys on the write, not on a content diff.
