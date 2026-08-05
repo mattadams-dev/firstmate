@@ -8,7 +8,7 @@ Run 2026-08-01 against the primary home.
 Unlike its sibling records, this one embeds captured live tool output, whose paths and identifiers are the evidence itself and are never edited; the siblings' zero-absolute-path form binds prose only.
 That divergence is declared here so a later path-counting audit reads it as deliberate rather than as a defect, which is what an undeclared divergence is indistinguishable from.
 
-`bin/fm-migrate-endpoint-binding.sh` and its two test files ship; see "Retirement" below for what "one-shot" is carried by now that it is not carried by deletion.
+`bin/fm-migrate-endpoint-binding.sh` and its two test files ship, and the script is safe to run again; see "Why there is no one-shot guard" below.
 This page is the durable evidence that the repair happened and that its guards were load-bearing when it ran.
 
 ## What the field guards, and what it does not
@@ -160,7 +160,7 @@ The refusal half matters as much as the acceptance half: without it, acceptance 
 
 ## Guard-class evidence: mutation testing, both directions
 
-The output below is the suite and mutation harness as they stand with all four refusal shapes reporting and the one-shot guard in place.
+The output below is the suite and mutation harness as they stand with all four refusal shapes reporting, no one-shot guard, and idempotence and the receipt carrying its job.
 The twelve-case output captured against the script at the moment of the applied run is superseded by it; the run's own captured output above is unchanged.
 
 Behavior suite, driven through a fake herdr CLI serving canned inventory by content:
@@ -174,21 +174,24 @@ ok - duplicated_binding_reported_not_skipped
 ok - empty_binding_reported_not_skipped
 ok - existing_binding_untouched
 ok - foreign_workspace_refused
+ok - interrupted_run_resumes
 ok - label_names_other_task_refused
 ok - mismatched_binding_reported_not_skipped
 ok - observable_binding_migrates
 ok - observe_reports_unbound_record_on_partial_home
-ok - one_shot_allows_observe_on_migrated_home
-ok - one_shot_allows_resume_after_partial_run
-ok - one_shot_refuses_second_apply
 ok - pane_mismatch_refused
+ok - receipt_accumulates_across_runs
+ok - receipt_written_for_apply_run
+ok - receipt_written_for_observe_run
+ok - repeated_apply_is_idempotent
+ok - repeated_apply_is_not_refused
 ok - teardown_validator_accepts_migrated_record
 ok - teardown_validator_rejects_unmigrated_record
 ok - tmux_reported_not_silent
 ok - unobservable_backend_refused
 ok - valid_binding_is_not_a_disposition
 
-all 20 cases passed
+all 23 cases passed
 ```
 
 The empty-binding and duplicated-binding fixtures are synthetic on purpose, because zero real specimens existed in the migrated home.
@@ -201,7 +204,7 @@ Each mutation neutralises one guard by replacing its condition with `true`, leav
 ```
 $ bash tests/fm-migrate-endpoint-binding-mutation.sh
 == baseline: unmutated script ==
-BASELINE green (20)
+BASELINE green (23)
 
 == mutations that let an unobserved value be written ==
 CAUGHT   value-from-filename-not-label      failing: label_names_other_task_refused
@@ -213,9 +216,10 @@ CAUGHT   accept-ambiguous-pane              failing: ambiguous_pane_refused
 CAUGHT   silent-skip-empty-binding          failing: empty_binding_reported_not_skipped
 CAUGHT   silent-skip-duplicated-binding     failing: duplicated_binding_reported_not_skipped
 
-== mutations on the one-shot property, in both directions ==
-CAUGHT   neuter-one-shot-guard              failing: one_shot_refuses_second_apply
-CAUGHT   refuse-on-any-prior-work           failing: one_shot_allows_resume_after_partial_run
+== mutations on idempotence and the receipt, in both directions ==
+CAUGHT   double-write-already-bound-record  failing: existing_binding_untouched interrupted_run_resumes repeated_apply_is_idempotent repeated_apply_is_not_refused
+CAUGHT   reintroduce-one-shot-refusal       failing: repeated_apply_is_idempotent repeated_apply_is_not_refused
+CAUGHT   run-without-writing-receipt        failing: receipt_accumulates_across_runs receipt_written_for_apply_run receipt_written_for_observe_run
 
 == control: a blanket bypass should be caught broadly, not narrowly ==
 CAUGHT   blanket-write-without-observation  failing: absent_endpoint_refused ambiguous_pane_refused foreign_workspace_refused label_names_other_task_refused pane_mismatch_refused
@@ -229,60 +233,54 @@ Each mutation that would let an unobserved value be written is caught by exactly
 
 The `value-from-filename-not-label` mutation is the one that matters most: it is precisely "assertion instead of observation", and it is caught by exactly one case.
 The two silent-skip mutations restore the original blind spot by dropping a report and skipping the record, and each is caught by exactly the fixture that owns that refusal shape.
-The one-shot guard is mutated in both directions, because it has two ways to be wrong.
-`neuter-one-shot-guard` removes the refusal entirely and is expected to break only `one_shot_refuses_second_apply`: every other fixture home either still has an unbound candidate or carries zero provenance lines, so the guard never fires there and removing it changes nothing.
-`refuse-on-any-prior-work` restores the round-1 condition that gated on prior work alone, and is expected to break only `one_shot_allows_resume_after_partial_run`, since a fully migrated home refuses under both conditions.
-Listing `one_shot_allows_observe_on_migrated_home` for either would be an expectation the experiment could satisfy only by accident, which is the same rule the blanket-bypass control already follows for `unobservable_backend_refused`.
-
-`one_shot_allows_observe_on_migrated_home` is built on the fully migrated home rather than the partially migrated one, because that is the only state where `--apply` is actually refused.
-On a home where the write is permitted anyway, "observe is allowed" and "the write is refused" produce the same reading, so the case would prove nothing about the guard.
-Checked by making the guard drop its `--apply` term so it refuses observe mode as well: that breaks exactly this case, and would not have broken it under the partially migrated fixture.
-`observe_reports_unbound_record_on_partial_home` keeps the separate coverage that observe mode still reports a record an interrupted run never reached.
-The blanket-bypass control breaks five cases at once, which is the correct shape for a change that removes observation entirely rather than one specific check.
+Idempotence and the receipt are mutated in both directions, because each has a way to fail that the other cannot see.
+`double-write-already-bound-record` is expected to break every case holding a correctly bound record, not the idempotence case alone: dropping the skip sends each of them back through observation.
+`reintroduce-one-shot-refusal` is expected to break only the two cases that run `--apply` twice against a fully migrated home; `interrupted_run_resumes` still holds an unbound record, so that form of the guard never fires there and listing it would be an expectation the experiment could satisfy only by accident - the same rule the blanket-bypass control follows for `unobservable_backend_refused`.
+`run-without-writing-receipt` is expected to break the three receipt cases and no others, since no metadata behaviour changes.
 
 Existing guard suites were re-run unchanged: `fm-teardown-endpoint-safety` (5 ok), `fm-teardown-evidence` (6 ok), `fm-backend-herdr` (159 ok).
 
-## Retirement
+## Why there is no one-shot guard
 
-The script and its tests ship.
-Retired here means the script cannot be run casually or by accident, not that it was erased.
-It is retained deliberately as the documented recovery procedure for a future legacy lane, and its tests are retained with it because they are what keeps the next re-runner's guards honest.
+The script and its tests ship, and there is no refusal to run twice.
 
-The one-shot property is carried by a guard rather than by absence.
-`--apply` refuses against a home that is already fully migrated: some `state/*.meta` carries an `endpoint_task_id_provenance=` line AND no unbound candidate remains, where an unbound candidate is a record with a `window=` line and zero `endpoint_task_id=` lines.
-It reports the provenance count on refusal, and observe-only mode stays allowed on such a home.
+Earlier versions carried a one-shot guard: `--apply` refused against a home judged already migrated.
+Three consecutive reviews found a defect in it, each one in the definition of which records it counted.
+The first gated on prior work alone, which stranded every record an interrupted run had not reached and left the hand-write as the only remedy - the exact action the governing rule forbids.
+The second gated on remaining work but counted any unbound record, including legacy tmux records and records on backends with no observation path, which can never be repaired; a home holding one of those never reached the refusal at all, so the guard silently did nothing there.
+The third finding was that the header's "cannot be satisfied by accident" claim was therefore false, and it was printed verbatim by `--help`.
 
-The second half of that condition was added before landing, and the reason is worth recording.
-The first version of this guard gated on prior work alone: any provenance present meant refuse.
-That made a partially completed run unresumable - a run interrupted after writing some records would leave the rest stranded permanently, with their teardown blocked and the hand-write as the only remaining remedy, which is the exact action the governing rule forbids.
-Gating on remaining work instead refuses the casual re-run the rider targets while letting an interrupted run finish the home it started.
+The guard was deleted rather than corrected a fourth time.
+Every argument about which records count as candidates dissolves with it, because that question only existed to feed the guard.
+With no guard, there is no candidate definition to be wrong about.
 
-Resuming is safe because the per-record filter writes only to a record with zero binding lines.
-A resumed run physically cannot rewrite, overwrite, or re-stamp an already-migrated record, so the anti-overwrite guarantee sits in the per-record filter and the home-level guard only has to stop a re-run with nothing left to do.
-That guard cannot drift, because the proof the backfill already ran is the repaired records themselves rather than a marker kept alongside them.
-A marker can be deleted, lost in a home copy, or never written after a partial run; the provenance lines cannot go missing without the repair itself going missing.
+### What replaced it
 
-### What the guard holds, and what it does not
+**Idempotence, proven rather than asserted.**
+The protection the guard was reaching for is that a repeated run must not corrupt what a previous run wrote.
+That is now structural: the only shape this script writes is a record with zero `endpoint_task_id=` lines, so a migrated record - which carries exactly one correct binding - is a non-candidate on every later run and is skipped untouched.
+An operation safe to repeat needs no memory of whether it already ran, and removing the consequence beats getting the trigger right.
+The same property means an interrupted run simply resumes: records already written are skipped, records never reached are repaired, and no state is stranded.
 
-It holds on a home where every unbound record is one this migration could actually repair: once they are all repaired, `--apply` refuses.
-That is the casual-re-run case, and it is the one the retirement rider targets.
+**The receipt is the record.**
+Every run appends to `data/endpoint-binding-migration-receipts.log` in the target home: when it ran, against which home, in which mode, with which tool versions, the per-record outcome, and the totals.
+Observe-only runs are recorded too, because an observe run is still a run that happened.
+The receipt is written as the run proceeds rather than summarised at the end, so a run that dies halfway leaves a start line with no end line and is distinguishable from a completed one instead of looking identical to it.
+A run that cannot write its receipt refuses to run, because an unrecorded run is the state this design exists to make impossible.
 
-It does not hold on a home containing any record that is unbound but permanently unrepairable by this script.
-A legacy tmux record carries a `window=` line and no `endpoint_task_id=` line for good, because the loop only ever reports it `NOT-REQUIRED`, and a record on a backend with no observation path is only ever reported as a disposition.
-Either kind keeps the unbound count above zero forever, so `--apply` never refuses on that home.
-This needs no tampering and no file edit; it is an ordinary home state, which is why the guard must not be described as one that cannot be satisfied by accident.
+The receipt is a record, never an authority.
+Nothing in the script reads it back to decide whether to run or what to write, so it cannot become the inferred state the deleted guard kept getting wrong.
+This is the difference between recording an event durably at its source and building an instrument that has to tell apart two worlds it cannot see.
 
-The anti-assertion guarantee does not rest on this guard.
-The per-record filter is what enforces it, unconditionally: the script only ever appends a binding to a record that has none, and only from a live observation of that record's own endpoint.
-No path through the script writes an unobserved or asserted value, on any home, in any of the states above.
-That is the stronger of the two protections, and the gap described here does not touch it.
+**The anti-assertion guarantee is unchanged and was never the guard's job.**
+The per-record filter enforces it unconditionally: the script only ever appends a binding to a record that has none, and only from a live observation of that record's own endpoint.
+No path through the script writes an unobserved or asserted value, on any home, in any state.
 
-The gap is known, not overlooked.
-It was found in review before this landed, and its real-world impact was checked and is currently zero: the recorded run below migrated every candidate in the primary home and reported `not_required=0`, so that home has no unbound candidate left.
-The redesign - narrowing the unbound count to records this migration could actually repair - is escalated rather than patched, because this was the third review finding on the same boundary.
-The design question is written up in this task's private report and PR evidence, so a later reader can tell an open question from a missed one.
+### Guard-class coverage for the replacement
 
-It blocks the hazard rather than the looking.
-The failure mode this rider guards against is a tool that fills a safety field on demand, so the guard gates the write; observing and reporting an already-migrated home stays available, which is what a future investigator actually needs.
+The mutation experiment above covers the new properties in all three directions the ruling required.
+`double-write-already-bound-record` sends an already-bound record back through observation so a repeated run appends a second binding and provenance pair; it is caught by the idempotence case and by every other fixture holding a bound record.
+`reintroduce-one-shot-refusal` restores the last shipped form of the guard, and is caught by exactly the two cases that run twice against a fully migrated home - idempotence means safe to repeat, not clever about refusing.
+`run-without-writing-receipt` lets a run complete without recording itself and is caught by exactly the three receipt cases.
 
 The permanent guarantee - that teardown refuses an unbound or mismatched record - is owned by `tests/fm-teardown-endpoint-safety.test.sh`, which this change left untouched and green.
