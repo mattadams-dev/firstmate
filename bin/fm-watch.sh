@@ -323,16 +323,29 @@ health_evidence_reset() {  # <window> <rendered-hash> <since-file> <escalation-c
   return 0
 }
 
-wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-file> [rendered-hash]
-  local win=$1 since_file=$2 label=$3 escalation_file=$4 rendered=${5:-} since age n reason
-  # Health first, but only where liveness is the question being asked. The
-  # rendered hash is passed by the STALE paths, whose alarm means "possibly
-  # wedged"; evidence that anything moved is the right counterpart there.
-  # The busy-no-completed-turn path deliberately passes nothing: its alarm is
-  # about a turn never finishing, and a pane that is producing output while
-  # completing no turn is the very shape it exists to catch. Its counterpart is
-  # a completed turn, which already clears this timer through busy_turn_over_age.
-  if health_evidence_reset "$win" "$rendered" "$since_file" "$escalation_file"; then
+wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-file> <alarm-subject> [rendered-hash]
+  local win=$1 since_file=$2 label=$3 escalation_file=$4 subject=${5:-} rendered=${6:-} since age n reason
+  # Which alarm is this, and is evidence-of-movement its counterpart?
+  #
+  #   liveness        the STALE alarm - "this pane may be wedged". Evidence that
+  #                   anything moved is exactly its counterpart, so the reset
+  #                   applies.
+  #   turn-completion the BUSY alarm - "a turn has not finished in far too long".
+  #                   A pane that is producing output while completing no turn is
+  #                   the very shape this alarm exists to catch, so movement is
+  #                   NOT its counterpart. Its counterpart is a completed turn,
+  #                   which already clears this timer through busy_turn_over_age.
+  #
+  # The subject is stated explicitly and anything else fails closed to no reset.
+  # It used to be inferred from whether a rendered hash was passed, which was
+  # wrong in a way that could not be seen: withholding the hash blanks only that
+  # ONE component, while fm_health_sample still reads process-tree CPU and live
+  # descendants - and a busy pane's CPU advances between polls by definition. So
+  # the busy alarm reset on essentially every poll and could never escalate. An
+  # alarm that can never sound is the mirror image of a guard that refuses
+  # everything, and it fails silently.
+  if [ "$subject" = liveness ] \
+    && health_evidence_reset "$win" "$rendered" "$since_file" "$escalation_file"; then
     date +%s > "$since_file"
     return 0
   fi
@@ -1139,7 +1152,7 @@ EOF
             # wedge timer is running for it) - keep treating it that way
             # without re-reading the crew state every poll, and without
             # letting the still-captain-relevant log line re-surface it.
-            wedge_timer_check "$w" "$ssf" "stale (overridden terminal status)" "$ewf" "$h"
+            wedge_timer_check "$w" "$ssf" "stale (overridden terminal status)" "$ewf" liveness "$h"
           fi
           # else: already surfaced as genuinely terminal on a prior poll of
           # this same hash - nothing left to do (matches the original,
@@ -1182,12 +1195,12 @@ EOF
                 paused)  handle_paused_stale "$w" "$task" "$h" ;;
                 working) clear_pause_state "$w"
                          printf '%s' "$h" > "$sf"
-                         wedge_timer_check "$w" "$ssf" "non-terminal stale (provably working after a declared pause)" "$ewf" "$h"
+                         wedge_timer_check "$w" "$ssf" "non-terminal stale (provably working after a declared pause)" "$ewf" liveness "$h"
                          triage_log "absorbed non-terminal stale (provably working): $w" ;;
                 *)       handle_paused_stale "$w" "$task" "$h" ;;
               esac
             else
-              wedge_timer_check "$w" "$ssf" "non-terminal stale" "$ewf" "$h"
+              wedge_timer_check "$w" "$ssf" "non-terminal stale" "$ewf" liveness "$h"
             fi
           fi
         fi
@@ -1196,7 +1209,7 @@ EOF
         # unless a genuinely busy pane has gone too long with no completed turn -
         # then route it through the same wedge timer instead of erasing it.
         if [ "$busy_now" -eq 0 ] && busy_turn_over_age "$task"; then
-          wedge_timer_check "$w" "$ssf" "busy (no completed turn)" "$ewf"
+          wedge_timer_check "$w" "$ssf" "busy (no completed turn)" "$ewf" turn-completion
         else
           rm -f "$ssf" "$ewf"
         fi
@@ -1208,7 +1221,7 @@ EOF
       printf '%s' "$h" > "$hf"
       echo 0 > "$cf"
       if [ "$busy_now" -eq 0 ] && busy_turn_over_age "$task"; then
-        wedge_timer_check "$w" "$ssf" "busy (no completed turn)" "$ewf"
+        wedge_timer_check "$w" "$ssf" "busy (no completed turn)" "$ewf" turn-completion
       else
         rm -f "$ssf" "$ewf"
       fi

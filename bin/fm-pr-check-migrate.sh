@@ -311,11 +311,19 @@ else
     # Authority for this stop comes from the watcher lock, checked again inside
     # the helper against the pid it names. Nothing here selects a target by
     # matching process text.
-    if ! "$SCRIPT_DIR/fm-safe-kill.sh" --pid "$pid" --role watcher --signal TERM --wait 5 \
-      --reason "pause the watcher for a PR-check migration" >/dev/null; then
-      echo "PR_CHECK_MIGRATION: watcher could not be paused; review state/.watch.lock before rearming polls" >&2
-      exit 1
-    fi
+    migrate_stop_rc=0
+    "$SCRIPT_DIR/fm-safe-kill.sh" --pid "$pid" --role watcher --signal TERM --wait 5 \
+      --reason "pause the watcher for a PR-check migration" >/dev/null || migrate_stop_rc=$?
+    # 6 is "already gone before the signal". The one-shot watcher can exit
+    # between the liveness check above and the helper's own, and an exclusion
+    # that is already satisfied is not a failure to acquire it.
+    case "$migrate_stop_rc" in
+      0|6) ;;
+      *)
+        echo "PR_CHECK_MIGRATION: watcher could not be paused; review state/.watch.lock before rearming polls" >&2
+        exit 1
+        ;;
+    esac
     stopped_watcher=1
   fi
 

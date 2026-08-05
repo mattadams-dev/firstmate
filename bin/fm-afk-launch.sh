@@ -603,7 +603,7 @@ fm_afk_launch_stop() {
       --reason "away mode is ending; flush buffered escalations before exit" >/dev/null 2>&1 \
       || fm_afk_launch_stop_rc=$?
     case "$fm_afk_launch_stop_rc" in
-      0|5) ;;
+      0|5|6) ;;   # stopped, still retiring, or already gone - none is an unauthorized stop
       *)
         fm_afk_launch_log "failed to signal away-mode daemon pid=$pid"
         result=1

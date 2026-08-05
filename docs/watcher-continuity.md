@@ -60,25 +60,50 @@ The 2026-08-04 arms are consistent with that inventory: `state/.claude-autoarm-e
 A forked session does not hold `state/.lock` - the pre-fork session still does - so its hook is inert by design, and the arms came from the manual and adapter paths instead.
 That the auto-arm refused is correct behavior, not the defect.
 
-## Wedge alarms count back down
+## One alarm-reset rule, two applications
+
+This seam raises two alarms, and they share one rule:
+
+> Alarm state is cleared only by positive evidence about that alarm's own subject, and never by elapsed time.
+
+Elapsed time is forbidden because a time-based amnesty pardons precisely the slow failure an alarm exists to catch, and does it silently.
+Unknown clears nothing and accelerates nothing.
+
+The rule is stated once, in `bin/fm-wake-lib.sh` above `fm_failure_episode_reset`, and has exactly two applications:
+
+| | subject | state cleared | evidence |
+| --- | --- | --- | --- |
+| `fm_failure_episode_reset` | the home's supervision chain - is anything supervising at all? | `.turnend-claude-blocks`, `.claude-autoarm-failure-notified`, `.claude-autoarm-failure-alarmed` | `fm_watcher_healthy`: a verified live identity-matched watcher with a fresh beacon |
+| `health_evidence_reset` | one crewmate's pane - is that worker wedged? | `.wedge-escalations-<key>`, `.stale-since-<key>` | that pane's own rendered output, process-tree CPU, or live descendants, compared across two samples |
+
+They are deliberately two functions rather than one.
+A single reset spanning both would dispatch on subject into branches sharing no evidence and no state - two mechanisms wearing one name, which hides the boundary instead of making it checkable.
+Neither signal can answer the other's question: a healthy watcher is no evidence that a given crewmate is unstuck, and a computing crewmate is no evidence that the home is supervised.
+
+A beacon *freshness* requirement is not a time-based amnesty.
+Requiring recent positive evidence is the opposite of pardoning elapsed silence, and the two must not be confused when reading `fm_watcher_healthy` as an evidence source.
+
+The boundary is a fixture, not a comment: `tests/fm-health-evidence.test.sh` drives each reset with the other's state present and asserts it survives.
+
+### Why the pane alarm needed a reset at all
 
 A wedge escalation used to ratchet 1 -> 2 -> 3 -> 4 with nothing counting it back.
-Past the demand-deep-inspection threshold every wake insists the lane must not be waved through on a cheap read, which is right in isolation but had no counterpart: proven health never cleared it.
-A test-heavy lane is static for minutes at a time in the ordinary course of working, so it reached the threshold just by doing its job and then stayed under deep inspection permanently.
+Past the demand-deep-inspection threshold every wake insists the lane must not be waved through on a cheap read, which is right in isolation but had no counterpart.
+A test-heavy lane is static for minutes at a time in the ordinary course of working, so it reached the threshold just by doing its job and stayed there.
 Measured on the live fleet: four deep inspections of one healthy lane inside twenty minutes, all four confirming health, a fifth already queued.
 
-Evidence of health now resets the alarm, and `bin/fm-health-evidence-lib.sh` is the single owner of what counts as evidence.
-Three signals, each seeing through a blind spot of the others: rendered pane output changing, the pane process tree consuming CPU, and live descendants under its foreground command.
-Any one advancing between two samples is a healthy worker; frozen on all three is what a wedge looks like.
-The reset clears both the escalation count and the wedge timer, and logs the transition with the count it cleared, so the alarm history stays reconstructable.
+`bin/fm-health-evidence-lib.sh` owns what counts as evidence for that alarm.
+Three signals, each seeing through a blind spot of the others; any one advancing between two samples is a healthy worker, and frozen on all three is what a wedge looks like.
+An unreadable component is recorded as `?` rather than a number, so a comparison can tell "did not move" from "could not be seen".
+The reset clears both the escalation count and the wedge timer and logs the transition with the count it cleared.
 
-Elapsed time is never a signal, and must not become one.
-A time-based amnesty would pardon exactly the slow wedge the alarm exists to catch, silently.
-An unreadable sample is `unknown`, which neither resets the alarm nor accelerates it.
+Which alarm a `wedge_timer_check` call belongs to is stated explicitly as `liveness` or `turn-completion`, and anything else fails closed to no reset.
+It is not inferred from whether a rendered hash was supplied.
+That inference was wrong in a way that could not be seen: withholding the hash blanks only that one component while process-tree CPU and live descendants are still sampled, and a busy pane's CPU advances between polls by definition, so the busy alarm reset on essentially every poll and could never escalate.
+An alarm that can never sound is the mirror image of a guard that refuses everything.
 
-This is deliberately a different question from busy state, and does not cross that boundary: `bin/fm-busy-lib.sh` still owns the semantic turn lifecycle and still excludes CPU and child processes as state signals.
+This is a different question from busy state, and does not cross that boundary: `bin/fm-busy-lib.sh` still owns the semantic turn lifecycle and still excludes CPU and child processes as state signals.
 Busy state answers whether a turn is in progress; this answers whether anything moved.
-A lane can be outside a model turn and still be genuinely computing, which is the case that breaks a pane read.
 
 ## Ownership
 

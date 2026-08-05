@@ -25,6 +25,70 @@ compare() {  # <prev> <cur>
   fm_health_compare "$1" "$2" || CMP_RC=$?
 }
 
+
+# --- drivers -----------------------------------------------------------------
+#
+# Both drivers substitute exactly ONE thing: fm_health_target_pid, the backend
+# call that resolves a pane to a process. Everything downstream of it runs for
+# real - the /proc reads, the tree walk, the sample comparison - against a live
+# process whose CPU genuinely advances. That is the difference between this and
+# the version the review found vacuous, where a fake backend made the evidence
+# unreadable and every assertion passed for a reason unrelated to its subject.
+BURNER_PID=
+start_cpu_burner() {
+  bash -c 'while :; do :; done' >/dev/null 2>&1 &
+  BURNER_PID=$!
+}
+stop_cpu_burner() {
+  [ -n "$BURNER_PID" ] || return 0
+  kill "$BURNER_PID" 2>/dev/null || true
+  wait "$BURNER_PID" 2>/dev/null || true
+  BURNER_PID=
+}
+
+# run_reset_driver <dir> <state> <win> <key> <rendered>
+run_reset_driver() {
+  local dir=$1 state=$2 win=$3 key=$4 rendered=$5
+  cat > "$dir/reset-driver.sh" <<DRIVER
+#!/usr/bin/env bash
+set -u
+STATE="$state"
+. "$ROOT/bin/fm-health-evidence-lib.sh"
+window_backend() { printf 'none\n'; }
+fm_health_target_pid() { printf '%s\n' "\$FM_TEST_PANE_PID"; }
+triage_log() { printf '%s\n' "\$*" >> "$state/.watch-triage.log"; }
+$(sed -n '/^health_evidence_reset()/,/^}/p' "$ROOT/bin/fm-watch.sh")
+health_evidence_reset "$win" "\$1" "$state/.stale-since-$key" "$state/.wedge-escalations-$key"
+printf 'rc=%s\n' "\$?"
+DRIVER
+  chmod +x "$dir/reset-driver.sh"
+  FM_TEST_PANE_PID="${BURNER_PID:-$$}" "$dir/reset-driver.sh" "$rendered"
+}
+
+# run_timer_driver <dir> <state> <win> <key> <subject> <rendered>
+run_timer_driver() {
+  local dir=$1 state=$2 win=$3 key=$4 subject=$5 rendered=$6
+  cat > "$dir/timer-driver.sh" <<DRIVER
+#!/usr/bin/env bash
+set -u
+STATE="$state"
+STALE_ESCALATE_SECS=1
+FM_WEDGE_DEMAND_INSPECT_COUNT=3
+. "$ROOT/bin/fm-health-evidence-lib.sh"
+window_backend() { printf 'none\n'; }
+fm_health_target_pid() { printf '%s\n' "\$FM_TEST_PANE_PID"; }
+triage_log() { printf '%s\n' "\$*" >> "$state/.watch-triage.log"; }
+fm_wake_append() { return 0; }
+wake() { printf 'woke: %s\n' "\$1"; }
+$(sed -n '/^health_evidence_reset()/,/^}/p' "$ROOT/bin/fm-watch.sh")
+$(sed -n '/^wedge_timer_check()/,/^}/p' "$ROOT/bin/fm-watch.sh")
+wedge_timer_check "$win" "$state/.stale-since-$key" test-label "$state/.wedge-escalations-$key" "\$1" "\$2"
+printf 'rc=%s\n' "\$?"
+DRIVER
+  chmod +x "$dir/timer-driver.sh"
+  FM_TEST_PANE_PID="${BURNER_PID:-$$}" "$dir/timer-driver.sh" "$subject" "$rendered"
+}
+
 # --- health resets: each signal on its own -----------------------------------
 #
 # ANY ONE advancing is a healthy worker, because each signal sees through a
@@ -96,42 +160,28 @@ test_ratchet_resets_and_logs_the_transition() {
   local dir state key win rc log
   dir="$TMP_ROOT/ratchet"
   state="$dir/state"
-  mkdir -p "$state" "$dir/bin"
+  mkdir -p "$state"
   win='lab:w1:p1'
   key=$(printf '%s' "$win" | tr ':/.' '___')
   printf '9\n' > "$state/.wedge-escalations-$key"
   printf '1000\n' > "$state/.stale-since-$key"
 
-  # A stand-in watcher context: only the pieces health_evidence_reset touches.
-  cat > "$dir/driver.sh" <<DRIVER
-#!/usr/bin/env bash
-set -u
-STATE="$state"
-. "$LIB"
-window_backend() { printf 'none\n'; }
-triage_log() { printf '%s\n' "\$*" >> "$state/.watch-triage.log"; }
-$(sed -n '/^health_evidence_reset()/,/^}/p' "$ROOT/bin/fm-watch.sh")
-health_evidence_reset "$win" "\$1" "$state/.stale-since-$key" "$state/.wedge-escalations-$key"
-printf 'rc=%s\n' "\$?"
-DRIVER
-  chmod +x "$dir/driver.sh"
-
   # First look: no predecessor sample, so the comparison is unknown and the
   # escalation count must survive untouched.
-  rc=$("$dir/driver.sh" hash-one | sed -n 's/^rc=//p')
+  rc=$(run_reset_driver "$dir" "$state" "$win" "$key" hash-one | sed -n 's/^rc=//p')
   [ "$rc" = 1 ] || fail "an unknown first sample reported a reset (rc=$rc)"
   [ "$(cat "$state/.wedge-escalations-$key")" = 9 ] \
     || fail "an unknown first sample cleared the escalation count"
 
   # Second look, same rendered hash and no readable process signals: still no
   # evidence, count still survives. This is the frozen case.
-  rc=$("$dir/driver.sh" hash-one | sed -n 's/^rc=//p')
+  rc=$(run_reset_driver "$dir" "$state" "$win" "$key" hash-one | sed -n 's/^rc=//p')
   [ "$rc" = 1 ] || fail "a frozen lane reported a reset (rc=$rc)"
   [ "$(cat "$state/.wedge-escalations-$key")" = 9 ] \
     || fail "a frozen lane cleared the escalation count"
 
   # Third look, rendered output advanced: proven health resets the ratchet.
-  rc=$("$dir/driver.sh" hash-two | sed -n 's/^rc=//p')
+  rc=$(run_reset_driver "$dir" "$state" "$win" "$key" hash-two | sed -n 's/^rc=//p')
   [ "$rc" = 0 ] || fail "advancing output did not reset the ratchet (rc=$rc)"
   [ ! -e "$state/.wedge-escalations-$key" ] || fail "the escalation count survived proven health"
   [ ! -e "$state/.stale-since-$key" ] || fail "the wedge timer survived proven health"
@@ -144,9 +194,106 @@ DRIVER
   pass "proven health resets the ratchet and the transition is logged with its prior count"
 }
 
+
+# --- the alarm-reset boundary, as a fixture rather than a comment ------------
+#
+# The seam has one reset RULE and two applications with disjoint subjects. That
+# separation is the reason they are two functions instead of one, so it is
+# proven here: each reset is driven with the other's state present and must
+# leave it untouched. Without this, "genuinely different seams" is a claim in a
+# comment that nothing enforces.
+test_the_two_resets_do_not_touch_each_others_state() {
+  local dir state key win
+  dir="$TMP_ROOT/boundary"
+  state="$dir/state"
+  mkdir -p "$state"
+  win='lab:w1:p1'
+  key=$(printf '%s' "$win" | tr ':/.' '___')
+
+  # Both alarms raised at once.
+  printf '4\n' > "$state/.wedge-escalations-$key"
+  printf '1000\n' > "$state/.stale-since-$key"
+  : > "$state/.turnend-claude-blocks"
+  : > "$state/.claude-autoarm-failure-notified"
+  : > "$state/.claude-autoarm-failure-alarmed"
+
+  # Upstream's home-level reset must not reach into one pane's wedge state.
+  FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_failure_episode_reset "$2"' _ "$ROOT/bin/fm-wake-lib.sh" "$state" \
+    || fail "the failure-episode reset did not run"
+  [ ! -e "$state/.turnend-claude-blocks" ] || fail "the failure-episode reset did not clear its own state"
+  [ -e "$state/.wedge-escalations-$key" ] \
+    || fail "the failure-episode reset cleared a pane's wedge ratchet, which is not its subject"
+  [ -e "$state/.stale-since-$key" ] \
+    || fail "the failure-episode reset cleared a pane's wedge timer, which is not its subject"
+
+  # And this lane's pane-level reset must not reach into the home's episode.
+  : > "$state/.turnend-claude-blocks"
+  : > "$state/.claude-autoarm-failure-notified"
+  : > "$state/.claude-autoarm-failure-alarmed"
+  run_reset_driver "$dir" "$state" "$win" "$key" hash-one >/dev/null
+  run_reset_driver "$dir" "$state" "$win" "$key" hash-two >/dev/null
+  [ ! -e "$state/.wedge-escalations-$key" ] || fail "the health reset did not clear its own state"
+  [ -e "$state/.turnend-claude-blocks" ] \
+    || fail "the health reset cleared the home's guard budget, which is not its subject"
+  [ -e "$state/.claude-autoarm-failure-notified" ] \
+    || fail "the health reset cleared a failure-episode record, which is not its subject"
+  [ -e "$state/.claude-autoarm-failure-alarmed" ] \
+    || fail "the health reset cleared the attended-alarm record, which is not its subject"
+  pass "each reset clears only its own alarm's state and leaves the other's untouched"
+}
+
+# --- the busy alarm must still be able to sound ------------------------------
+#
+# This is the defect the review caught and the reason the earlier version of
+# this suite was worthless on it: the fake backend made cpu and children
+# unreadable, so the comparison went unknown for a reason unrelated to the
+# scoping it claimed to prove, and it passed either way. Here the process
+# signals ARE readable and advancing, which is what a busy pane looks like, and
+# the busy alarm must escalate anyway.
+test_a_busy_pane_still_escalates_while_its_cpu_advances() {
+  local dir state key win before after
+  dir="$TMP_ROOT/busy-escalates"
+  state="$dir/state"
+  mkdir -p "$state"
+  win='lab:w2:p2'
+  key=$(printf '%s' "$win" | tr ':/.' '___')
+
+  # A readable, advancing process signal - the exact evidence that would reset a
+  # liveness alarm - with the rendered pane frozen.
+  before="rendered=frozen cpu=1000 children=4"
+  after="rendered=frozen cpu=1900 children=4"
+  compare "$before" "$after"
+  [ "$CMP_RC" = 0 ] || fail "the fixture is not exercising real advancing evidence (rc=$CMP_RC)"
+
+  printf '2\n' > "$state/.wedge-escalations-$key"
+  printf '1000\n' > "$state/.stale-since-$key"
+  # A PREDECESSOR sample is seeded directly, with a CPU figure the live burner
+  # has long since passed. Without it neither call below can compare anything,
+  # and the assertion would pass because the evidence was unknown rather than
+  # because the subject gate held - the exact vacuity the review caught the
+  # first time. With it, any call that samples WILL see advancing CPU.
+  printf 'rendered=frozen cpu=1 children=1\n' > "$state/.health-sample-$key"
+  run_timer_driver "$dir" "$state" "$win" "$key" turn-completion frozen >/dev/null
+  [ -e "$state/.wedge-escalations-$key" ] \
+    || fail "the busy alarm was reset by evidence of movement, so it can never escalate"
+
+  # The identical setup under the liveness subject DOES reset. That is what makes
+  # the assertion above about the subject rather than about missing evidence.
+  printf 'rendered=frozen cpu=1 children=1\n' > "$state/.health-sample-$key"
+  printf '1000\n' > "$state/.stale-since-$key"
+  run_timer_driver "$dir" "$state" "$win" "$key" liveness frozen >/dev/null
+  [ ! -e "$state/.wedge-escalations-$key" ] \
+    || fail "the liveness alarm did not reset on the same evidence, so the fixture proves nothing"
+  pass "movement resets the liveness alarm and never the busy turn-completion alarm"
+}
+
 test_each_signal_alone_proves_health
 test_the_measured_specimen_reads_as_health
 test_a_frozen_lane_is_never_pardoned
 test_a_receding_counter_is_not_health
 test_unreadable_signals_are_unknown
 test_ratchet_resets_and_logs_the_transition
+start_cpu_burner
+test_the_two_resets_do_not_touch_each_others_state
+test_a_busy_pane_still_escalates_while_its_cpu_advances
+stop_cpu_burner

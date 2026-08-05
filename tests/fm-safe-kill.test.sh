@@ -199,16 +199,24 @@ test_refuses_pattern_selectors_at_the_interface() {
   pass "the helper accepts only a plain pid, never a name, pattern, or process group"
 }
 
-test_unknown_is_not_reported_as_success() {
+# Already gone is its own outcome, distinct from both "stopped" and "refused".
+# Collapsing it into the refusal code made every caller read "the goal state
+# already holds" as "the stop was never authorized", which turned --restart into
+# a hard failure whenever the one-shot watcher exited inside the check window.
+test_already_gone_is_its_own_outcome() {
   local state dead out rc=0
-  state=$(new_state unknown-outcome)
+  state=$(new_state already-gone)
   dead=999999
   while kill -0 "$dead" 2>/dev/null; do dead=$((dead + 1)); done
   out=$(run_safe_kill "$state" --pid "$dead" --role watcher --reason "stop something already gone") || rc=$?
-  [ "$rc" -eq 4 ] || fail "a target that is not running must be an explicit unknown (4), got $rc"
-  printf '%s' "$out" | grep -Fq 'no outcome is claimed' \
-    || fail "the helper claimed an outcome it did not observe (got: $out)"
-  pass "a target that is not running is reported as unknown, never as a completed stop"
+  [ "$rc" -eq 6 ] || fail "a target that was already gone must be its own outcome (6), got $rc"
+  [ "$rc" -ne 0 ] || fail "already gone was reported as a completed stop"
+  [ "$rc" -ne 3 ] && [ "$rc" -ne 4 ] || fail "already gone was reported as a refusal"
+  printf '%s' "$out" | grep -Fq 'nothing was signalled' \
+    || fail "the helper claimed to have signalled something (got: $out)"
+  grep -q 'outcome=already-gone' "$state/.safe-kill.log" \
+    || fail "the already-gone outcome was not recorded durably"
+  pass "a target that was already gone is its own outcome, neither a stop nor a refusal"
 }
 
 # --- the mirror image: a legitimate recovery kill must still work -------------
@@ -266,7 +274,7 @@ test_refuses_a_reused_pid
 test_refuses_another_home
 test_a_lock_without_a_recorded_home_still_authorizes
 test_refuses_pattern_selectors_at_the_interface
-test_unknown_is_not_reported_as_success
+test_already_gone_is_its_own_outcome
 test_authorized_supervisor_stop_succeeds
 test_daemon_role_stop_succeeds
 test_every_outcome_is_recorded
