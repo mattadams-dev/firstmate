@@ -34,6 +34,14 @@ Eight repositories through the authenticated list, three through the public one.
 holds this: a private fork and a fork with no local clone must both appear in
 the output and in the coverage counts.
 
+The authenticated list is itself one capped call, and a complete list and a
+truncated one differ only in size, so the sweep compares the row count against
+the cap and reports unknown coverage when they match. Eight repositories against
+the default cap of 200 leaves this account far from the boundary today, which is
+exactly why it is checked by machine rather than by assumption.
+`test_capped_enumeration_reads_unknown_coverage` and
+`test_full_enumeration_under_the_cap_reads_clean` hold both directions.
+
 ## Baseline readings, taken by hand before the instrument existed
 
 ```
@@ -88,8 +96,9 @@ function names.
 | C: collapses an unreadable repository into an answer | make `repo_facts` return `false<TAB><TAB>main<TAB>false` instead of failing | exactly `test_unreadable_upstream_reads_unknown` and `test_check_cannot_read_reads_unknown` |
 | D: keeps real readings but always warns | `[ "$behind" -gt 0 ] \|\| { behind=1; status=behind; }` | exactly `test_in_sync_creates_no_task`, `test_ahead_only_creates_no_task`, `test_outage_and_in_sync_are_distinguishable`, `test_private_and_uncloned_forks_are_covered` |
 
-The unmutated suite breaks nothing, per-test and as a whole (29 ok; the mutation
-run above was taken at 28, before the id-collision regression was added).
+The unmutated suite breaks nothing, per-test and as a whole. The run above was
+taken at 28 tests, before the id-collision regression and the review round below
+were added; the suite now reports 36 ok, 0 not ok.
 
 What the table establishes:
 
@@ -111,6 +120,33 @@ is the mechanical form of the rule: name the two world-states the reading is
 meant to separate, and if both produce the same reading, anything stronger than
 unknown is fabrication.
 
+## Review round: the silent-omission paths, each pinned by reverting its fix
+
+Review found five ways the instrument could still be quiet about something it had
+not determined. Each fix carries a regression test, and each test was proven to
+fail without its fix: the fix was reverted in a scratch copy of the tree and the
+whole suite run there. The suite halts at its first failure, so what is recorded
+below is the exact line that halted it, not a per-test broken set like the table
+above.
+
+| Reverted fix | Captured failure |
+| --- | --- |
+| whole-entry dedupe of the extras list against the enumeration | `not ok - the second fork is behind, so the sweep must not exit clean: expected exit 3, got 0` |
+| trailing-slash strip in the origin-URL parser | `not ok - a cloned fork that is behind must not exit clean: expected exit 3, got 0` |
+| enumeration-cap detection | `not ok - a sweep whose enumeration hit its cap must not exit clean: expected exit 4, got 0` |
+| cap detection forced always-on (the cry-wolf direction) | `not ok - a fork behind its upstream must not exit clean: expected exit 3, got 5` |
+| session-start trigger relaying the sweep's stderr | `not ok - a sync task whose backlog write failed reached the digest as a clean queued task (missing: 'BACKLOG_MANUAL: add fm-sync-acme-widget')` |
+| session-start trigger reporting a non-0/3/4/5 exit | `not ok - a sweep that crashed without a reading printed exactly what a not-due sweep prints (missing: 'FORK_FRESHNESS_COVERAGE: status=unknown')` |
+| time bound on the pre-PR reading | `not ok - a stalled freshness reading hung the PR-ready path for 20s` |
+
+The fourth row is the anti-cry-wolf half of the cap check, and it is the reason
+the cap is compared rather than assumed hit: an instrument that declares coverage
+unknown on every run has stopped distinguishing anything.
+
+The last row is a real 20-second hang, not a simulated one: the recorder stands
+in for a forge that accepts the connection and never answers, and without the
+bound the PR-ready path waits for it with the merge watch already armed.
+
 ## Trigger wiring
 
 Both triggers are exercised through their real callers, with a recorder standing
@@ -119,9 +155,16 @@ in for the sweep in a copied `FM_ROOT`:
 - `test_pr_check_takes_the_reading_before_a_fork_pr` runs `bin/fm-pr-check.sh`
   against a GitHub pull request URL and asserts the recorder saw
   `check acme/widget`.
+- `test_pr_check_bounds_the_freshness_reading` runs the same caller against a
+  recorder that hangs, and asserts the PR-ready path finishes anyway, still
+  prints its `armed:` line, and reports the reading as unknown.
 - `test_session_start_sweep_runs_and_detect_only_skips_it` runs
   `bin/fm-bootstrap.sh` twice and asserts `sweep --if-due` is invoked on the
   locked path and never under `FM_BOOTSTRAP_DETECT_ONLY=1`.
+- `test_session_start_relays_everything_the_sweep_says` and
+  `test_session_start_never_prints_a_crashed_sweep_as_a_quiet_one` assert the
+  digest carries the sweep's stderr as well as its stdout, and that a sweep which
+  died and a sweep which was not due never print the same thing.
 
 `bin/fm-pr-merge.sh` refuses a task whose metadata carries no `pr=` line, and
 `bin/fm-pr-check.sh` is that line's only writer, which is why the pre-PR reading
@@ -131,5 +174,13 @@ is taken there: no merge through the sanctioned path can skip it.
 
 ```
 $ bin/fm-lint.sh
+fm-lint.sh: ShellCheck 0.11.0 (pinned 0.11.0)
+```
+
+The review round re-ran it over the files it touched, with the same pinned
+configuration:
+
+```
+$ bin/fm-lint.sh bin/fm-fork-freshness.sh bin/fm-bootstrap.sh bin/fm-pr-check.sh tests/fm-fork-freshness.test.sh
 fm-lint.sh: ShellCheck 0.11.0 (pinned 0.11.0)
 ```
