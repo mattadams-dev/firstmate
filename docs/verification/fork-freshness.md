@@ -97,8 +97,8 @@ function names.
 | D: keeps real readings but always warns | `[ "$behind" -gt 0 ] \|\| { behind=1; status=behind; }` | exactly `test_in_sync_creates_no_task`, `test_ahead_only_creates_no_task`, `test_outage_and_in_sync_are_distinguishable`, `test_private_and_uncloned_forks_are_covered` |
 
 The unmutated suite breaks nothing, per-test and as a whole. The run above was
-taken at 28 tests, before the id-collision regression and the review round below
-were added; the suite now reports 36 ok, 0 not ok.
+taken at 28 tests, before the id-collision regression and the review rounds below
+were added; the suite now reports 39 ok, 0 not ok.
 
 What the table establishes:
 
@@ -146,6 +146,39 @@ unknown on every run has stopped distinguishing anything.
 The last row is a real 20-second hang, not a simulated one: the recorder stands
 in for a forge that accepts the connection and never answers, and without the
 bound the PR-ready path waits for it with the merge watch already armed.
+
+## Second review round: the materialisation window and the unobserved artifacts
+
+The next round found the guard problem the bounded kills above made reachable:
+`data/<id>/brief.md` is both the task's instructions and its idempotency guard,
+and it used to be the FIRST artifact written, so a run cut short between it and
+the backlog, wake and Bridge steps left a permanent guard over a task nobody had
+been told about. The three notifications were also the quiet kind: only the
+backlog step reported its own failure, so `queued` could assert four artifacts
+while one of them was never observed.
+
+Same method: revert one fix in a scratch copy, run the whole suite there, record
+the line that halted it.
+
+| Reverted fix | Captured failure |
+| --- | --- |
+| brief rendered beside itself and moved into place last | `not ok - an interrupted materialisation left the guard behind, and no later sweep will finish the task` |
+| wake append reporting its own failure | `not ok - a wake entry that could not be appended must say so rather than pass silently (missing: 'WAKE_MANUAL:')` |
+| Bridge ask reporting its own failure | `not ok - a Bridge ask that could not be raised must say so rather than pass silently (missing: 'BRIDGE_MANUAL:')` |
+
+`test_interrupted_materialisation_leaves_no_guard` drives the interruption
+through the executable interface rather than describing it: the fake backlog
+client signals the shells that invoked it, which stops the materialisation
+between its first artifact and its last whichever way the shell laid the call
+out. The test then asserts three things about the wreckage - no guard, no wake,
+no half-written brief left behind - and that the next sweep redoes the whole
+task rather than reporting `already queued` over it.
+
+The two notification tests force a real failure rather than a simulated one: an
+unwritable wake sequence file, and a run whose `bin/fm-bridge.sh` is absent. Both
+assert the loud stderr line AND the `MANUAL=` marker on the reading, because the
+reading is what the digest shows first, and both assert the brief survived -
+a failed notification must never cost the task its instructions.
 
 ## Trigger wiring
 

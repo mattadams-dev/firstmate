@@ -99,10 +99,23 @@ SH
   chmod +x "$1/gh"
 }
 
+# FM_TEST_TASKS_KILL stands in for the kill a bounded caller delivers mid-task:
+# the backlog step signals the shell that invoked it and the one above that, so
+# the materialisation stops between its first artifact and its last whichever
+# way the shell laid the call out.
 install_fake_tasks_axi() {  # <bin-dir>
   cat > "$1/tasks-axi" <<'SH'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$FM_TEST_TASKS_LOG"
+if [ -n "${FM_TEST_TASKS_KILL:-}" ]; then
+  grandparent=$(ps -o ppid= -p "$PPID" 2>/dev/null | tr -d ' ')
+  kill -TERM "$PPID" 2>/dev/null || true
+  case "$grandparent" in
+    ''|0|1) : ;;
+    *) kill -TERM "$grandparent" 2>/dev/null || true ;;
+  esac
+  exit 1
+fi
 exit "${FM_TEST_TASKS_RC:-0}"
 SH
   chmod +x "$1/tasks-axi"
@@ -167,6 +180,8 @@ one_fork() {
   compare_fixture "$dir" upstream/widget main acme main "$status" "$ahead" "$behind" >/dev/null
 }
 
+# FM_TEST_SWEEP_BIN runs a copied bin/ instead of the repo's, for the cases whose
+# subject is what the sweep does when one of its sibling scripts is unavailable.
 run_sweep() {  # <case> [args...]
   local dir=$1
   shift
@@ -175,7 +190,7 @@ run_sweep() {  # <case> [args...]
     FM_TEST_GH_FIXTURES="$dir/fixtures" \
     FM_TEST_TASKS_LOG="$dir/tasks.log" \
     PATH="$dir/bin:$TOOLBOX" \
-    "$SWEEP" "$@" 2>"$dir/stderr.log"
+    "${FM_TEST_SWEEP_BIN:-$SWEEP}" "$@" 2>"$dir/stderr.log"
 }
 
 # --- the reading, both directions -------------------------------------------
@@ -622,14 +637,94 @@ test_task_already_under_way_is_left_alone() {
   pass "fm-fork-freshness: a sync already under way is recognised and left alone"
 }
 
-test_backlog_failure_is_reported_not_swallowed() {
-  local dir stderr
+test_interrupted_materialisation_leaves_no_guard() {
+  local dir out rc=0 leftover
   dir=$(new_case)
   one_fork "$dir" behind 0 3
-  FM_TEST_TASKS_RC=1 run_sweep "$dir" sweep --owner acme >/dev/null || true
+
+  # The brief is the idempotency guard, so a run cut short between its first
+  # artifact and its last must leave no guard at all - otherwise the fork keeps
+  # reading "already queued" over a task with no backlog item, no wake and no
+  # Bridge row, forever, which is the silent omission wearing the guard's clothes.
+  FM_TEST_TASKS_KILL=1 run_sweep "$dir" sweep --owner acme >/dev/null 2>&1 || true
+
+  assert_grep "Sync acme/widget" "$dir/tasks.log" \
+    "the interrupted run never reached the backlog step, so it proves nothing"
+  assert_absent "$dir/home/data/fm-sync-acme-widget/brief.md" \
+    "an interrupted materialisation left the guard behind, and no later sweep will finish the task"
+  assert_absent "$dir/home/state/.wake-queue" \
+    "the interrupted run queued a wake it should never have reached"
+  leftover=$(find "$dir/home/data" -name '.brief.*' | wc -l)
+  [ "$leftover" = 0 ] ||
+    fail "an interrupted materialisation left $leftover half-written brief(s) behind"
+
+  out=$(run_sweep "$dir" sweep --owner acme) || rc=$?
+
+  expect_code 3 "$rc" "the fork is still behind on the sweep after the interruption"
+  assert_contains "$out" "action=task fm-sync-acme-widget queued" \
+    "the sweep after an interrupted one must redo the whole materialisation"
+  assert_not_contains "$out" "already queued" \
+    "the sweep after an interrupted one found a guard the interrupted run should not have left"
+  assert_present "$dir/home/data/fm-sync-acme-widget/brief.md" \
+    "the completing sweep left the task without its instructions"
+  assert_present "$dir/home/state/.wake-queue" \
+    "the completing sweep left the task without its wake entry"
+  pass "fm-fork-freshness: an interrupted materialisation leaves no guard and the next sweep completes it"
+}
+
+test_wake_failure_is_reported_not_swallowed() {
+  local dir out stderr rc=0
+  dir=$(new_case)
+  one_fork "$dir" behind 0 3
+  # An unwritable sequence file is a wake append that cannot happen.
+  mkdir "$dir/home/state/.wake-queue.seq"
+  out=$(run_sweep "$dir" sweep --owner acme) || rc=$?
+  stderr=$(cat "$dir/stderr.log")
+
+  expect_code 3 "$rc" "the fork is behind regardless of where its notification went"
+  assert_contains "$stderr" "WAKE_MANUAL:" \
+    "a wake entry that could not be appended must say so rather than pass silently"
+  assert_contains "$out" "MANUAL=wake" \
+    "the reading claimed a queued task while one of its four artifacts was never observed"
+  assert_present "$dir/home/data/fm-sync-acme-widget/brief.md" \
+    "a failed wake must not cost the task its instructions"
+  assert_grep "Sync acme/widget" "$dir/tasks.log" \
+    "a failed wake must not cost the task its backlog item"
+  pass "fm-fork-freshness: a wake append that fails is reported, not swallowed"
+}
+
+test_bridge_failure_is_reported_not_swallowed() {
+  local dir root out stderr rc=0
+  dir=$(new_case)
+  one_fork "$dir" behind 0 3
+  root="$dir/root"
+  mkdir -p "$root"
+  cp -R "$ROOT/bin" "$root/bin"
+  rm -f "$root/bin/fm-bridge.sh"
+  out=$(FM_TEST_SWEEP_BIN="$root/bin/fm-fork-freshness.sh" \
+    run_sweep "$dir" sweep --owner acme) || rc=$?
+  stderr=$(cat "$dir/stderr.log")
+
+  expect_code 3 "$rc" "the fork is behind regardless of where its Bridge row went"
+  assert_contains "$stderr" "BRIDGE_MANUAL:" \
+    "a Bridge ask that could not be raised must say so rather than pass silently"
+  assert_contains "$out" "MANUAL=bridge" \
+    "the reading claimed a queued task while the captain was never actually asked"
+  assert_present "$dir/home/data/fm-sync-acme-widget/brief.md" \
+    "a failed Bridge ask must not cost the task its instructions"
+  pass "fm-fork-freshness: a Bridge ask that cannot be raised is reported, not swallowed"
+}
+
+test_backlog_failure_is_reported_not_swallowed() {
+  local dir out stderr
+  dir=$(new_case)
+  one_fork "$dir" behind 0 3
+  out=$(FM_TEST_TASKS_RC=1 run_sweep "$dir" sweep --owner acme) || true
   stderr=$(cat "$dir/stderr.log")
   assert_contains "$stderr" "BACKLOG_MANUAL: add fm-sync-acme-widget" \
     "a backlog write that failed must say so rather than pass silently"
+  assert_contains "$out" "MANUAL=backlog" \
+    "the reading claimed a queued task while its backlog item was never observed"
   assert_present "$dir/home/data/fm-sync-acme-widget/brief.md" \
     "a failed backlog write must not cost the task its instructions"
   pass "fm-fork-freshness: a backlog write that fails is reported, not swallowed"
@@ -901,6 +996,9 @@ test_sync_task_carries_the_proven_procedure
 test_behind_queues_a_wake
 test_repeat_sweep_creates_no_duplicate_task
 test_task_already_under_way_is_left_alone
+test_interrupted_materialisation_leaves_no_guard
+test_wake_failure_is_reported_not_swallowed
+test_bridge_failure_is_reported_not_swallowed
 test_backlog_failure_is_reported_not_swallowed
 test_if_due_is_silent_inside_the_interval
 test_if_due_runs_once_the_interval_elapsed
