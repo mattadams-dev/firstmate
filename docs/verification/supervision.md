@@ -432,10 +432,22 @@ Both directions are covered deliberately: a guard that refuses everything is the
 | The kill helper can never complete a stop | refuses too much | `test_authorized_supervisor_stop_succeeds`, `test_daemon_role_stop_succeeds`, `test_every_outcome_is_recorded` | 9 clean |
 | The policy stops classifying terminations | permits too much | matrix `K01` (`kill -TERM 17907`) | 158 clean |
 | The policy denies signal-0 probes and job specs too | refuses too much | matrix `L01` (`kill -0 17907`) | 172 clean |
-| Elapsed time alone resets the wedge alarm | permits too much | `test_a_frozen_lane_is_never_pardoned`, then `test_a_receding_counter_is_not_health` | see below |
-| Nothing resets the wedge alarm | refuses too much | `test_each_signal_alone_proves_health` | 2 clean |
+| Elapsed time alone resets the wedge alarm | permits too much | `test_a_frozen_lane_is_never_pardoned` | 2 before the kill |
+| Nothing resets the wedge alarm | refuses too much | `test_a_busy_pane_still_escalates_while_its_cpu_advances` (its liveness half) | 7 before the kill |
+| The pane reset also clears the home's failure episode | boundary crossing | `test_the_two_resets_do_not_touch_each_others_state` | 6 before the kill |
+| The home reset also clears a pane's wedge ratchet | boundary crossing | `test_the_two_resets_do_not_touch_each_others_state` | 6 before the kill |
+| The busy alarm accepts movement as its counterpart | permits too much | `test_a_busy_pane_still_escalates_while_its_cpu_advances` | 7 before the kill |
 
-Four of the eight are the mirror-image direction on purpose.
+The last five rows are the alarm-reset rule, proven against the COMPOSED result rather than against this lane's half.
+Two of them are boundary crossings that exist only because the one-reset-owner amendment was made: without them the separation between the home-level and pane-level resets is unenforced however carefully it is documented.
+
+Two fixtures in that group were vacuous before they were fixed, and both failed the same way, which is worth recording because the failure is invisible from a green run.
+The original busy-alarm case passed because its fake backend made CPU and children unreadable, so the comparison went unknown for a reason unrelated to the scoping it claimed to prove.
+Its first replacement passed for a second, different version of the same reason: the busy path deliberately never samples, so neither call established a predecessor and the comparison was unknown again.
+The working fixture seeds a predecessor sample directly and drives a live CPU burner through a substituted `fm_health_target_pid`, so every layer below that one seam runs for real against evidence that genuinely advances.
+A mutation matrix is the only thing that surfaced either defect; both suites were green throughout.
+
+Five of the eleven are the mirror-image or boundary-crossing direction on purpose.
 A supervisor that can never arm and a helper that can never terminate anything are the same failure as their opposites, one mirror over, and they fail silently rather than loudly.
 
 Two mutations are broad by nature and are reported as such rather than forced into a one-to-one claim.

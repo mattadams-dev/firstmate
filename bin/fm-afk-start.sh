@@ -101,6 +101,22 @@ daemon_lock_pid() {
   cat "$owner/pid" 2>/dev/null || true
 }
 
+# True only when nothing holds the daemon lock: it is absent, or its recorded
+# holder is provably not running. A lock whose holder is alive but unverifiable
+# is UNKNOWN and returns false here, exactly as it returns false from
+# daemon_lock_held_by_live_daemon - the two predicates are deliberately not
+# complements, because the middle case is neither.
+daemon_lock_provably_unheld() {
+  local owner pid
+  owner=$(daemon_lock_owner) || return 0
+  pid=$(cat "$owner/pid" 2>/dev/null || true)
+  case "$pid" in
+    ''|*[!0-9]*) return 0 ;;
+  esac
+  fm_pid_alive "$pid" || return 0
+  return 1
+}
+
 daemon_lock_held_by_live_daemon() {
   local owner pid
   owner=$(daemon_lock_owner) || return 1
@@ -140,7 +156,16 @@ fm_afk_start_main() {
 
   # Fresh start: clear the previous away session's stale delivery artifacts
   # before the new daemon can surface them (fix for the leaked-artifact defect).
-  if [ "${FM_AFK_STATE_PREPARED:-0}" != 1 ]; then
+  #
+  # Only when this really is a fresh start. daemon_lock_held_by_live_daemon
+  # returns false for two different worlds - "no daemon holds this lock" and
+  # "a daemon holds it but its liveness cannot be established", the second being
+  # what a pre-upgrade lock or a transient identity read failure produces. The
+  # escalation buffer belongs to a live daemon in that second world, and wiping
+  # it destroys undelivered escalations for a daemon that is still running.
+  # Clearing therefore requires positive evidence that nothing holds the lock;
+  # anything else leaves the buffer alone and lets the daemon's own gate decide.
+  if [ "${FM_AFK_STATE_PREPARED:-0}" != 1 ] && daemon_lock_provably_unheld; then
     fm_afk_clear_stale_artifacts "$FM_AFK_STATE"
   fi
 

@@ -92,11 +92,12 @@ fm_health_target_pid() {  # <backend> <target>
 # a host without it reports "?" rather than a fabricated zero, because a zero
 # would read as "frozen" and could raise a false alarm.
 fm_health_tree_cpu() {  # <root-pid>
-  local root=$1 proc_root total=0 pid stat_line
+  local root=$1 proc_root total=0 pid stat_line counted=0
   local -a fields
   proc_root=${FM_PROC_ROOT_OVERRIDE:-/proc}
   [ -d "$proc_root" ] || { printf '?\n'; return 0; }
   for pid in $(fm_health_tree_pids "$root"); do
+    counted=1
     stat_line=$(cat "$proc_root/$pid/stat" 2>/dev/null) || continue
     read -r -a fields <<< "${stat_line##*)}"
     [ "${#fields[@]}" -ge 13 ] || continue
@@ -105,25 +106,48 @@ fm_health_tree_cpu() {  # <root-pid>
     esac
     total=$(( total + fields[11] + fields[12] ))
   done
+  # No readable process in the tree is UNKNOWN, not zero. A fabricated 0 compares
+  # as "did not move" on a channel the reset depends on, which is the same defect
+  # as the fabricated child count and fails in the same silent direction.
+  [ "$counted" -eq 1 ] || { printf '?\n'; return 0; }
   printf '%s\n' "$total"
 }
 
 fm_health_tree_size() {  # <root-pid>
-  local root=$1 n
-  n=$(fm_health_tree_pids "$root" | wc -l | tr -d '[:space:]')
+  local n
+  n=$(fm_health_tree_pids "$1" | grep -c .) || true
   case "$n" in
-    ''|*[!0-9]*) printf '?\n' ;;
+    ''|*[!0-9]*|0) printf '?\n' ;;
     *) printf '%s\n' "$n" ;;
   esac
 }
 
-# <pid> and its descendants, breadth-first, bounded so a pathological tree
-# cannot stall a watcher poll.
+# <pid> and its descendants. ONE ps call builds the whole pid->ppid map, then the
+# walk happens in the shell.
+#
+# It used to run `ps -o pid= --ppid <pid>` once per visited pid. That is a GNU
+# option every other parent walk in bin/ already avoids, and on macOS - a
+# supported platform - it is rejected outright, so the walk found no children and
+# fm_health_tree_size reported a literal 1 for every process tree. A constant
+# reported as an observation is worse than no observation: this file's own
+# contract says an unreadable component must be recorded as '?' precisely so a
+# comparison can tell "did not move" apart from "could not be seen", and a
+# fabricated 1 never moves. That put a fabricated value on one of the three
+# evidence channels the reset depends on. Per-pid forking in the watcher's poll
+# loop was the lesser half of the problem.
+#
+# Failure prints nothing, so callers report '?' rather than a count.
 fm_health_tree_pids() {  # <root-pid>
-  local root=$1 frontier next pid kid seen=0
+  local root=$1 table frontier next pid seen=0
   case "$root" in
     ''|*[!0-9]*) return 0 ;;
   esac
+  table=$(ps -eo pid=,ppid= 2>/dev/null) || return 0
+  [ -n "$table" ] || return 0
+  # The root must actually be in the table. Emitting it unconditionally reported
+  # a tree of exactly 1 for a pid that does not exist - the same fabricated
+  # constant, one level down from the GNU-option defect above.
+  printf '%s\n' "$table" | awk -v p="$root" '$1 == p { found = 1 } END { exit !found }' || return 0
   frontier=$root
   while [ -n "$frontier" ] && [ "$seen" -lt 256 ]; do
     next=
@@ -131,9 +155,7 @@ fm_health_tree_pids() {  # <root-pid>
       [ "$seen" -lt 256 ] || break
       printf '%s\n' "$pid"
       seen=$((seen + 1))
-      for kid in $(ps -o pid= --ppid "$pid" 2>/dev/null); do
-        next="$next $kid"
-      done
+      next="$next $(printf '%s\n' "$table" | awk -v p="$pid" '$2 == p { print $1 }')"
     done
     frontier=$next
   done

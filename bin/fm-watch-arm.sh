@@ -548,7 +548,7 @@ if [ "$mode" = restart ]; then
       "$SCRIPT_DIR/fm-safe-kill.sh" --pid "$lock_pid" --role watcher --signal TERM --wait 5 \
         --reason "operator-requested watcher restart" >/dev/null || restart_stop_rc=$?
       case "$restart_stop_rc" in
-        0) ;;
+        0|6) ;;   # stopped, or already gone before the signal - either way it is not running
         5)
           # Signalled, still running at the deadline - a watcher inside a bounded
           # check cannot process its trap until that check returns. This is not a

@@ -56,6 +56,8 @@
 #   3  REFUSED - proven unsafe
 #   4  REFUSED - cannot be proven safe (unknown is not a "no problem found")
 #   5  signalled, still alive at the deadline
+#   6  the target was already gone; nothing was signalled. Distinct from 3 and 4
+#      on purpose: the goal state holds, but this did not bring it about
 # Every non-zero outcome prints one escalation line on stderr and appends one
 # record to state/.safe-kill.log. A caller must escalate rather than proceed.
 #
@@ -178,7 +180,18 @@ for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24; do
 done
 [ "$ancestor_walk_ok" -eq 1 ] || refuse 4 "this process's ancestry could not be resolved, so 'not an ancestor' is unproven"
 
-fm_pid_alive "$TARGET" || refuse 4 "pid $TARGET is not running; nothing was signalled and no outcome is claimed"
+# Already gone is its own outcome, not a refusal. Collapsing it into 4 made every
+# caller read "the goal state already holds" as "the stop was never authorized":
+# the watcher is one-shot and exits the moment an actionable wake arrives, so it
+# can exit inside the window between a caller's liveness check and this one, and
+# --restart then hard-failed on a watcher that had simply finished. Exit 6 says
+# what was observed - the process is not running and nothing was signalled here -
+# and leaves the caller to decide whether that satisfies it.
+if ! fm_pid_alive "$TARGET"; then
+  record already-gone "target was not running; nothing was signalled"
+  printf 'fm-safe-kill: pid %s was already gone; nothing was signalled\n' "$TARGET" >&2
+  exit 6
+fi
 
 TARGET_IDENTITY=$(fm_pid_identity "$TARGET") \
   || refuse 4 "pid $TARGET's identity could not be read, so it cannot be matched against any record"

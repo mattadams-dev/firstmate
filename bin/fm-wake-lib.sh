@@ -457,6 +457,43 @@ fm_lock_release() {
   rmdir "$lockdir" 2>/dev/null || true
 }
 
+# --- the alarm-reset rule, stated once ---------------------------------------
+#
+# This seam raises two alarms, and they have one shared rule between them:
+#
+#   ALARM STATE IS CLEARED ONLY BY POSITIVE EVIDENCE ABOUT THAT ALARM'S OWN
+#   SUBJECT, AND NEVER BY ELAPSED TIME.
+#
+# Elapsed time is forbidden because a time-based amnesty pardons precisely the
+# slow failure an alarm exists to catch, and does it silently. "Unknown" clears
+# nothing, and it accelerates nothing.
+#
+# The rule has exactly two applications, with disjoint subjects and disjoint
+# state. They are deliberately NOT one function: a single reset spanning both
+# would dispatch on subject into two branches that share no evidence and no
+# state, which is two mechanisms wearing one name - it would hide this boundary
+# rather than make it checkable.
+#
+#   fm_failure_episode_reset      (here)
+#     subject   the HOME's supervision chain - is anything supervising at all?
+#     state     .turnend-claude-blocks, .claude-autoarm-failure-notified,
+#               .claude-autoarm-failure-alarmed
+#     evidence  fm_watcher_healthy: a verified live identity-matched watcher
+#               with a fresh beacon. A freshness requirement is not a
+#               time-based amnesty - requiring recent evidence is the opposite
+#               of pardoning elapsed silence.
+#
+#   health_evidence_reset         (bin/fm-watch.sh)
+#     subject   ONE crewmate's pane - is that worker wedged?
+#     state     .wedge-escalations-<key>, .stale-since-<key>
+#     evidence  that pane's own rendered output, process-tree CPU, or live
+#               descendants, compared across two samples.
+#
+# THE BOUNDARY: neither reset may touch the other's state. A healthy watcher is
+# no evidence that crewmate X is unstuck, and a computing crewmate is no evidence
+# that the home is supervised. tests/fm-health-evidence.test.sh drives each reset
+# with the other's state present and asserts it survives, so the separation is a
+# fixture rather than a claim in a comment.
 fm_failure_episode_reset() {
   local state=$1 mode=${2:-acquire} lock current pid acquired=0 path
   lock="$state/.turnend-claude-blocks.lock"
@@ -607,6 +644,8 @@ fm_singleton_reclaim_reused() {
 #   0 - acquired; this process is now the home's <role> supervisor.
 #   1 - a verified-live holder has it; FM_SINGLETON_PEER_PID and
 #       FM_SINGLETON_PEER_ROLE name it. Standing down is the only safe act.
+#       This is returned ONLY after that holder was actually verified - a lost
+#       race is outcome 2, never a peer this never looked at.
 #   2 - undecidable; FM_SINGLETON_REASON says why. Never acquire on this path,
 #       and never resolve it by inspecting or terminating the holder.
 fm_supervisor_singleton_acquire() {
@@ -645,8 +684,17 @@ fm_supervisor_singleton_acquire() {
       # LOCK is safe and is what keeps supervision recoverable; nothing here
       # touches the process wearing that pid.
       fm_singleton_reclaim_reused "$lockdir" "$role" "$home" "$state" "$exec_path" "$identity" && return 0
-      FM_SINGLETON_REASON="lock contended while its published holder was retiring"
-      return 1
+      # The reclaim did not succeed, and nothing here verified a live holder -
+      # the published one was provably gone or reused. Returning 1 would mean
+      # "a verified-live holder has it", and the caller would announce a peer
+      # that was never verified. That is false certainty inside a three-outcome
+      # design whose whole point is that undecidable is first-class, so this is
+      # undecidable and says so. It self-corrects: whoever did win the lock is a
+      # real supervisor, and the next acquisition reads it as a verified peer.
+      # shellcheck disable=SC2034 # Read by callers after this returns.
+      FM_SINGLETON_PEER_PID=
+      FM_SINGLETON_REASON="lock $lockdir was contended while its published holder was retiring, and no live holder was verified"
+      return 2
       ;;
     *)
       # shellcheck disable=SC2034 # Read by callers after this returns.
