@@ -1,13 +1,10 @@
 #!/usr/bin/env bash
-# bin/fm-migrate-endpoint-binding.sh - ONE-SHOT-PER-HOME repair of
+# bin/fm-migrate-endpoint-binding.sh - REPEATABLE repair of
 # `endpoint_task_id=` in a home's state/<id>.meta records.
 #
-# RETIRED, WHICH MEANS IT CANNOT BE RUN CASUALLY OR BY ACCIDENT - NOT ERASED.
-# It is retained deliberately as the documented recovery procedure for a future
-# legacy lane. The property that keeps it from becoming standing bypass
-# machinery is carried by a guard, not by absence: `--apply` refuses against a
-# home that is already fully migrated. That guard has a known gap; see THE
-# ONE-SHOT GUARD below for what it holds and what it does not, and
+# SAFE TO RUN AGAIN. There is no one-shot guard and no refusal to run twice.
+# Re-running is harmless by construction, not by memory of a previous run, and
+# every run writes a receipt. See SAFE TO REPEAT and THE RECEIPT below, and
 # docs/verification/endpoint-binding-migration.md.
 #
 # WHY THE FIELD MATTERS
@@ -62,72 +59,61 @@
 # its presence means "migrated" and its absence means "recorded at spawn" -
 # the distinction a reader needs six months from now.
 #
-# THE ONE-SHOT GUARD
+# SAFE TO REPEAT
 #
-# `--apply` refuses against a home that is already FULLY migrated: some
-# state/*.meta carries an `endpoint_task_id_provenance=` line AND no unbound
-# candidate remains. Observe-only mode stays allowed there.
+# There is no one-shot guard. Earlier versions refused a second `--apply` on an
+# already-migrated home; three consecutive reviews found defects in that refusal,
+# each one in the definition of which records it counted. The refusal was deleted
+# rather than corrected a fourth time. An operation that is safe to repeat needs
+# no memory of whether it already ran, and removing the consequence beats getting
+# the trigger right.
 #
-# The second half of that condition is load-bearing. Refusing on provenance
-# alone would make a partially completed run unresumable: a run interrupted
-# after writing some records would leave the rest stranded forever, with the
-# hand-write as the only remaining remedy - the exact action this migration
-# exists to prevent. A resumed run is safe because the per-record filter writes
-# only to a record with zero binding lines, so it cannot rewrite or re-stamp an
-# already-migrated record.
+# Repetition is harmless because of the per-record filter, not because of any
+# home-level state. The only shape this script writes is a record with ZERO
+# `endpoint_task_id=` lines. After a record is migrated it carries exactly one
+# correct binding, so on any later run it is a non-candidate and is skipped
+# untouched: no second binding, no second provenance line, no rewrite. The
+# migrated bytes of an already-repaired record are identical after the second run
+# and after the tenth.
 #
-# It cannot drift. The proof that the backfill already ran is the repaired
-# records themselves, not a marker file kept alongside them. A marker can be
-# deleted, lost in a home copy, or never written after a partial run; the
-# provenance lines cannot go missing without the repair itself going missing.
+# That also means an interrupted run simply resumes. Records already written are
+# skipped, records not yet reached are repaired. There is no stranded state and
+# no remedy that requires a hand-write.
 #
-# WHAT THE GUARD HOLDS, AND WHAT IT DOES NOT
+# The anti-assertion guarantee is enforced by the same filter, unconditionally:
+# the script only ever APPENDS a binding to a record that has none, and only from
+# a live observation of that record's own endpoint. No path through this script
+# writes an unobserved or asserted value, on any home, in any state.
 #
-# It holds on a home where every unbound record is one this migration could
-# actually repair: once they are all repaired, `--apply` refuses. That is the
-# casual-re-run case, and it is the one the retirement rider targets.
+# THE RECEIPT
 #
-# It does NOT hold on a home containing any record that is unbound but
-# permanently unrepairable by this script. A legacy tmux record carries a
-# `window=` line and no `endpoint_task_id=` line for good - the loop only ever
-# reports it NOT-REQUIRED - and a record on a backend with no observation path
-# is only ever reported as a disposition. Either kind keeps the unbound count
-# above zero forever, so `--apply` never refuses on that home. This needs no
-# tampering: it is an ordinary home state, which is why this guard must not be
-# described as one that cannot be satisfied by accident.
+# Every run appends a receipt to data/endpoint-binding-migration-receipts.log in
+# the target home: when it ran, against which home, in which mode, with which
+# tool versions, and the per-record outcome and totals. Observe-only runs are
+# recorded too, because an observe run is still a run that happened.
 #
-# The anti-assertion guarantee does not rest on this guard. The per-record
-# filter is what enforces it, unconditionally: the script only ever APPENDS a
-# binding to a record that has none, and only from a live observation of that
-# record's own endpoint. No path through this script writes an unobserved or
-# asserted value, on any home, in any of the states above. That is the stronger
-# of the two protections and it is unaffected by the gap described here.
-#
-# Status: the gap is known, not overlooked. It was found in review before this
-# landed, its real-world impact was checked and is currently zero (the primary
-# home's recorded run left no unbound candidate), and the redesign is escalated
-# rather than patched, because this was the third review finding on the same
-# boundary. The design question is written up in this task's private report and
-# PR evidence.
-#
-# It blocks the hazard, not the looking. The failure mode is a tool that fills a
-# safety field on demand, so the guard gates the write. Observing and reporting
-# an already-migrated home stays available, which is what a future investigator
-# actually needs.
+# The receipt is the durable answer to "has this home been migrated, and what
+# did the run do", which is the question the deleted guard was trying to answer
+# from inferred state. Recording it at the source is what makes that question
+# answerable without an instrument that has to distinguish two worlds it cannot
+# see. The receipt is a record, never an authority: nothing in this script reads
+# it back to decide whether to run or what to write.
 #
 # Usage:
 #   bin/fm-migrate-endpoint-binding.sh [--apply]
 #
-#   (default)  observe and report only; writes nothing
+#   (default)  observe and report only; writes no metadata
 #   --apply    write observed bindings; refusals are still only reported
+#
+#   Both modes append a receipt. Running either mode twice is safe.
 #
 # Environment:
 #   FM_HOME  home whose state/ is repaired (required; no default, so a
 #            mistyped invocation cannot silently repair the wrong home)
 #
 # Exit: 0 when every candidate was either migrated or reported; 1 on a usage
-# or environment error, including `--apply` against a fully migrated home.
-# A disposition item is a reported outcome, not a failure of this script.
+# or environment error. A disposition item is a reported outcome, not a failure
+# of this script.
 
 set -uo pipefail
 
@@ -137,7 +123,7 @@ APPLY=0
 case "${1:-}" in
   '') ;;
   --apply) APPLY=1 ;;
-  -h|--help) sed -n '2,130p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
+  -h|--help) sed -n '2,116p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
   *) echo "usage: $(basename "$0") [--apply]" >&2; exit 1 ;;
 esac
 
@@ -145,62 +131,62 @@ esac
 STATE="$FM_HOME/state"
 [ -d "$STATE" ] || { echo "REFUSED: no state directory at $STATE." >&2; exit 1; }
 
-# One-shot guard. The repaired records are their own "already ran" marker, so
-# this cannot drift away from the fact it reports. Gating the write rather than
-# the run keeps observation available on an already-migrated home.
-#
-# The condition is provenance present AND no unbound candidate left, which is
-# exactly "this home is already fully migrated, nothing legitimate remains".
-# Gating on provenance alone would strand every record an interrupted run had
-# not reached yet, and the only remedy left would be the hand-write this whole
-# migration exists to avoid.
-#
-# Resuming is safe because the per-record filter below writes only to a record
-# with zero binding lines: a resumed run physically cannot rewrite, overwrite,
-# or re-stamp an already-migrated record. The per-record filter carries the
-# anti-overwrite guarantee; this guard only has to stop a casual re-run when
-# there is nothing left to do.
-#
-# An unbound candidate is any record with a window line and zero
-# endpoint_task_id= lines, the same set the loop considers for repair.
-#
-# OPEN QUESTION, do not treat the line below as settled. This counting was
-# chosen to avoid duplicating backend routing here, on the reasoning that a
-# permissive guard cannot cause a write the per-record filter would not already
-# allow. That is still true of writes, but review has since shown the counting
-# is wrong for the guard's own purpose: a record that is unbound and
-# permanently unrepairable, such as a legacy tmux record or one on a backend
-# with no observation path, keeps this count above zero forever and so disables
-# the refusal entirely on that home. Narrowing it to repairable records is the
-# proposed redesign; it is escalated and deliberately not applied here, because
-# this was the third review finding on this boundary. See the header section
-# "WHAT THE GUARD HOLDS, AND WHAT IT DOES NOT" and this task's private report.
-provenance_records=0
-unbound_candidates=0
-for scan_meta in "$STATE"/*.meta; do
-  [ -e "$scan_meta" ] || continue
-  if grep -q '^endpoint_task_id_provenance=' "$scan_meta" 2>/dev/null; then
-    provenance_records=$((provenance_records + 1))
-  fi
-  if grep -q '^window=' "$scan_meta" 2>/dev/null && ! grep -q '^endpoint_task_id=' "$scan_meta" 2>/dev/null; then
-    unbound_candidates=$((unbound_candidates + 1))
-  fi
-done
-if [ "$APPLY" -eq 1 ] && [ "$provenance_records" -gt 0 ] && [ "$unbound_candidates" -eq 0 ]; then
-  echo "REFUSED: $STATE is already fully migrated: $provenance_records record(s) carry migration provenance and no unbound record remains; this backfill is one-shot per home." >&2
-  echo "Re-run without --apply to observe and report this home. A disposition item needs a decision, and a binding is only ever populated from a live observation of the endpoint." >&2
-  exit 1
-fi
+# No one-shot guard here, deliberately. Repetition is made harmless by the
+# per-record filter further down, which writes only to a record with zero
+# binding lines; see SAFE TO REPEAT in the header for why that is the whole
+# protection and why the previous refusal was removed rather than corrected.
+
+RECEIPTS="$FM_HOME/data/endpoint-binding-migration-receipts.log"
 
 # shellcheck source=bin/fm-backend.sh
 . "$FM_ROOT/bin/fm-backend.sh"
 
 RUN_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 HERDR_VERSION=$(herdr --version 2>/dev/null | head -1 || true)
+MODE=observe
+[ "$APPLY" -eq 1 ] && MODE=apply
 
 migrated=0
 refused=0
 not_required=0
+
+# The receipt is append-only and written AS THE RUN PROCEEDS, not summarised at
+# the end. A run that dies halfway therefore leaves a start line with no end
+# line, so a completed run and an interrupted one are distinguishable in the
+# record instead of looking identical. Recording the event at its source is what
+# makes "was this home migrated, and what happened" answerable later without an
+# instrument that has to tell apart two worlds it cannot see.
+#
+# A run that cannot write its receipt does not run. An unrecorded run is the
+# state this design exists to make impossible, so a receipt failure is refused
+# up front rather than discovered afterwards.
+receipt_append() {
+  printf '%s\n' "$1" >> "$RECEIPTS"
+}
+
+receipt_open() {
+  mkdir -p "$(dirname "$RECEIPTS")" || return 1
+  receipt_append "$(printf 'run\tstart=%s\thome=%s\tmode=%s\tby=%s\ttool=%s' \
+    "$RUN_AT" "$FM_HOME" "$MODE" "$(basename "${BASH_SOURCE[0]}")" "${HERDR_VERSION:-absent}")"
+}
+
+receipt_close() {
+  receipt_append "$(printf 'run\tend=%s\tstart=%s\tmode=%s\tobserved=%s\tdisposition=%s\tnot_required=%s' \
+    "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$RUN_AT" "$MODE" "$migrated" "$refused" "$not_required")"
+}
+
+# outcome <line>: report one record's result on stdout and in the receipt. Both
+# surfaces get the same text, so the receipt can never become a second and
+# divergent account of what the run did.
+outcome() {
+  printf '%s\n' "$1"
+  receipt_append "$1"
+}
+
+receipt_open || {
+  echo "REFUSED: cannot write the run receipt at $RECEIPTS; refusing to run unrecorded." >&2
+  exit 1
+}
 
 # meta_count <meta> <key>: number of lines for <key>.
 meta_count() { grep -c "^$2=" "$1" 2>/dev/null || true; }
@@ -221,7 +207,7 @@ meta_one() {
 # record that cannot be verified is never left to be inferred from silence.
 disposition() {
   refused=$((refused + 1))
-  printf 'DISPOSITION\t%s\t%s\n' "$1" "$2"
+  outcome "$(printf 'DISPOSITION\t%s\t%s' "$1" "$2")"
 }
 
 # observe_herdr_binding <id> <meta>: the whole observation. Prints
@@ -370,7 +356,7 @@ for meta in "$STATE"/*.meta; do
     # Not a candidate: the validator accepts a legacy tmux record on its window
     # name alone. Reported rather than passed over in silence.
     not_required=$((not_required + 1))
-    printf 'NOT-REQUIRED\t%s\ttmux record; validator binds it by window name, no field needed\n' "$id"
+    outcome "$(printf 'NOT-REQUIRED\t%s\ttmux record; validator binds it by window name, no field needed' "$id")"
     continue
   fi
 
@@ -389,16 +375,19 @@ for meta in "$STATE"/*.meta; do
   if [ "$APPLY" -eq 1 ]; then
     if write_binding "$meta" "$observed_id" "$detail"; then
       migrated=$((migrated + 1))
-      printf 'MIGRATED\t%s\tendpoint_task_id=%s\t%s\n' "$id" "$observed_id" "$detail"
+      outcome "$(printf 'MIGRATED\t%s\tendpoint_task_id=%s\t%s' "$id" "$observed_id" "$detail")"
     else
       disposition "$id" "observed cleanly but the metadata write failed"
     fi
   else
     migrated=$((migrated + 1))
-    printf 'WOULD-MIGRATE\t%s\tendpoint_task_id=%s\t%s\n' "$id" "$observed_id" "$detail"
+    outcome "$(printf 'WOULD-MIGRATE\t%s\tendpoint_task_id=%s\t%s' "$id" "$observed_id" "$detail")"
   fi
 done
 
 printf '\nsummary observed=%s disposition=%s not_required=%s\n' \
   "$migrated" "$refused" "$not_required"
+printf 'receipt %s\n' "$RECEIPTS"
+
+receipt_close
 exit 0
