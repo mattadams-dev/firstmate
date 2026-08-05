@@ -26,9 +26,11 @@
 #       is in the way. Exit 0 quiescent, 1 not. Read-only.
 #
 #   fm-rebirth.sh arm [--backend B --target T] [--harness H] [--dry-run]
-#       Refuses unless rebirth is due AND the moment is quiescent. Records the
-#       predecessor's number, then types the harness's own exit command into the
-#       composer it just proved empty. Nothing is ever terminated here.
+#       Refuses unless rebirth is due FOR THE SESSION RUNNING NOW, a live launch
+#       wrapper is proven ready to bring a session back, and the moment is
+#       quiescent. Records the predecessor's number, then types the harness's own
+#       exit command into the composer it just proved empty. Nothing is ever
+#       terminated here.
 #
 #   fm-rebirth.sh claim
 #       Consume an armed rebirth: the launch wrapper's proof that this exit was
@@ -60,8 +62,13 @@ BRIDGE="${FM_REBIRTH_BRIDGE:-$SCRIPT_DIR/fm-bridge.sh}"
 # shellcheck source=bin/fm-backend.sh
 # shellcheck disable=SC1091
 . "$SCRIPT_DIR/fm-backend.sh"
+# shellcheck source=bin/fm-wake-lib.sh
+# shellcheck disable=SC1091
+. "$SCRIPT_DIR/fm-wake-lib.sh"
 
-usage() { sed -n '2,45p' "$0" | sed 's/^# \{0,1\}//'; }
+# The whole header block, however long it grows: a hand-counted line range
+# silently truncates the help the moment a line is added above it.
+usage() { sed -n '2,${/^[^#]/q;p;}' "$0" | sed 's/^# \{0,1\}//'; }
 die() { printf 'fm-rebirth: %s\n' "$1" >&2; exit 2; }
 
 SESSION=
@@ -119,12 +126,29 @@ case "$COMMAND" in
       printf 'last reading: none recorded yet (no turn has ended in this home since the instrument was installed)\n'
     fi
     printf 'threshold: %s provider tokens\n' "$(fm_rebirth_threshold)"
-    if fm_rebirth_is_due "$STATE"; then
-      printf 'rebirth: DUE since %s at %s tokens\n' \
-        "$(fm_rebirth_field "$STATE/.rebirth-due" ts)" \
-        "$(fm_rebirth_field "$STATE/.rebirth-due" tokens)"
+    DUE=$(fm_rebirth_due_verdict "$STATE") || true
+    case "$DUE" in
+      due)
+        printf 'rebirth: DUE since %s at %s tokens\n' \
+          "$(fm_rebirth_field "$STATE/.rebirth-due" ts)" \
+          "$(fm_rebirth_field "$STATE/.rebirth-due" tokens)"
+        ;;
+      stale)
+        printf 'rebirth: not due - the marker belongs to session %s, and %s is running now\n' \
+          "$(fm_rebirth_field "$STATE/.rebirth-due" session)" \
+          "$(fm_rebirth_field "$STATE/.context-footprint" session)"
+        ;;
+      unproven)
+        printf 'rebirth: unproven - a due marker exists but cannot be tied to the session running now\n'
+        ;;
+      *)
+        printf 'rebirth: not marked due\n'
+        ;;
+    esac
+    if LAUNCHER=$(fm_rebirth_relauncher_proof "$STATE"); then
+      printf 'relauncher: a live launch wrapper (pid %s) is ready to bring a session back\n' "$LAUNCHER"
     else
-      printf 'rebirth: not marked due\n'
+      printf 'relauncher: %s\n' "$LAUNCHER"
     fi
     if [ -f "$STATE/.rebirth-armed" ]; then
       if fm_rebirth_arm_is_fresh "$STATE"; then
@@ -150,12 +174,30 @@ case "$COMMAND" in
     ;;
 
   arm)
-    if ! fm_rebirth_is_due "$STATE"; then
-      printf 'not armed: rebirth is not due\n'
+    if ! DUE=$(fm_rebirth_due_verdict "$STATE"); then
+      case "$DUE" in
+        stale)
+          printf 'not armed: the due marker was left by session %s, but %s is the session running now; a marker its own session did not leave is no evidence THIS session is over the line\n' \
+            "$(fm_rebirth_field "$STATE/.rebirth-due" session)" \
+            "$(fm_rebirth_field "$STATE/.context-footprint" session)"
+          ;;
+        unproven)
+          printf 'not armed: the due marker cannot be tied to the session running now, so whether it belongs to this session or to one that is gone is unproven\n'
+          ;;
+        *)
+          printf 'not armed: rebirth is not due\n'
+          ;;
+      esac
       exit 1
     fi
     if [ -f "$STATE/.rebirth-armed" ] && fm_rebirth_arm_is_fresh "$STATE"; then
       printf 'not armed: a rebirth is already armed and waiting for the session to exit\n'
+      exit 1
+    fi
+    # Nothing asks a session to exit until something is proven ready to bring one
+    # back. A cheap durable read, so it runs before the pane is touched.
+    if ! LAUNCHER=$(fm_rebirth_relauncher_proof "$STATE"); then
+      printf 'not armed: %s\n' "$LAUNCHER"
       exit 1
     fi
     resolve_endpoint
@@ -283,6 +325,10 @@ case "$COMMAND" in
     rm -f "$STATE/.rebirth-handoff.bak" 2>/dev/null || true
     printf 'pending: the successor has not produced a readable footprint yet (attempt %s of %s)\n' "$TRIES" "$MAX_TRIES"
     exit 1
+    ;;
+
+  -h|--help)
+    usage
     ;;
 
   *)

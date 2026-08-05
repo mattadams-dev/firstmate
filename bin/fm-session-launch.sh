@@ -16,6 +16,16 @@
 # that would have to act. Something outside it has to survive the exit, and the
 # smallest something is the shell that launched it.
 #
+# WHICH IS WHY THIS WRAPPER REGISTERS ITSELF. It publishes its pid and its
+# process identity to state/.session-launcher, and bin/fm-rebirth.sh refuses to
+# ask any session to exit until that record describes a process running right
+# then. Nothing else in the home can prove a relaunch is coming, and the two
+# outcomes are not comparable: refusing costs a delayed rebirth, while an exit
+# typed with no wrapper behind it costs the home its primary session entirely -
+# the daemon left injecting into a dead shell while escalations buffer until a
+# human comes back. A README line telling an operator to use this wrapper is
+# guidance; the record is proof.
+#
 # THE SESSION IS NEVER TERMINATED, and that is a design commitment rather than
 # an omission. The rebirth is ASKED FOR - bin/fm-rebirth.sh types the harness's
 # own exit command into a composer it has proven empty - so by the time this
@@ -71,10 +81,19 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 REBIRTH="${FM_SESSION_LAUNCH_REBIRTH:-$SCRIPT_DIR/fm-rebirth.sh}"
 SAFE_KILL="${FM_SESSION_LAUNCH_SAFE_KILL:-$SCRIPT_DIR/fm-safe-kill.sh}"
 
+# shellcheck source=bin/fm-wake-lib.sh
+# shellcheck disable=SC1091
+. "$SCRIPT_DIR/fm-wake-lib.sh"
+# shellcheck source=bin/fm-rebirth-lib.sh
+# shellcheck disable=SC1091
+. "$SCRIPT_DIR/fm-rebirth-lib.sh"
+
 MAX_REBIRTHS=24
 MIN_UPTIME=60
 
-usage() { sed -n '2,50p' "$0" | sed 's/^# \{0,1\}//'; }
+# The whole header block, however long it grows: a hand-counted line range
+# silently truncates the help the moment a line is added above it.
+usage() { sed -n '2,${/^[^#]/q;p;}' "$0" | sed 's/^# \{0,1\}//'; }
 die() { printf 'fm-session-launch: %s\n' "$1" >&2; exit 2; }
 
 while [ $# -gt 0 ]; do
@@ -102,6 +121,22 @@ for arg in "$@"; do
 done
 
 mkdir -p "$STATE" 2>/dev/null || true
+
+# The registration `arm` requires. Published before the first launch, so no
+# session can be asked to exit before the thing that would relaunch it exists,
+# and withdrawn when this wrapper leaves, so an armed rebirth is never taken on
+# the strength of a wrapper that has already gone home.
+#
+# A wrapper killed outright never reaches the release, and that is why the record
+# publishes the process identity too: the proof is read as "is this pid the
+# wrapper that wrote this, right now", never as "does the file exist".
+LAUNCHER_PID=$$
+if fm_rebirth_publish_relauncher "$STATE" "$LAUNCHER_PID"; then
+  trap 'fm_rebirth_release_relauncher "$STATE" "$LAUNCHER_PID"' EXIT
+else
+  printf 'fm-session-launch: this wrapper could not register itself in %s, so an unattended rebirth will refuse to ask this session to exit. The session itself runs normally.\n' \
+    "$STATE" >&2
+fi
 
 # retire_predecessor_watcher: end the watcher the dying session armed, using the
 # ONLY selector the termination helper accepts - a pid the home's watcher lock

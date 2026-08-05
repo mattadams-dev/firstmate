@@ -54,7 +54,13 @@ Two exclusions matter:
 
 The turn-end guard already runs on every stop, so the reading costs one extra file read at a moment the process is already awake.
 It records the reading in `state/.context-footprint` either way, and writes `state/.rebirth-due` only when the reading is past the line.
+A reading under the line removes that marker; an `unknown` reading leaves it exactly as it was, because failing to read is not a reading under the line.
 The reading never changes what the guard does: a session is not stopped mid-turn over a number, and a failed reading never blocks a turn from ending.
+
+The marker is a claim about **one session**: the one whose own reading crossed the line.
+So it is spent only by the session that earned it - the marker's session is compared against the session the last turn-end reading recorded, and a marker left behind by a session that is gone is not due.
+The failure that closes is a false success: a successor armed on its predecessor's marker inherits a number it never carried and posts a verified success to the Bridge for a rebirth that shed nothing, and nothing about that reading prompts anyone to look.
+When either side cannot be identified the answer is `unproven`, which is not permission.
 
 ### Timing
 
@@ -66,6 +72,11 @@ A moment is quiescent when all of these hold:
 - no task in this home has an open decision, folded by the one owner of that contract, so a later terminal status line never clears an earlier `needs-decision`;
 - the primary session is not mid-turn;
 - the composer is **proven** empty by the shared classifier - `pending`, `unknown`, and unreadable are all unsafe, and a bare shell prompt is a dead shell rather than an idle agent.
+
+One more thing is proven before any of that, because it is cheap and because the session cannot be un-asked to exit: a **live launch wrapper** must be registered in `state/.session-launcher`, its pid running right now and still the process that wrote the record.
+Nothing else in the home can establish that a session will come back.
+The two outcomes are not comparable - refusing costs a delayed rebirth, while an exit typed with no wrapper behind it costs the home its primary session entirely, leaving the daemon injecting into a dead shell while escalations buffer until a human returns.
+Starting the harness through the wrapper is what makes that proof true; the README line saying so is guidance, and the record is the proof.
 
 Every refusal names its reason, because "not now" and "could not tell" are different answers.
 
@@ -116,8 +127,8 @@ bin/fm-rebirth.sh status      # the last reading, whether rebirth is due, what i
 bin/fm-rebirth.sh quiescent   # whether ending the session now is safe, and if not, what is in the way
 ```
 
-Both are read-only.
-`arm` refuses unless the session is both due and quiescent, and `--dry-run` reports what it would do without typing anything.
+Both are read-only, and `status` reports the relauncher too - a home running its session outside the wrapper says so there rather than at the moment a rebirth is needed.
+`arm` refuses unless the session running now is the one marked due, a live launch wrapper is registered, and the moment is quiescent; `--dry-run` reports what it would do without typing anything.
 
 ## Records
 
@@ -125,7 +136,8 @@ All under `state/`, all volatile:
 
 | Record | Written by | Meaning |
 | --- | --- | --- |
-| `.context-footprint` | the guard, every turn end | the last reading, including `unknown` |
-| `.rebirth-due` | the guard | this session is past the threshold |
+| `.context-footprint` | the guard, every turn end | the last reading, including `unknown`, and which session took it |
+| `.rebirth-due` | the guard | the session named in it is past the threshold |
+| `.session-launcher` | `fm-session-launch.sh`, while it runs | the live wrapper that would relaunch, with the identity that proves the pid is still it |
 | `.rebirth-armed` | `fm-rebirth.sh arm` | the exit has been asked for; expires if the session does not end |
 | `.rebirth-handoff` | `fm-rebirth.sh claim` | what the successor inherits, until its footprint is verified |

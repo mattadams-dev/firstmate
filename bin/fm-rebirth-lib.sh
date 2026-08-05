@@ -40,6 +40,12 @@
 # different answers and a caller that cannot distinguish them will eventually
 # rebirth on the wrong one.
 #
+# THE SAME STANDARD APPLIES TO BOTH ENDS OF A REBIRTH. A due marker is proof
+# about ONE session, so it is checked against the session running now rather than
+# by its own existence; and nothing asks a session to exit until a live launch
+# wrapper is proven to be waiting to bring one back. Both are positive proof, for
+# the same reason quiescence is.
+#
 # TERMINATION IS NOT PART OF THIS. Nothing here ends a session. The exit is
 # ASKED FOR through the harness's own exit command, typed into the composer this
 # library just proved empty - which is why the composer read is load-bearing
@@ -103,8 +109,15 @@ FM_REBIRTH_TAIL_BYTES_DEFAULT=262144
 fm_rebirth_footprint_scan() {  # reads JSONL on stdin -> tokens | nothing
   # grep pre-filters cheaply; jq sees reverse file order, so the FIRST value it
   # emits is the LAST valid reading, and head -1 stops the scan there.
-  grep '"usage"' 2>/dev/null | jq -r '
-      select(type == "object")
+  #
+  # Each line is read as RAW TEXT and parsed on its own, so a line that is not
+  # valid JSON costs that line and nothing else. Handed the stream directly, jq
+  # aborts the whole scan at the first parse error instead - which would turn a
+  # half-flushed final write into `unknown` for the rest of the session's life,
+  # the mechanism silently ceasing to enforce with nobody watching.
+  grep '"usage"' 2>/dev/null | jq -R -r '
+      fromjson? // empty
+    | select(type == "object")
     | select(.isSidechain != true)
     | .message.usage
     | select(type == "object")
@@ -139,9 +152,16 @@ fm_rebirth_footprint_read() {  # <transcript-path> -> tokens (0) | nothing (1)
 # The instrument reading itself, at a moment the caller already runs. Records
 # what was observed and prints the verdict: due | under | unknown.
 #
-# Only `due` writes state/.rebirth-due. The reading itself is recorded either
-# way in state/.context-footprint, so an operator can see that the instrument
-# ran and what it saw - including that it saw nothing.
+# Only `due` writes state/.rebirth-due, and `under` REMOVES it: a marker is a
+# claim about a session that is over the line, and a fresh reading under the line
+# supersedes it - whether it was left by this session or by a predecessor that is
+# gone. `unknown` touches the marker in neither direction, because failing to
+# read is not a reading under the line.
+#
+# The reading itself is recorded either way in state/.context-footprint, so an
+# operator can see that the instrument ran and what it saw - including that it
+# saw nothing. That record is also the home's only durable answer to WHICH
+# session is running, which is what binds the due marker to a session below.
 fm_rebirth_record_reading() {  # <state> <session-id> <transcript> -> due|under|unknown
   local state=$1 session=${2:-unknown} transcript=${3:-} threshold tokens verdict tmp
   threshold=$(fm_rebirth_threshold)
@@ -169,13 +189,43 @@ fm_rebirth_record_reading() {  # <state> <session-id> <transcript> -> due|under|
     else
       rm -f "$tmp" 2>/dev/null
     fi
+  elif [ "$verdict" = under ]; then
+    rm -f "$state/.rebirth-due" 2>/dev/null || true
   fi
   printf '%s' "$verdict"
   return 0
 }
 
+# fm_rebirth_due_verdict <state>
+# Prints `due`, `not-marked`, `stale`, or `unproven`, and returns 0 only for
+# `due`.
+#
+# A due marker is a claim about ONE session: the one whose own reading crossed
+# the line. That the file exists proves nothing about the session running now,
+# and the gap between those two is a FALSE SUCCESS - a successor armed on its
+# predecessor's marker inherits a number it never carried and posts a verified
+# success the rebirth never earned. A false success outranks a false failure
+# because nothing prompts anyone to look.
+#
+# So the marker's session is compared against the session that took the last
+# turn-end reading, which is this home's only durable record of who is running.
+# When either side cannot be identified, the two worlds - marker belongs to the
+# running session, marker belongs to a session that is gone - produce the same
+# evidence, so the answer is `unproven` rather than either direction.
+fm_rebirth_due_verdict() {  # <state> -> due (0) | not-marked|stale|unproven (1)
+  local state=$1 marked running
+  [ -f "$state/.rebirth-due" ] || { printf 'not-marked'; return 1; }
+  marked=$(fm_rebirth_field "$state/.rebirth-due" session)
+  running=$(fm_rebirth_field "$state/.context-footprint" session)
+  case "$marked" in ''|unknown) printf 'unproven'; return 1 ;; esac
+  case "$running" in ''|unknown) printf 'unproven'; return 1 ;; esac
+  [ "$marked" = "$running" ] || { printf 'stale'; return 1; }
+  printf 'due'
+  return 0
+}
+
 fm_rebirth_is_due() {  # <state>
-  [ -f "$1/.rebirth-due" ]
+  fm_rebirth_due_verdict "$1" >/dev/null
 }
 
 fm_rebirth_field() {  # <record-file> <key> -> value
@@ -250,6 +300,100 @@ fm_rebirth_quiescence() {  # <state> <backend> <target> -> quiescent|<reason>
   fi
 
   printf 'quiescent'
+  return 0
+}
+
+# --- the relauncher, proven the same way everything else here is -------------
+#
+# Asking a session to exit is only half a rebirth. Nothing about the exit
+# establishes that anything will bring a session back, and the two outcomes are
+# not comparable: refusing costs a delayed rebirth, while proceeding with no
+# relauncher costs the home its primary session entirely - the daemon left
+# injecting into a dead shell and escalations buffering until a human returns,
+# which is the exact decapitation this machinery exists to make survivable.
+#
+# So the launch wrapper registers itself, and `arm` requires that record to
+# describe a process that is running NOW - held to the same standard as the due
+# marker, the quiescence read, the verified exit command, and the readable
+# reading. Documentation telling an operator to use the wrapper is guidance, not
+# proof.
+
+# fm_rebirth_publish_relauncher <state> <pid>
+# The wrapper's own registration. The identity is published alongside the pid
+# because a pid outlives its process: a record naming a number nobody can tie
+# back to the wrapper that wrote it is not proof of anything.
+#
+# The caller must have sourced bin/fm-wake-lib.sh (fm_pid_identity).
+fm_rebirth_publish_relauncher() {  # <state> <pid>
+  local state=$1 pid=$2 identity tmp
+  case "$pid" in ''|*[!0-9]*) return 1 ;; esac
+  command -v fm_pid_identity >/dev/null 2>&1 || return 1
+  identity=$(fm_pid_identity "$pid" 2>/dev/null) || return 1
+  [ -n "$identity" ] || return 1
+  mkdir -p "$state" 2>/dev/null || return 1
+  tmp="$state/.session-launcher.tmp.$$"
+  printf 'pid=%s\nts=%s\nidentity=%s\n' \
+    "$pid" "$(date '+%Y-%m-%dT%H:%M:%S%z')" "$identity" > "$tmp" 2>/dev/null \
+    || { rm -f "$tmp" 2>/dev/null; return 1; }
+  mv -f "$tmp" "$state/.session-launcher" 2>/dev/null || { rm -f "$tmp" 2>/dev/null; return 1; }
+  return 0
+}
+
+# fm_rebirth_release_relauncher <state> <pid>
+# Withdraw a registration this pid owns. A wrapper that dies without getting
+# here leaves a record that no longer describes a live process, which the proof
+# below already refuses - so this is hygiene, never the guard.
+fm_rebirth_release_relauncher() {  # <state> <pid>
+  local state=$1 pid=$2
+  [ "$(fm_rebirth_field "$state/.session-launcher" pid)" = "$pid" ] || return 0
+  rm -f "$state/.session-launcher" 2>/dev/null || true
+  return 0
+}
+
+# fm_rebirth_relauncher_proof <state>
+# Prints the live wrapper's pid and returns 0, or prints what could not be
+# proven and returns 1. Every refusal names its own reason, because "nobody is
+# there to relaunch" and "I could not tell" are different answers.
+#
+# The caller must have sourced bin/fm-wake-lib.sh. When it has not, this refuses
+# rather than passing: "no wrapper is running" and "I have no way to look" must
+# never produce the same answer, and neither of them is permission.
+fm_rebirth_relauncher_proof() {  # <state> -> pid (0) | reason (1)
+  local state=$1 record pid recorded current
+  record="$state/.session-launcher"
+  if [ ! -f "$record" ]; then
+    printf 'no launch wrapper is registered in this home, so nothing is proven to bring a session back (start the session through bin/fm-session-launch.sh)'
+    return 1
+  fi
+  pid=$(fm_rebirth_field "$record" pid)
+  case "$pid" in
+    ''|*[!0-9]*)
+      printf 'the launch-wrapper record names no readable pid'
+      return 1 ;;
+  esac
+  if ! command -v fm_pid_alive >/dev/null 2>&1 || ! command -v fm_pid_identity >/dev/null 2>&1; then
+    printf 'the pid helpers are unavailable, so a live launch wrapper cannot be proven'
+    return 1
+  fi
+  if ! fm_pid_alive "$pid"; then
+    printf 'the launch wrapper (pid %s) is no longer running, so this session would not come back' "$pid"
+    return 1
+  fi
+  if command -v fm_pid_is_zombie >/dev/null 2>&1 && fm_pid_is_zombie "$pid"; then
+    printf 'the launch wrapper (pid %s) is a zombie and can never relaunch anything' "$pid"
+    return 1
+  fi
+  recorded=$(fm_rebirth_field "$record" identity)
+  if [ -z "$recorded" ]; then
+    printf 'the launch-wrapper record publishes no holder identity, so pid reuse cannot be ruled out'
+    return 1
+  fi
+  current=$(fm_pid_identity "$pid" 2>/dev/null)
+  if [ -z "$current" ] || [ "$current" != "$recorded" ]; then
+    printf 'pid %s is not the launch wrapper that registered it, so no relaunch is proven' "$pid"
+    return 1
+  fi
+  printf '%s' "$pid"
   return 0
 }
 

@@ -146,6 +146,16 @@ SH
   chmod +x "$1/bridge-recorder"
 }
 
+# publish_relauncher <home> <pid>: register a launch wrapper in that home
+# through the REAL writer, so the record's shape can never drift from what the
+# proof reads. A pid whose identity cannot be read is refused by the writer, so
+# this only ever registers a process that was genuinely alive when it ran.
+publish_relauncher() {  # <home> <pid>
+  FM_STATE_OVERRIDE="$1/state" bash -c \
+    '. "$1"; . "$2"; fm_rebirth_publish_relauncher "$3" "$4"' \
+    _ "$ROOT/bin/fm-wake-lib.sh" "$ROOT/bin/fm-rebirth-lib.sh" "$1/state" "$2"
+}
+
 # A home that is due, quiescent, and ready to arm. Every quiescence test starts
 # from this and breaks exactly one thing, so a refusal can only come from the
 # thing that test broke.
@@ -158,6 +168,14 @@ SH
 # pinned from both sides instead, by test_death_reading_marks_rebirth_due (a
 # reading past the line produces this marker) and test_arm_refuses_when_not_due
 # (without it, nothing arms).
+#
+# The footprint record names the SAME session as the marker, because that is what
+# a session sitting over its own line looks like: the marker is a claim about the
+# session whose reading produced it, never about the home.
+#
+# The relauncher is registered for this test process, which is genuinely alive
+# for the length of the run. The proof is about a live wrapper, and a fabricated
+# record could only confirm itself.
 armable_home() {
   local home
   home=$(new_home)
@@ -165,6 +183,10 @@ armable_home() {
   install_bridge_recorder "$home"
   printf 'session=predecessor\nts=2026-08-05T21:00:00-0700\ntokens=%s\nthreshold=200000\ntranscript=%s\n' \
     "$DEATH_TOKENS" "$DEATH" > "$home/state/.rebirth-due"
+  printf 'session=predecessor\nts=2026-08-05T21:00:00-0700\ntokens=%s\nthreshold=200000\nverdict=due\ntranscript=%s\n' \
+    "$DEATH_TOKENS" "$DEATH" > "$home/state/.context-footprint"
+  publish_relauncher "$home" "$$" \
+    || fail "precondition: a live launch wrapper must be registerable in the test home"
   set_pane "$home" '❯'
   printf '%s' "$home"
 }
@@ -232,6 +254,24 @@ test_reading_scans_past_trailing_non_message_lines() {
   [ "$tokens" = "$DEATH_TOKENS" ] \
     || fail "expected the last usage line's $DEATH_TOKENS, got '$tokens'"
   pass "detection: the reading scans backwards past trailing non-message lines"
+}
+
+# The reader runs at Stop, against a file the harness is still writing, so its
+# last line can be caught half-flushed. That line is the FIRST thing a backwards
+# scan sees. A reader handed the stream directly aborts the whole scan on it and
+# reports unknown - and would go on reporting unknown for the rest of the
+# session's life, the mechanism ceasing to enforce with nobody watching.
+test_a_malformed_trailing_line_never_blinds_the_reader() {
+  local home torn tokens
+  home=$(new_home)
+  torn=$home/torn.jsonl
+  cp "$DEATH" "$torn"
+  printf '{"type":"assistant","message":{"usage":{"input_tokens":1' >> "$torn"
+  tokens=$(fm_rebirth_footprint_read "$torn") \
+    || fail "a half-written final line must cost that line, not the whole reading"
+  [ "$tokens" = "$DEATH_TOKENS" ] \
+    || fail "expected the last COMPLETE reading of $DEATH_TOKENS, got '$tokens'"
+  pass "detection: a malformed line is skipped rather than ending the scan"
 }
 
 # A subagent's usage object records the SUBAGENT's context, not the session's.
@@ -464,6 +504,93 @@ test_arm_refuses_a_due_marker_with_no_reading() {
   pass "timing: a due marker with no readable reading refuses instead of shipping an uncheckable handoff"
 }
 
+# THE FALSE SUCCESS. A marker is a claim about the session whose reading produced
+# it. If mere existence counted, a session that crossed the line while the captain
+# was present and then ended by hand would leave its marker behind, and the next
+# session - at birth weight - would be armed on it, ending fine and posting
+# "reborn: 61602 tokens, down from 368381" to the Bridge: a verified success for a
+# rebirth that shed nothing. Nothing about that reading prompts anyone to look,
+# which is why it outranks a false failure.
+#
+# The successor here reads `unknown` (its transcript is not there yet), so the
+# marker is not cleared by the reading either - the case where only the binding
+# stands between a stale marker and a false success.
+test_a_marker_left_by_another_session_never_arms_this_one() {
+  local home out
+  home=$(armable_home)
+  rebirth "$home" record --session successor --transcript "$home/absent.jsonl" >/dev/null
+  assert_present "$home/state/.rebirth-due" \
+    "precondition: an unknown reading must leave the predecessor's marker in place"
+  out=$(arm "$home") \
+    && fail "a marker left by a session that is gone must never arm this one: $out"
+  assert_contains "$out" "session running now" \
+    "the refusal must say the marker belongs to another session, not merely 'not due'"
+  assert_absent "$home/typed" "nothing may be typed for a rebirth this session never earned"
+  assert_absent "$home/state/.rebirth-armed" "a refused arm must leave no armed record"
+
+  # The paired positive, in the same home: once THIS session's own reading is the
+  # one over the line, the same marker arms. A guard that blocks the legitimate
+  # case is one people switch off.
+  rebirth "$home" record --session successor --transcript "$DEATH" >/dev/null
+  out=$(arm "$home") || fail "a session marked due by its OWN reading must still arm: $out"
+  assert_grep "predecessor_session=successor" "$home/state/.rebirth-armed" \
+    "the armed record must name the session whose own reading crossed the line"
+  pass "timing: a due marker binds to the session that earned it, and still arms that session"
+}
+
+# The other half of the binding: a reading under the line supersedes an older
+# marker rather than leaving it to be found later. Unknown does neither, because
+# failing to read is not a reading under the line.
+test_an_under_reading_clears_a_stale_marker_and_unknown_does_not() {
+  local home
+  home=$(armable_home)
+  rebirth "$home" record --session successor --transcript "$home/absent.jsonl" >/dev/null
+  assert_present "$home/state/.rebirth-due" \
+    "an unknown reading must not clear a marker; unknown is not a reading under the line"
+  rebirth "$home" record --session successor --transcript "$BIRTH" >/dev/null
+  assert_absent "$home/state/.rebirth-due" \
+    "a reading under the line must retire the marker rather than leave it for a later session"
+  pass "detection: an under-threshold reading clears a marker it supersedes, an unknown one leaves it alone"
+}
+
+# Asking a session to exit with nothing behind it to relaunch costs the home its
+# primary session: the daemon keeps running with only a dead shell to inject
+# into, and escalations buffer until a human comes back. That is the decapitation
+# this machinery exists to make survivable, so the relauncher is proven exactly
+# like every other precondition.
+test_arm_refuses_without_a_proven_relauncher() {
+  local home out
+  home=$(armable_home)
+  rm -f "$home/state/.session-launcher"
+  out=$(arm "$home") && fail "arm must refuse when nothing is proven to relaunch the session: $out"
+  assert_contains "$out" "launch wrapper" "the refusal must name the missing relauncher"
+  assert_absent "$home/typed" "nothing may be typed when no session would come back"
+  assert_absent "$home/state/.rebirth-armed" "a refused arm must leave no armed record"
+
+  # The paired positive: a real live wrapper is not refused. Without this the
+  # guard could pass by refusing everything.
+  publish_relauncher "$home" "$$" || fail "precondition: the relauncher must be registerable"
+  out=$(arm "$home") || fail "a home with a live launch wrapper must still arm: $out"
+  assert_grep "/exit" "$home/typed" "the legitimate case must still ask the session to exit"
+  pass "timing: arm refuses without a proven relauncher and proceeds with one"
+}
+
+# A record is not a wrapper. The pid it names has to be running right now, and
+# it has to still be the process that wrote the record.
+test_arm_refuses_a_relauncher_that_is_gone() {
+  local home out pid
+  home=$(armable_home)
+  sleep 30 &
+  pid=$!
+  publish_relauncher "$home" "$pid" || fail "precondition: a live pid must be registerable"
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  out=$(arm "$home") && fail "a registration for a dead wrapper must not arm a rebirth: $out"
+  assert_contains "$out" "no longer running" "the refusal must say the registered wrapper is gone"
+  assert_absent "$home/typed" "nothing may be typed on the strength of a wrapper that has exited"
+  pass "timing: a launch-wrapper record whose process has exited is not proof of a relaunch"
+}
+
 # --- Part 3: execution. Relaunch, and nothing terminated. -------------------
 
 # A wrapper that relaunches on any exit would fight the captain closing their own
@@ -476,6 +603,32 @@ test_wrapper_exits_with_the_session_when_no_rebirth_was_armed() {
   [ "$status" -eq 1 ] || fail "the wrapper must exit with the session's own status, got $status"
   assert_not_contains "$out" "relaunching" "no rebirth was armed, so nothing may be relaunched"
   pass "execution: an ordinary session exit passes straight through, unrelaunched"
+}
+
+# The other end of the relauncher proof: the wrapper is what makes that proof
+# true, and it must be true WHILE the session runs - the only moment an arm can
+# happen - and false again once the wrapper is gone.
+test_the_wrapper_registers_itself_while_the_session_runs() {
+  local home
+  home=$(new_home)
+  cat > "$home/session" <<SH
+#!/usr/bin/env bash
+cp "$home/state/.session-launcher" "$home/launcher-seen" 2>/dev/null || true
+printf '%s\n' "\$PPID" > "$home/wrapper-pid"
+exit 0
+SH
+  chmod +x "$home/session"
+  FM_STATE_OVERRIDE="$home/state" FM_SESSION_LAUNCH_REBIRTH="$ROOT/bin/fm-rebirth.sh" \
+    "$ROOT/bin/fm-session-launch.sh" -- "$home/session" >/dev/null 2>&1
+  assert_present "$home/launcher-seen" \
+    "the wrapper must be registered before the session it launches can be asked to exit"
+  assert_grep "pid=$(cat "$home/wrapper-pid")" "$home/launcher-seen" \
+    "the record must name the wrapper's own pid, so the proof can be checked against a live process"
+  assert_grep "identity=" "$home/launcher-seen" \
+    "the record must publish the holder identity, or pid reuse cannot be ruled out"
+  assert_absent "$home/state/.session-launcher" \
+    "a wrapper that has gone home must not leave a registration behind it"
+  pass "execution: the launch wrapper registers itself while the session runs and withdraws on exit"
 }
 
 test_wrapper_relaunches_exactly_once_per_armed_rebirth() {
@@ -678,6 +831,7 @@ test_death_reading_marks_rebirth_due
 test_birth_weight_never_marks_rebirth_due
 test_unknown_reading_is_neither_due_nor_under
 test_reading_scans_past_trailing_non_message_lines
+test_a_malformed_trailing_line_never_blinds_the_reader
 test_sidechain_usage_never_reports_the_session
 test_zero_counters_read_unknown_not_zero
 test_threshold_override_is_honoured_and_junk_is_not
@@ -693,7 +847,12 @@ test_arm_refuses_when_not_due
 test_arm_refuses_an_unverified_harness
 test_exit_commands_match_the_verified_adapters
 test_arm_refuses_a_due_marker_with_no_reading
+test_a_marker_left_by_another_session_never_arms_this_one
+test_an_under_reading_clears_a_stale_marker_and_unknown_does_not
+test_arm_refuses_without_a_proven_relauncher
+test_arm_refuses_a_relauncher_that_is_gone
 test_wrapper_exits_with_the_session_when_no_rebirth_was_armed
+test_the_wrapper_registers_itself_while_the_session_runs
 test_wrapper_relaunches_exactly_once_per_armed_rebirth
 test_the_rebirth_path_never_terminates_the_session
 test_the_predecessor_watcher_is_retired_through_the_helper

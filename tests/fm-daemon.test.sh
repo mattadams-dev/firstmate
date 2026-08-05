@@ -30,9 +30,24 @@ export FM_DAEMON_PRIMARY_HARNESS
 # The turn-end guard marks a session rebirth-due; this is the half that decides
 # when. What matters here is the gate, not the decision itself: the decision has
 # its own suite (tests/fm-rebirth.test.sh), and the daemon must reach it only
-# when away mode is on and the home is actually marked. With no endpoint passed,
-# the real owner refuses because the composer cannot be read, so a logged
-# refusal is proof the daemon called it at all.
+# when away mode is on and the home is actually marked. The real owner refuses in
+# a test home - no launch wrapper is registered there and no endpoint resolves -
+# so a logged refusal is proof the daemon called it at all.
+#
+# THE ENDPOINT IS SEALED OFF, not merely left empty. `arm` runs as a real
+# subprocess, and its endpoint resolution falls back to FM_SUPERVISOR_TARGET and
+# then to the ambient TMUX_PANE - so a suite run from inside tmux would hand the
+# real owner the OPERATOR'S OWN PANE and a real tmux to type an exit command
+# into. The fake tmux goes on PATH and every endpoint variable is cleared, as
+# every other pane-touching test in this file does.
+
+rebirth_run() {  # <state> - housekeeping with no reachable pane, ever
+  local state=$1
+  LOG="$state/.supervise-daemon.log" FM_STATE_OVERRIDE="$state" \
+  PATH="$(dirname "$state")/fakebin:$PATH" \
+  TMUX_PANE='' FM_SUPERVISOR_TARGET='' FM_SUPERVISOR_BACKEND='' \
+    housekeeping "$state" "" ""
+}
 
 rebirth_case() {  # <name> <afk: on|off> <due: yes|no> -> state dir
   local dir state=
@@ -42,15 +57,24 @@ rebirth_case() {  # <name> <afk: on|off> <due: yes|no> -> state dir
   # log would make "no rebirth line" true for the wrong reason.
   printf '[t] daemon starting\n' > "$state/.supervise-daemon.log"
   [ "$2" = on ] && : > "$state/.afk"
-  [ "$3" = yes ] && printf 'session=old\nts=t\ntokens=368381\nthreshold=200000\n' > "$state/.rebirth-due"
+  # The marker and the footprint name the same session, because a marker is a
+  # claim about the session running now: an unbound one would be refused before
+  # the daemon's own gate was ever exercised.
+  if [ "$3" = yes ]; then
+    printf 'session=old\nts=t\ntokens=368381\nthreshold=200000\n' > "$state/.rebirth-due"
+    printf 'session=old\nts=t\ntokens=368381\nthreshold=200000\nverdict=due\n' > "$state/.context-footprint"
+  fi
   printf '%s' "$state"
 }
 
 test_daemon_consults_the_rebirth_owner_when_away_and_due() {
   local state
   state=$(rebirth_case rebirth-away-due on yes)
-  LOG="$state/.supervise-daemon.log" FM_STATE_OVERRIDE="$state" housekeeping "$state" "" ""
-  assert_grep "rebirth" "$state/.supervise-daemon.log" \
+  rebirth_run "$state"
+  # The refusal, not just the word: the success line contains "rebirth" too, so
+  # asserting on the bare word would pass just as well if the arm had reached a
+  # live pane and typed an exit command into it.
+  assert_grep "rebirth deferred" "$state/.supervise-daemon.log" \
     "an away, rebirth-due home must reach the rebirth owner from housekeeping"
   pass "housekeeping consults the rebirth owner when away mode is on and the session is marked due"
 }
@@ -58,7 +82,7 @@ test_daemon_consults_the_rebirth_owner_when_away_and_due() {
 test_daemon_never_reborns_an_attended_session() {
   local state
   state=$(rebirth_case rebirth-attended-due off yes)
-  LOG="$state/.supervise-daemon.log" FM_STATE_OVERRIDE="$state" housekeeping "$state" "" ""
+  rebirth_run "$state"
   assert_no_grep "rebirth" "$state/.supervise-daemon.log" \
     "with the captain present, their session is never ended from underneath them"
   pass "housekeeping never touches rebirth while away mode is off, however large the session"
@@ -67,7 +91,7 @@ test_daemon_never_reborns_an_attended_session() {
 test_daemon_leaves_an_unmarked_session_alone() {
   local state
   state=$(rebirth_case rebirth-away-undue on no)
-  LOG="$state/.supervise-daemon.log" FM_STATE_OVERRIDE="$state" housekeeping "$state" "" ""
+  rebirth_run "$state"
   assert_no_grep "rebirth" "$state/.supervise-daemon.log" \
     "a session that was never marked due must not be considered for rebirth"
   pass "housekeeping leaves a session that is not marked rebirth-due alone"

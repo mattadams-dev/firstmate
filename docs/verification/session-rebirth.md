@@ -17,9 +17,14 @@ A tail that yields nothing falls back to the whole file, so the bound stays an o
 Command shape used to take a reading by hand:
 
 ```sh
-tac "$transcript" | grep -m1 '"usage"' \
-  | jq '.message.usage | .input_tokens + .cache_read_input_tokens + .cache_creation_input_tokens'
+tac "$transcript" | grep '"usage"' \
+  | jq -R -r 'fromjson? // empty | select(.isSidechain != true) | .message.usage
+      | .input_tokens + .cache_read_input_tokens + .cache_creation_input_tokens' \
+  | head -1
 ```
+
+The sidechain filter is part of the reading, not an optimisation: on a transcript whose last usage line is a subagent turn, a command without it reports the subagent's context as the session's - the exact false all-clear this reading exists to avoid.
+Each line is parsed on its own (`-R` with `fromjson?`) for the same reason the implementation does it: handed the stream directly, `jq` aborts the whole scan at the first malformed line instead of skipping it.
 
 Four readings taken from live firstmate sessions on 2026-08-05:
 
@@ -44,7 +49,7 @@ The pair is nearly 6x apart, so the threshold is exercised from both sides with 
 
 ## Mutation evidence, 2026-08-05
 
-Each mutant was applied to `bin/fm-rebirth-lib.sh` alone, every test in `tests/fm-rebirth.test.sh` was then run independently in its own shell, and the failing set was recorded.
+Each mutant was applied alone to the file that owns the behavior - `bin/fm-rebirth-lib.sh`, `bin/fm-rebirth.sh`, or `bin/fm-session-launch.sh` - every test in `tests/fm-rebirth.test.sh` was then run independently in its own shell, and the failing set was recorded.
 The baseline run with no mutant applied fails nothing.
 
 Detection - a mutant that lets a session past the threshold without marking it rebirth-due:
@@ -56,6 +61,8 @@ Detection - a mutant that lets a session past the threshold without marking it r
 | The due marker is never written even when the verdict is `due` | `test_death_reading_marks_rebirth_due` |
 | The sidechain filter is dropped, so a subagent's context reads as the session's | `test_sidechain_usage_never_reports_the_session` |
 | The whole-file fallback behind the bounded tail read is dropped | `test_a_reading_beyond_the_tail_window_is_still_found` |
+| The transcript is parsed as one stream instead of line by line, so a malformed line ends the scan | `test_a_malformed_trailing_line_never_blinds_the_reader` |
+| An `under` reading no longer retires the marker it supersedes | `test_an_under_reading_clears_a_stale_marker_and_unknown_does_not` |
 
 Timing - a mutant that reborns a session mid-decision or over a live composer:
 
@@ -66,6 +73,9 @@ Timing - a mutant that reborns a session mid-decision or over a live composer:
 | A composer that is not proven empty is treated as safe | `test_arm_refuses_a_pending_composer`, `test_arm_refuses_an_unproven_composer` |
 | An `unknown` composer verdict is counted as empty | `test_arm_refuses_an_unproven_composer` |
 | The undelivered-escalation check is removed | `test_arm_refuses_an_undelivered_escalation` |
+| The due marker is judged by its existence alone, not against the session running now | `test_a_marker_left_by_another_session_never_arms_this_one` |
+| `arm` no longer requires a proven relauncher | `test_arm_refuses_without_a_proven_relauncher`, `test_arm_refuses_a_relauncher_that_is_gone` |
+| The relauncher record is trusted without checking that its pid is still that process | `test_arm_refuses_a_relauncher_that_is_gone` |
 
 Execution - a mutant that terminates the wrong thing, or terminates it the wrong way.
 These were applied to `bin/fm-session-launch.sh`:
@@ -75,6 +85,7 @@ These were applied to `bin/fm-session-launch.sh`:
 | The watcher pid is chosen by matching processes instead of read from the lock | `test_the_rebirth_path_never_terminates_the_session`, `test_the_predecessor_watcher_is_retired_through_the_helper` |
 | The watcher retirement is dropped entirely | `test_the_predecessor_watcher_is_retired_through_the_helper`, `test_a_refused_watcher_retirement_is_escalated_not_worked_around` |
 | A refusal is retried instead of escalated | `test_a_refused_watcher_retirement_is_escalated_not_worked_around` |
+| The wrapper never registers itself, so nothing in the home can prove a relaunch | `test_the_wrapper_registers_itself_while_the_session_runs` |
 
 The pattern-match mutant is caught by the no-watcher case as well as the retirement case, and that is the point: in a home with no watcher lock a pattern match still finds something to signal, while reading the lock finds nothing to do.
 
@@ -99,6 +110,10 @@ Observed, in order:
 5. `state/.safe-kill.log` did not exist: the home had no watcher lock, so there was nothing to retire and nothing was signalled.
 6. `bin/fm-session-start.sh` printed the successor block naming the predecessor session, its 368,381 tokens, and the Bridge command for a records gap.
 7. The successor's first turn end recorded its own 61,602 reading and posted `session reborn: 61602 tokens, down from 368381` to the Bridge, then removed the handoff and the due marker.
+
+That walkthrough predates two later preconditions on `arm`, and it is recorded here as run rather than rewritten as it would now go.
+Reproducing it today needs the home's `state/.session-launcher` to name a live launch wrapper, and needs the due marker and the last footprint reading to name the same session; without either, step 3 refuses instead of arming.
+Both preconditions are pinned in each direction by the mutation table above rather than by a re-run of this sequence.
 
 ## Composer reads
 
