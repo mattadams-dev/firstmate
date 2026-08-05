@@ -182,15 +182,21 @@ case "$COMMAND" in
     fm_rebirth_arm_record "$STATE" "$PREV" "$TOKENS" "$THRESHOLD" \
       "$HARNESS" "$BACKEND" "$TARGET" \
       || { printf 'not armed: the armed record could not be written\n'; exit 1; }
-    if fm_backend_send_text_submit "$BACKEND" "$TARGET" "$EXIT_CMD" 3 1 1 2>/dev/null; then
+    # The submit primitive ECHOES its verdict and returns 0 either way, exactly
+    # as the away-mode injector reads it: a non-zero status is not the failure
+    # signal, an unsubmitted composer is. Only an `empty` composer after Enter
+    # proves the exit command was actually taken.
+    VERDICT=$(fm_backend_send_text_submit "$BACKEND" "$TARGET" "$EXIT_CMD" 3 1 1 2>/dev/null)
+    if [ "$VERDICT" = empty ]; then
       printf 'armed: asked %s to exit (%s) at %s tokens; the launch wrapper relaunches on exit\n' \
         "$HARNESS" "$EXIT_CMD" "$TOKENS"
       exit 0
     fi
     # The exit could not be delivered. Nothing is terminated in response: the
-    # armed record expires on its own and the next tick re-evaluates.
+    # armed record is withdrawn, and the next tick re-evaluates from scratch.
     rm -f "$STATE/.rebirth-armed" 2>/dev/null || true
-    printf 'not armed: the exit command could not be submitted to %s %s\n' "$BACKEND" "$TARGET"
+    printf 'not armed: the exit command was not accepted by %s %s (submit verdict=%s)\n' \
+      "$BACKEND" "$TARGET" "${VERDICT:-unreadable}"
     exit 1
     ;;
 

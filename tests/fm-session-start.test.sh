@@ -1441,6 +1441,50 @@ EOF
   pass "session start rejects Pi loaded markers from previous sessions"
 }
 
+# --- inherited rebirth ------------------------------------------------------
+
+test_rebirth_handoff_hands_the_successor_its_orientation_duty() {
+  local rec root home fakebin out
+  rec=$(new_world rebirth-handoff)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+
+  printf 'predecessor_session=old-session\npredecessor_tokens=368381\nthreshold=200000\narmed_ts=2026-08-05T21:00:00-0700\n' \
+    > "$home/state/.rebirth-handoff"
+
+  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+
+  assert_contains "$out" "THIS SESSION IS A SUCCESSOR" \
+    "a reborn session must be told it is one before it does anything else"
+  assert_contains "$out" "368381" \
+    "the successor must be told the number that justified ending its predecessor"
+  assert_contains "$out" "records gap" \
+    "an orientation gap must be routed to the Bridge as a records finding, not to the captain as a question"
+  assert_not_contains "$out" "report your own footprint" \
+    "the successor is not ASKED for its footprint - it is measured automatically at turn end"
+  pass "an inherited rebirth handoff prints the successor's orientation duty and where a gap goes"
+}
+
+test_no_rebirth_block_without_a_handoff() {
+  local rec root home fakebin out
+  rec=$(new_world rebirth-absent)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+
+  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+
+  assert_not_contains "$out" "THIS SESSION IS A SUCCESSOR" \
+    "an ordinary session start must not claim to be a successor"
+  pass "an ordinary session start prints no rebirth block"
+}
+
+
 test_context_digest_absent_empty_present
 test_lock_refusal_read_only_path
 test_lock_write_failure_read_only_path
@@ -1470,5 +1514,7 @@ test_pi_diagnostic_rejects_stale_loaded_marker
 test_pi_diagnostic_accepts_prelock_loaded_marker
 test_pi_diagnostic_rejects_missing_turnend_guard_marker
 test_pi_diagnostic_rejects_previous_session_loaded_marker
+test_rebirth_handoff_hands_the_successor_its_orientation_duty
+test_no_rebirth_block_without_a_handoff
 
 echo "# fm-session-start.test.sh: all assertions passed"
