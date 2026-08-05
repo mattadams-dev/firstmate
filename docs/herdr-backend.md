@@ -215,6 +215,8 @@ A working Pi, pending middle row, missing identity, incomplete separator pair, o
 A lone separator below the matched row normally clears that match as stale.
 The one exemption covers a rule-framed composer's own closing rule, which Claude draws directly beneath its input row, and it applies only to the bare-glyph shape when native identity reports a known non-Pi agent.
 A Pi, missing, or unreadable identity, a bordered row, or any gap between the match and the separator keeps the refusal.
+That identity is a live Herdr read against the pane's own named session, so it covers every session this backend serves, including the `fm-remote` session a [remote second mate](remote-secondmates.md) always runs in.
+A pane whose identity cannot be read at all is exactly the missing-identity case above: an unreachable host or session yields no identity, the refusal stands, and the read reports unknown rather than inventing an empty composer.
 [`verification/supervision.md`](verification/supervision.md#away-mode-composer-read-on-a-live-claude-on-herdr-pane) owns the live capture behind that exemption and the non-ASCII composer padding below.
 
 ANSI capture preserves de-emphasized placeholder style.
