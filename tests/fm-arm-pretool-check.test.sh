@@ -151,6 +151,9 @@ matrix_case K20 deny 'bash -c "kill -TERM 17907"'
 # unmodelled grammar has to ignore that token. These three prove ignoring it
 # launders nothing: a sibling bare kill, a killall wearing the helper's prefix,
 # and a plain kill all still fail closed inside the same unmodelled grammar.
+# K22 is redundantly guarded on purpose - the unstripped pattern scan and the
+# exemption's trailing boundary each deny it alone - so no single mutation kills
+# it. That is recorded rather than papered over; see docs/verification.
 matrix_case K21 deny 'for p in 1; do bin/fm-safe-kill.sh --pid 5; kill 9; done'
 matrix_case K22 deny 'for p in 1; do fm-safe-killall fm-watch; done'
 matrix_case K23 deny 'for p in 1 2; do kill $p; done'

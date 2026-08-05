@@ -418,7 +418,7 @@ This is why `bin/fm-safe-kill.sh` accepts only a pid a role lock already names, 
 ### Guard-class mutation results
 
 One mutation per protection, each applied to its own copy of the tree, never to a working checkout.
-Baselines read against: `tests/fm-watcher-lock.test.sh` 38 `ok -` lines, `tests/fm-safe-kill.test.sh` 12, `tests/fm-arm-pretool-check.test.sh` 178, all exiting 0.
+Baselines read against: `tests/fm-watcher-lock.test.sh` 38 `ok -` lines, `tests/fm-safe-kill.test.sh` 13, `tests/fm-arm-pretool-check.test.sh` 186, all exiting 0.
 A failing case aborts its suite, so each mutation was run twice: once to see which case it kills, once with that case's invocation removed to prove nothing else depends on the mutated protection.
 Both directions are covered deliberately: a guard that refuses everything is the same failure as one that permits everything, and it is the direction that gets missed.
 
@@ -432,11 +432,30 @@ Both directions are covered deliberately: a guard that refuses everything is the
 | The kill helper can never complete a stop | refuses too much | `test_authorized_supervisor_stop_succeeds`, `test_daemon_role_stop_succeeds`, `test_every_outcome_is_recorded` | 9 clean |
 | The policy stops classifying terminations | permits too much | matrix `K01` (`kill -TERM 17907`) | 158 clean |
 | The policy denies signal-0 probes and job specs too | refuses too much | matrix `L01` (`kill -0 17907`) | 172 clean |
+| The unmodelled-grammar fallback stops exempting the sanctioned helper | refuses too much | matrix `L13`, and `L14`-`L17` with it | 181 clean |
 | Elapsed time alone resets the wedge alarm | permits too much | `test_a_frozen_lane_is_never_pardoned` | 2 before the kill |
 | Nothing resets the wedge alarm | refuses too much | `test_a_busy_pane_still_escalates_while_its_cpu_advances` (its liveness half) | 7 before the kill |
 | The pane reset also clears the home's failure episode | boundary crossing | `test_the_two_resets_do_not_touch_each_others_state` | 6 before the kill |
 | The home reset also clears a pane's wedge ratchet | boundary crossing | `test_the_two_resets_do_not_touch_each_others_state` | 6 before the kill |
 | The busy alarm accepts movement as its counterpart | permits too much | `test_a_busy_pane_still_escalates_while_its_cpu_advances` | 7 before the kill |
+
+### The exemption the helper's own name required
+
+The termination policy directs every kill through `bin/fm-safe-kill.sh`, and that name ends in the same bytes the raw fallback scans for.
+Grammar this parser does not model - a `for` loop, an `if`, a `while` - falls back to that scan, so every mention of the one mandated command inside ordinary shell control flow was denied.
+A recovery kill is written in exactly that grammar, which made the escape hatch unreachable at the moment it exists for.
+The refusal named a rule rather than a missing capability, so nothing about it read as a defect.
+
+This was not found by review.
+It fired twice against ordinary work in this repo within minutes of each other, once as `broad-watcher-kill` and once as `unverified-kill`, on commands whose only offence was naming a watcher test file and a safe-kill test file in the same loop.
+That is the mirror-image direction this matrix exists to catch: a guard that refuses a legitimate recovery is the same failure as one that permits an illegitimate kill, and it is the direction that presents as working.
+
+`L13`-`L17` are the fixture, and the mutation that removes the exemption kills `L13` first and all five together, with the remaining 181 clean.
+
+`K21`-`K23` are the laundering direction.
+`K22` (`fm-safe-killall`) is reported here as redundantly guarded rather than as a single-mutation proof, because it is: the pattern scan deliberately does not take this exemption, and the exemption's own trailing boundary refuses the token independently.
+Removing either alone leaves `K22` denied and the suite at 186; removing both together kills it.
+Defence in depth is the intended design, so the honest record is that no single mutation kills that case, not a proof shaped to look like the others.
 
 The last five rows are the alarm-reset rule, proven against the COMPOSED result rather than against this lane's half.
 Two of them are boundary crossings that exist only because the one-reset-owner amendment was made: without them the separation between the home-level and pane-level resets is unenforced however carefully it is documented.

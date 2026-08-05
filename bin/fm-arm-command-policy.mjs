@@ -146,8 +146,15 @@ function rawMentionsPatternKill(command) {
 // The sanctioned helper's own name ends in the bytes `kill`, so a raw scan for a
 // kill verb matches every mention of the one command this policy tells callers to
 // use. Dropping that exact token before the scan keeps the fallback fail-closed on
-// real kill verbs while leaving the mandated escape hatch reachable. The trailing
-// boundary is load-bearing: without it `fm-safe-killall` would launder a killall.
+// real kill verbs while leaving the mandated escape hatch reachable.
+//
+// Scope is deliberate: only the scans that look for a bare `kill` call this.
+// rawMentionsPatternKill does not, because `pkill` and `killall` never appear in
+// the helper's name, so it has no false positive to correct and stays the thing
+// that denies `fm-safe-killall`. The trailing boundary is therefore NOT what
+// stops that today - it is redundant with the unstripped pattern scan, and K22
+// falls only when both are removed. It is kept as a cheap guard on the future
+// edit that gives this exemption to the pattern scan too.
 function withoutSanctionedHelper(normalized) {
   return normalized.replace(/fm-safe-kill(?![\w-])/g, "");
 }
