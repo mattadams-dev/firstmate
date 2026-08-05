@@ -127,6 +127,7 @@ It is gated on the grammar being unsupported: in grammar the classifier does mod
 
 A signal-0 probe is exempt from this backstop and from the modelled watcher-pid denial alike, because it is an observation and this boundary is drawn on what a command DOES, never on what text it sits near.
 `for f in fm-safe-kill fm-watcher-lock; do bash tests/$f.test.sh; kill -0 5; done` names two test files and probes an unrelated pid; refusing it would be a proximity rule wearing a targeting rule's clothes, and it would push liveness checks back onto `ps | grep`.
+That command needs both of this fallback's exemptions - the sanctioned helper's own token and the probe - which "Process termination" below owns.
 Everything that can deliver a signal to a watcher pid stays absolutely denied - `kill -TERM $pid`, `kill -9`, a bare `kill $pid`, `kill $(pgrep -f fm-watch)`, and every `pkill`/`killall` form - because the reason that guard exists is that a pattern can reach a sibling firstmate home's supervisor, and signal 0 cannot.
 
 ## Process termination
@@ -155,11 +156,17 @@ Not terminations, and deliberately still allowed:
 Denying those would make the guard the mirror image of the failure it prevents: supervision that can never be recovered, silently.
 Quoted text such as `echo 'kill -TERM 17907'` remains data, and a standalone read-only `pgrep` remains allowed.
 Unsupported compound grammar containing a kill verb fails closed, exactly as it does for protected executions.
+That fallback has exactly two exemptions, both narrow, and neither reaches `pattern-kill`.
 
-Signal 0 is the one exception to that fail-closed rule, and it is exactly one signal wide.
+The first is the mandated helper's own name.
+`bin/fm-safe-kill.sh` ends in the bytes `kill`, and a recovery kill is written in exactly the loops and conditionals this parser does not model, so a raw scan for a bare kill verb refused every mention of the one command the policy tells callers to use - the escape hatch denied at the moment it exists for.
+The helper's token is therefore dropped before that scan, with a trailing boundary so a lookalike is not carried along with it.
+`pkill` and `killall` never occur in that name, so the `pattern-kill` scan takes no exemption at all and still denies `fm-safe-killall`.
+
+The second is a signal-0 probe, and it is exactly one signal wide.
 `if kill -0 "$pid"; then` is how liveness is written in shell, and the loops and conditionals it is written in are grammar this parser does not model, so the fallback denied the fleet's most common probe and left `ps | grep` as the only remaining way to ask.
 That road is already recorded: a pattern census counted four supervise daemons where zero existed.
-So a signal-0 probe is allowed in every grammar position, and nothing else is: `kill -0` inside a loop is allowed, while `kill -9`, a bare `kill <pid>`, `kill -0 -9 <pid>`, a probe whose signal comes out of a substitution, and every pattern-kill form stay denied there.
+So a signal-0 probe is allowed in every grammar position, and no other signal is: `kill -0` inside a loop is allowed, while `kill -9`, a bare `kill <pid>`, `kill -0 -9 <pid>`, a probe whose signal comes out of a substitution, and every pattern-kill form stay denied there.
 `kill -l` and job specs keep the narrower rule - allowed only where the grammar is modelled - because neither is load-bearing for liveness.
 The exemption reaches `broad-watcher-kill` on both its paths - the modelled watcher-pid denial and the raw fallback - because signal 0 cannot terminate a watcher any more than it can terminate anything else, so refusing it there conceded nothing and cost the fleet its liveness idiom.
 It does not reach `pattern-kill`: `pkill` and `killall` select their target by matching text whatever signal they carry, and `kill -0 $(pgrep -f fm-watch)` is target-selection by pattern with a harmless signal attached, which is still the shape that produced this fleet's phantom census.

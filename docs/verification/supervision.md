@@ -396,6 +396,7 @@ Measured 2026-08-04 on Linux 6.18.33.2-microsoft-standard-WSL2, against the tree
 
 Three hypotheses were proposed for why the pre-existing singleton locks did not prevent a reported supervisor duplication.
 The probes that decide them are preserved with their pre-fix capture in `tests/fixtures/supervisor-singleton/`; each takes the repo root as its one argument.
+Each ends on an explicit `RESULT:` line and exits from that verdict rather than from its last cleanup command: zero when the tree it is pointed at is in the state this round left it in, nonzero when the defect reproduces or the measurement is inconclusive.
 
 | Hypothesis | Probe | Verdict |
 | --- | --- | --- |
