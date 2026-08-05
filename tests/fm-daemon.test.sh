@@ -25,6 +25,54 @@ TMP_ROOT=$(fm_test_tmproot fm-daemon-tests)
 FM_DAEMON_PRIMARY_HARNESS=claude
 export FM_DAEMON_PRIMARY_HARNESS
 
+# --- session rebirth: the daemon owns the TIMING, and only while away --------
+#
+# The turn-end guard marks a session rebirth-due; this is the half that decides
+# when. What matters here is the gate, not the decision itself: the decision has
+# its own suite (tests/fm-rebirth.test.sh), and the daemon must reach it only
+# when away mode is on and the home is actually marked. With no endpoint passed,
+# the real owner refuses because the composer cannot be read, so a logged
+# refusal is proof the daemon called it at all.
+
+rebirth_case() {  # <name> <afk: on|off> <due: yes|no> -> state dir
+  local dir state=
+  dir=$(make_supercase "$1")
+  state="$dir/state"
+  # Seed the log so the negative cases assert on a file that exists; a missing
+  # log would make "no rebirth line" true for the wrong reason.
+  printf '[t] daemon starting\n' > "$state/.supervise-daemon.log"
+  [ "$2" = on ] && : > "$state/.afk"
+  [ "$3" = yes ] && printf 'session=old\nts=t\ntokens=368381\nthreshold=200000\n' > "$state/.rebirth-due"
+  printf '%s' "$state"
+}
+
+test_daemon_consults_the_rebirth_owner_when_away_and_due() {
+  local state
+  state=$(rebirth_case rebirth-away-due on yes)
+  LOG="$state/.supervise-daemon.log" FM_STATE_OVERRIDE="$state" housekeeping "$state" "" ""
+  assert_grep "rebirth" "$state/.supervise-daemon.log" \
+    "an away, rebirth-due home must reach the rebirth owner from housekeeping"
+  pass "housekeeping consults the rebirth owner when away mode is on and the session is marked due"
+}
+
+test_daemon_never_reborns_an_attended_session() {
+  local state
+  state=$(rebirth_case rebirth-attended-due off yes)
+  LOG="$state/.supervise-daemon.log" FM_STATE_OVERRIDE="$state" housekeeping "$state" "" ""
+  assert_no_grep "rebirth" "$state/.supervise-daemon.log" \
+    "with the captain present, their session is never ended from underneath them"
+  pass "housekeeping never touches rebirth while away mode is off, however large the session"
+}
+
+test_daemon_leaves_an_unmarked_session_alone() {
+  local state
+  state=$(rebirth_case rebirth-away-undue on no)
+  LOG="$state/.supervise-daemon.log" FM_STATE_OVERRIDE="$state" housekeeping "$state" "" ""
+  assert_no_grep "rebirth" "$state/.supervise-daemon.log" \
+    "a session that was never marked due must not be considered for rebirth"
+  pass "housekeeping leaves a session that is not marked rebirth-due alone"
+}
+
 test_afk_start_refuses_when_flag_cannot_be_written() {
   local dir state out status
   dir=$(make_supercase afk-start-flag-unwritable)
@@ -2244,6 +2292,9 @@ test_inject_msg_defers_on_unrecognized_composer_state() {
   pass "inject_msg: unrecognized composer states defer by default"
 }
 
+test_daemon_consults_the_rebirth_owner_when_away_and_due
+test_daemon_never_reborns_an_attended_session
+test_daemon_leaves_an_unmarked_session_alone
 test_afk_start_refuses_when_flag_cannot_be_written
 test_afk_start_ignores_stale_pidfile_without_lock
 test_afk_start_reclaims_stale_daemon_lock_reused_pid
