@@ -79,9 +79,9 @@ Its section 13 trigger line and its inline stub are resident too, but both stay 
 Rarity raises what a qualifying extraction returns; it cannot pay the description's cost, which every session carries including the ones that never load the skill.
 Evaluate the relation by measuring both sides, never by applying a remembered number.
 
-Today's evaluation of the right-hand side, recorded for calibration and not as a floor: on 2026-08-05, claude 2.1.222, a `description:` written to the two-sentence cap below measured 107 tokens.
+Today's evaluation of the right-hand side, recorded for calibration and not as a floor: on 2026-08-05, claude 2.1.222, a `description:` written to the two-sentence cap below measured 87 tokens on an isolated matched pair.
 That figure holds only under those conditions - a harness change, a listing-format change, or a longer description moves it - so re-measure rather than reuse it.
-The one qualifying extraction in `AGENTS.md` section 7 decomposes as 184 tokens of net resident removal against 107 tokens of description, a 77-token saving; its untuned first attempt carried a four-sentence description and made the floor 82 tokens *worse*.
+The one qualifying extraction in `AGENTS.md` section 7 decomposes as 164 tokens of net resident removal against 87 tokens of description, a 77-token saving; its untuned first attempt carried a four-sentence description and made the floor 82 tokens *worse*.
 
 Prefer the dedup class instead.
 Content that already has an owner elsewhere carries no resident tax at all and returns its full size, because removing a duplicate adds nothing back.
@@ -100,7 +100,7 @@ State the trigger as a condition ("load before X", "load on Y wake"), never as a
 
 **Cap a skill's `description:` frontmatter at two sentences.**
 The description is resident in the harness's skill listing from the first turn, so every session pays for it including every session that never loads the skill.
-The cost is real and invisible, which is why this is a cap rather than a preference: a four-sentence description measured 184 tokens against 107 for the two-sentence rewrite that replaced it, and that difference alone was the difference between an extraction that helped and one that made the floor worse.
+The cost is real and invisible, which is why this is a cap rather than a preference: a four-sentence description measured 184 tokens against 87 for the two-sentence rewrite that replaced it, and that difference alone was the difference between an extraction that helped and one that made the floor worse.
 Spend those two sentences on the trigger condition and what the skill owns; everything else belongs in the body, where only the sessions that load it pay.
 
 Briefs for tasks that touch firstmate's own tracked material should tell the crewmate to load this skill.

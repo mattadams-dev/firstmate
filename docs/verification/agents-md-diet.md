@@ -4,6 +4,9 @@ This record holds the empirical facts the `AGENTS.md` context diet acts on: the 
 
 `.agents/skills/firstmate-coding-guidelines/SKILL.md` owns the knowledge-placement policy this diet applies, including the extraction break-even and the two-sentence description cap that came out of these measurements.
 
+Every byte and birth-weight figure in this record is a reading taken against a specific commit, not a live description of the working tree.
+The closing figures for this work were read at commit `428035e`; a later edit to `AGENTS.md` moves them, so re-measure rather than assuming they still hold.
+
 ## Where the remaining value is - read this before resuming
 
 The diet's remaining scope is **duplicate removal, not extraction**.
@@ -22,7 +25,7 @@ Do not resume hunting extractions in `AGENTS.md`.
 Section 7 was assessed block by block and yielded exactly one qualifying block out of seventeen, because the file's remaining bulk is contract rather than mechanics, and a contract clause has no trigger - it is what makes a trigger recognisable.
 Look for content that is restated from an owner declared elsewhere, which is what the section 2 tree turned out to be.
 
-Prose trimming is close to done regardless: `AGENTS.md` finished this work at 53,628 bytes against an original ~25K aspiration and a revised ~45K target, neither of which is reachable without moving laws behind triggers.
+Prose trimming is close to done regardless: `AGENTS.md` ends this work well above both the original ~25K aspiration and the revised ~45K target, neither of which is reachable without moving laws behind triggers.
 The remaining floor is the tool-schema surface, tracked separately as `fm-tool-schema-surface-diet`.
 
 ## Birth-weight measurement instrument
@@ -122,7 +125,7 @@ Birth weight is read before any skill loads, so it will report the full nominal 
 Read a birth-weight delta together with the trigger's real fire rate; the delta alone is an upper bound, not the achieved saving.
 Removing a duplicate outright - as the section 2 tree was removed, in favor of an owner that is read on demand rather than loaded wholesale - has no such discount, which is why it is the preferred move wherever an owner already exists.
 
-## Every skill carries a fixed resident tax
+## Every skill carries a resident description cost
 
 Measured 2026-08-05, and it is the finding that decides whether an extraction is worth doing at all.
 
@@ -141,13 +144,33 @@ The cause is that a skill's `description:` frontmatter is resident in the harnes
 That description is the only *additional* resident cost a new skill creates.
 Its section 13 index line, which rider 3's verdict keeps resident, and the inline trigger stub left behind in the owning section both live inside `AGENTS.md`, so they are already netted out of the trim the table above measures and counting them again double-counts them.
 
+That 184 is one quantity only: the cost of the *untuned* four-sentence description, read directly off the table as 49,990 minus 49,806.
+It is not the tuned description's cost and it is not any removal figure, and it must never be reused as either.
+
 Break-even is therefore a relation and not a constant: **the net resident removal from `AGENTS.md` must exceed the skill's listing-description cost.**
 
-Today's evaluation of that description cost, on claude 2.1.222 and under the two-sentence cap `firstmate-coding-guidelines` now mandates, is 107 tokens; the four-sentence version it replaced measured 184.
-Both are readings taken on 2026-08-05 under those conditions, not standing figures - re-measure before applying the relation to a new extraction, because a harness or listing-format change moves them.
+### The tuned description's cost, isolated matched pair, 2026-08-05
+
+The three-state table above cannot isolate the two-sentence description, because it holds no row for the tuned `AGENTS.md` with the skill directory absent.
+That pair was therefore built and read separately, claude 2.1.222.
+
+Two trees were built from the same commit, each containing `AGENTS.md` and `.agents/skills` with its `.claude/skills` symlink, identical except that one has `.agents/skills/validation-supersession` removed.
+`claude -p` was run in each and the first `message.usage` line summed, two rounds per tree with zero spread within each.
+
+| Tree | Birth weight |
+| --- | --- |
+| skill present | 49,616 |
+| skill absent | 49,529 |
+
+The tuned two-sentence description costs **87 tokens**.
+Both absolute floors sit below the in-repo readings because these trees live outside the repo and carry a smaller surrounding surface, so only the delta from this pair is meaningful - do not quote 49,616 or 49,529 as floors.
+
+87 is a reading taken on 2026-08-05, on claude 2.1.222, under the two-sentence cap, and never a standing figure.
+Re-measure before applying the relation to a new extraction, because a harness change, a listing-format change, or a differently worded description moves it.
 
 After rewriting the description to two sentences and shortening both the stub and the index line, the same extraction reads 49,831: a net saving of **77 tokens** against the 49,908 it started from.
-It decomposes as 184 tokens of net resident removal against the 107-token description.
+It decomposes as 164 tokens of net resident removal from `AGENTS.md` against the 87-token description.
+The 87 and the 77 are measured; the 164 is derived from them rather than read off an instrument, because no run isolates the tuned trim on its own.
 
 Keep descriptions short for this reason.
 A verbose trigger description is not free documentation; it is resident context charged to every session that never uses the skill.
