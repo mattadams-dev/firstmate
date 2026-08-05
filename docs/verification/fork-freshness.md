@@ -78,7 +78,10 @@ sync instructions tell their worker to re-take the reading before acting.
 
 An earlier run of the same command in a separate disposable home reported
 `already queued` for both forks on its second invocation and created no second
-task; `test_repeat_sweep_creates_no_duplicate_task` holds that behavior.
+task; `test_repeat_sweep_creates_no_duplicate_task` holds that behavior. Recorded
+as taken: the third review round below narrowed when that line may be printed
+(only over a task the backlog still reports open) and made it name its evidence,
+so a run repeated today prints `already queued (the backlog reports it queued)`.
 
 ## Mutation evidence
 
@@ -98,7 +101,10 @@ function names.
 
 The unmutated suite breaks nothing, per-test and as a whole. The run above was
 taken at 28 tests, before the id-collision regression and the review rounds below
-were added; the suite now reports 39 ok, 0 not ok.
+were added; the suite now runs 49 tests and reports 49 ok, 0 not ok
+(`bash tests/fm-fork-freshness.test.sh | grep -c '^ok -'` against the count of
+invocations in the file's trailing block - both 49, which is the point: a suite
+that halts early would show fewer ok lines than invocations).
 
 What the table establishes:
 
@@ -179,6 +185,77 @@ unwritable wake sequence file, and a run whose `bin/fm-bridge.sh` is absent. Bot
 assert the loud stderr line AND the `MANUAL=` marker on the reading, because the
 reading is what the digest shows first, and both assert the brief survived -
 a failed notification must never cost the task its instructions.
+
+## Third review round: the guard's liveness, and four smaller over-claims
+
+Date: 2026-08-05.
+
+The round before this one gave the marker a lifetime by retiring it on a
+`behind=0` reading. Review then found that trigger is not enough on its own: it
+fires only where a reading happens to catch the fork level, and the readings
+above show upstream moving again within four and a half hours (firstmate 20 to
+21, no-mistakes 28 to 29). Between two weekly sweeps that window can open and
+close unobserved, and the marker outlives its episode exactly as before.
+
+The fix splits the two jobs the file was doing. The brief keeps its
+creation-proof job unchanged - rendered beside itself, moved into place last, one
+atomic move. Liveness - is a sync task actually open for this fork - is asked of
+the task system (`tasks-axi show <id>`, run from `$FM_HOME`, the same working
+directory the backlog write uses) on every reading. Open short-circuits, spent
+retires the marker and raises a fresh task, and a state that could not be read
+does neither and says so.
+
+Same method as the rounds above: revert one fix in a scratch copy, run the whole
+suite there, record the line that halted it verbatim.
+
+| Reverted fix | Captured failure |
+| --- | --- |
+| liveness asked of the task system (guard keyed on the marker file alone) | `not ok - already queued named no open task; it may not be printed on the marker file alone (missing: 'the backlog reports it queued')` |
+| the live/spent distinction (every marker treated as spent) | `not ok - a repeat sweep must find the first sweep's task, not create another (missing: 'action=task fm-sync-acme-widget already queued')` |
+| an unreadable task state kept distinct from an open one | `not ok - a liveness question that could not be answered passed silently (missing: 'GUARD_UNKNOWN:')` |
+| retirement of a spent marker on a level reading | `not ok - the reading that found the marker spent did not retire it (missing: 'action=task fm-sync-acme-widget retired')` |
+| credential strip on the clone origin written into the brief | `not ok - the brief carries the clone's credential into a durable, travelling artifact` |
+| the atomic move checked by its result, not only its status | `not ok - the reading dropped the reason its task could not be created (missing: 'NOT created: instructions could not be placed')` |
+| `data/projects.md` as a discovery source | `not ok - a registered fork that is behind must not exit clean: expected exit 3, got 0` |
+| the composed task-failure reason kept on the reading | `not ok - the reading dropped the reason its task could not be created (missing: 'NOT created: instructions could not be placed')` |
+| `--owner` rejecting a missing value | `not ok - a flag with no value must be refused like every other malformed option: expected exit 2, got 1` |
+
+Rows six and eight halt on the same assertion for different reasons, and the
+coincidence is worth naming rather than smoothing over: without the result check,
+`mv` onto an existing directory *succeeds* by moving the brief inside it, so the
+reading says `queued` over a file nobody will find; without the composed reason,
+the failure is reported but its cause and `MANUAL=` marker are overwritten by a
+bare literal. The same test catches both because it asserts the reading carries
+what actually happened.
+
+Rows one to three are the guard's three worlds, each caught by exactly its own
+case, which is the requirement that made the fix non-trivial:
+
+- brief present, task open: `test_repeat_sweep_creates_no_duplicate_task` still
+  short-circuits, and now asserts the reading names the open task it
+  short-circuited on.
+- brief present, task closed or absent:
+  `test_closed_task_frees_a_behind_fork_to_queue_again` and
+  `test_absent_task_frees_a_behind_fork_to_queue_again` retire the marker and
+  raise a fresh sync. The first is the finding's own sequence - the task is
+  closed and upstream moves again before any reading catches the fork level, so
+  the `behind=0` trigger never gets its chance.
+- brief present, task state unreadable:
+  `test_unreadable_task_state_neither_duplicates_nor_retires` removes `tasks-axi`
+  from the case's PATH and asserts the sweep creates nothing, retires nothing,
+  and prints `GUARD_UNKNOWN:` with the reason.
+
+Retirement is recorded, never silent: the brief is moved to
+`data/<id>/brief.retired-<stamp>.md` and the reading that decided it carries
+`RETIRED=<file>` and the reason the marker was judged spent, so a retirement that
+should not have happened stays discoverable from the reading and the kept file.
+`bin/fm-teardown.sh` is untouched - it removes exactly what it removed before.
+
+The fake `tasks-axi` in the suite gained `show <id>` in the installed CLI's
+shape, checked against the installed one (tasks-axi 0.2.3): an indented
+`state: <queued|in_flight|held|done>` line at rc=0, and `code: NOT_FOUND` on
+**stdout** at rc=1. The stream matters - a fake that wrote NOT_FOUND to stderr
+would let a mis-parsed absent task pass here and read as unknown in production.
 
 ## Trigger wiring
 
