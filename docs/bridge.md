@@ -160,7 +160,7 @@ bin/fm-bridge.sh ask --project machine --title "..." --answer "A: ..." --to coca
 bin/fm-bridge.sh route --id <id> --to cocaptain     # re-address an existing item
 ```
 
-A routed item is absent from the captain's tab-title count, sticky counter, and tally, and present in `queues.cocaptain` and `cocaptain_asks` in `--state`.
+A routed item is absent from the captain's open-ask count and tally, and present in `queues.cocaptain` and `cocaptain_asks` in `--state`.
 It still appears on the board in its own "With the co-captain" section, so the captain can see where work went rather than wonder - visible as routed, never as an ask.
 
 ### How records fold
@@ -216,7 +216,7 @@ A forced retirement of a persistent secondmate records the same provenance as a 
 The events zone renders that note on the board, so the most destructive override in the fleet is not the one whose reason is hardest to read.
 
 **Work that ended is still shown, and still shows both axes.**
-An item whose outcome is `landed`, `discarded` or `unknown` leaves the ask queues, the `needs-captain` and `needs-cocaptain` tallies, the tab-title count, the rail badge and the aging flag, and its answer forms are withdrawn - nobody can rule on work that has ended.
+An item whose outcome is `landed`, `discarded` or `unknown` leaves the ask queues, the `needs-captain` and `needs-cocaptain` tallies, the open-ask count and the aging flag, and its answer forms are withdrawn - nobody can rule on work that has ended.
 That is the ask conjunction doing its job, not the outcome axis overruling the state axis: the state it earned stays in the ledger and in `--state` for audit, and the board renders it as its own chip beside the outcome chip so a reader sees both answers rather than guessing the second from the first.
 When work ended and the ledger never said who owed it, the fold declines to invent a state rather than defaulting one - every value would be a claim nothing observed.
 Each closed group is capped with a visible overflow pointer to the record (`caps.fleet_closed`, default 6, `FM_BRIDGE_CAP_FLEET_CLOSED`; `caps.closed_decisions` for decisions and criticals, default 3, `FM_BRIDGE_CAP_RESOLVED_DECISIONS`), because a rare override must not grow into a permanent wall of rows, and a cap that hides rows silently would be its own lie.
