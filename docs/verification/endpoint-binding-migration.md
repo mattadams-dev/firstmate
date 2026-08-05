@@ -6,7 +6,8 @@ Repeatable repair of `endpoint_task_id=` in `state/<id>.meta` records created be
 Re-running is harmless by construction rather than by memory of a previous run; "one-shot" appears below only where the deleted guard is being discussed.
 First applied 2026-08-01 against the primary home.
 
-Unlike its sibling records, this one embeds captured live tool output, whose paths and identifiers are the evidence itself and are never edited; the siblings' zero-absolute-path form binds prose only.
+This record embeds captured live tool output throughout, whose absolute paths and identifiers are the evidence itself and are never edited.
+Its sibling records bind prose and carry an absolute path only incidentally inside a quoted line; this one carries them densely and by design.
 That divergence is declared here so a later path-counting audit reads it as deliberate rather than as a defect, which is what an undeclared divergence is indistinguishable from.
 
 `bin/fm-migrate-endpoint-binding.sh` and its two test files ship, and the script is safe to run again; see "Why there is no one-shot guard" below.
@@ -14,7 +15,7 @@ This page is the durable evidence that the repair happened and that its guards w
 
 ## What the field guards, and what it does not
 
-`fm_backend_validate_task_endpoint` (`bin/fm-backend.sh`) is teardown's gate; `bin/fm-teardown.sh:133` calls it and exits on refusal.
+`fm_backend_validate_task_endpoint` (`bin/fm-backend.sh`) is teardown's gate; `bin/fm-teardown.sh` calls it before any runtime dispatch or cleanup mutation and exits on refusal.
 For an opaque backend (herdr, zellij, orca, cmux) it refuses when `endpoint_task_id=` is absent, empty, ambiguous, or unequal to the task id.
 A legacy tmux record is exempt: its window is `<session>:fm-<id>`, so the binding is already in the window name.
 
@@ -128,7 +129,7 @@ The line records when the observation happened, what read it, and the exact herd
 
 ## Teardown's own validation, before and after
 
-Run against the real records with `fm_backend_validate_task_endpoint`, the function `bin/fm-teardown.sh:133` calls.
+Run against the real records with `fm_backend_validate_task_endpoint`, the function `bin/fm-teardown.sh` calls.
 `bin/fm-teardown.sh` has no validation-only mode, and invoking it for real would have destroyed the lanes' worktrees, which this task was scoped not to touch - one of the four was an actively working lane.
 
 ```
