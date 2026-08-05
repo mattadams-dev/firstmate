@@ -101,6 +101,36 @@ Birth weight is read before any skill loads, so it will report the full nominal 
 Read a birth-weight delta together with the trigger's real fire rate; the delta alone is an upper bound, not the achieved saving.
 Removing a duplicate outright - as the section 2 tree was removed, in favor of an owner that is read on demand rather than loaded wholesale - has no such discount, which is why it is the preferred move wherever an owner already exists.
 
+## Every skill carries a fixed resident tax
+
+Measured 2026-08-05, and it is the finding that decides whether an extraction is worth doing at all.
+
+Extracting the supersession sequence from section 7 was measured in three states, headless, two runs each and identical within each state:
+
+| State | `AGENTS.md` bytes | Birth weight |
+| --- | --- | --- |
+| before the extraction | 54,405 | 49,908 |
+| `AGENTS.md` trimmed, skill directory absent | 53,838 | 49,806 |
+| `AGENTS.md` trimmed, skill directory present | 53,838 | 49,990 |
+
+Removing the block from `AGENTS.md` saved 102 tokens.
+The skill's presence then added 184, for a net **+82** - the extraction made the floor worse before it had ever been loaded.
+
+The cause is that a skill's `description:` frontmatter is resident in the harness listing from the first turn.
+A new skill therefore costs, permanently and unconditionally:
+
+- its listing description, measured at 184 tokens for a four-sentence description and 107 for the two-sentence rewrite that replaced it;
+- its section 13 index line, which rider 3's verdict keeps resident;
+- the inline trigger stub left behind in the owning section.
+
+Against those it saves only the procedure body it removed.
+Break-even is therefore roughly 300 to 400 tokens of genuinely removable procedure - about 1,500 bytes - and blocks below that cannot pay for themselves no matter how rare the trigger.
+
+After rewriting the description to two sentences and shortening both the stub and the index line, the same extraction reads 49,831: a net saving of **77 tokens** against the 49,908 it started from.
+
+Keep descriptions short for this reason.
+A verbose trigger description is not free documentation; it is resident context charged to every session that never uses the skill.
+
 ## Cross-harness skill-listing coverage
 
 The question this settles: does each supported harness inject the `.agents/skills/` listing, with each skill's trigger-bearing description, into its own context?
@@ -164,6 +194,44 @@ reply: Agent-only handling playbook for session-start bootstrap diagnostics. Use
 
 Codex also carries its own vendor skills (`imagegen`, `openai-docs`, `plugin-creator`, `skill-creator`, `skill-installer`) in the same listing, so a probe that asks only for "the first five" names can miss the firstmate entries entirely.
 Ask for the complete list, or name the specific skill.
+
+### Section 7 per-block selection record
+
+Section 7 was assessed block by block rather than as one sweep.
+Each block carries the situation its absence would change, the trigger that covers it, that trigger's observed firing frequency, and the verdict.
+
+Two independent gates apply, and a block must clear both.
+The split test has veto: no trigger, no move.
+Rider 1 requires a recorded instance of that trigger having actually fired before the extraction ships, and the target ruling adds that extraction value scales with trigger rarity.
+
+| Block | Situation its absence would change | Trigger | Observed frequency | Verdict |
+| --- | --- | --- | --- | --- |
+| Intake, project resolution and routing | firstmate acts on the wrong project or bypasses a secondmate scope | none - governs whether the rule is recognised at all | every request | LAW, stays |
+| Ship/scout classification | speculative design work dispatched instead of an answer | none - classification precedes any trigger | every intake | LAW, stays |
+| Mode and yolo resolution at intake | a task ships below its project's standing rigor | none | every ship intake | LAW, stays, named resident by the ruling |
+| Concurrency and serialization | isolated work serialized, or unsafe work dispatched in parallel | none | every dispatch | LAW, stays |
+| Dispatch mechanics: confirm brief, steer, trust dialog | worker never confirmed as processing its brief | spawn or steer | most working sessions | verb, but frequency near 1 - stays, no return |
+| Worktree isolation assertion | a task writes to the primary checkout | none | every spawn | LAW, stays |
+| Delivery path rigor, `yolo`, merge authority | a red or unauthorized merge | none | every landing | LAW, stays, protected by the ruling |
+| `direct-PR`, `local-only`, `no-mistakes-prod-only` handling | wrong delivery path selected for a project class | project registry entry | never fired - all six registered projects are `no-mistakes` | rider 1 blocks, stays |
+| Validation driving and pipeline ownership | firstmate answers a gate a crew-owned run owns | a no-mistakes run exists | every no-mistakes ship | LAW plus high frequency, stays |
+| **Supersession sequence** | obsolete work shipped, or a second writer on a branch an active run owns | captain instruction completely invalidates work under validation | **fired once, recorded 2026-08-04 on `fm-endpoint-binding-migration`** | **MOVES to `validation-supersession`** |
+| Ask-user decision relay | a decision reaches the worker without its key, step or response command | ask-user finding returns | common | law and mechanics interleaved, ambiguous - stays |
+| Validation state judgement | a healthy run read as wedged, or a failed one as working | supervising a live run | every validation | LAW, stays |
+| PR-ready reporting | captain gets a bare `#number` instead of a URL | ship task reaches PR | every ship completion | verb, frequency near 1 - stays, no return |
+| Custom `check.sh` authoring constraints | a hand-written check spams wakes or reports a merge it did not observe | writing a custom check | never fired - no `.check-trust` has ever been created | rider 1 blocks, stays |
+| Teardown gating | unlanded work destroyed | none | every teardown | LAW, stays |
+| Scout report is evidence, not authorization | code changed on the strength of a report | none | every scout completion | LAW, stays, named resident by the ruling |
+| Scout promotion procedure | scratch commits and debug edits carried into the ship branch | implementation authorized after a scout | never fired - no recorded `bin/fm-promote.sh` use | rider 1 blocks, stays |
+
+The extractable set is the intersection of two conditions that pull in opposite directions at the extreme: rider 1 needs a trigger that has demonstrably fired, and the target ruling prefers one that fires rarely.
+In section 7 that intersection contains exactly one block.
+
+The three rarest blocks in the section - promotion, custom-check authoring, and the non-`no-mistakes` delivery paths - are precisely the ones rider 1 refuses, because a trigger this fleet has never exercised is the case where a moved rule is most likely to become a deleted rule wearing a filename.
+
+Measured result for section 7: **77 tokens per call**, against roughly 3,600 implied by the original ~10K estimate.
+The estimate assumed the section was mechanics with law mixed in; the block-by-block reading is the reverse.
+Section 7 is a contract, and a contract's clauses have no triggers because they govern whether the trigger is recognised.
 
 ### Verdict
 
