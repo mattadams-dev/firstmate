@@ -826,19 +826,35 @@ options = re.findall(r'<span class="ans">([^<]*)</span>', html)
 if not options:
     sys.exit("no answer options rendered, so this guard proves nothing")
 
+def where_it_lands(key):
+    """The ask's OWN card or row, not the whole page.
+
+    An annotation is rooted where it was placed, so what identifies it has to be
+    there. Checking the document would pass a board whose refs live only in the
+    index at the top - which is exactly what an annotation on the card never
+    sees.
+    """
+    anchor = 'id="item-%s"' % key
+    if anchor not in html:
+        return None
+    rest = html.split(anchor, 1)[1]
+    return re.split(r'id="item-|</section>|</table>', rest, maxsplit=1)[0]
+
 for key in asks:
     item = doc["items"][key]
-    if ('id="item-%s"' % key) not in html:
+    landing = where_it_lands(key)
+    if landing is None:
         sys.exit("ask %s has no per-item anchor, so an annotation on it cannot "
                  "say which ask it meant" % key)
     label = item["ref"] or item["id"]
     if item["answers"]:
         for answer in item["answers"]:
             wanted = "%s: %s" % (label, answer)
-            if wanted not in html:
+            if wanted not in landing:
                 sys.exit("ask %s renders an answer that does not name its own "
-                         "ask: expected %r" % (key, wanted))
-    if item["ref"] and ('<span class="ref">%s</span>' % item["ref"]) not in html:
+                         "ask where the annotation lands: expected %r"
+                         % (key, wanted))
+    if item["ref"] and ('<span class="ref">%s</span>' % item["ref"]) not in landing:
         sys.exit("ask %s renders no visible ref, so an annotation on it arrives "
                  "unquotable" % key)
 sys.exit(0)
