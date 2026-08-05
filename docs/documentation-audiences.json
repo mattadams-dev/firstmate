@@ -63,6 +63,10 @@
       "target": "docs/calm.md"
     },
     {
+      "source": "docs/bridge.md",
+      "target": "docs/verification/bridge-hosted-input.md"
+    },
+    {
       "source": "docs/sessionstart-nudge.md",
       "target": "docs/verification/supervision.md"
     },
@@ -323,6 +327,10 @@
     {
       "path": "docs/turnend-guard.md",
       "audience": "operator-current"
+    },
+    {
+      "path": "docs/verification/bridge-hosted-input.md",
+      "audience": "maintainer-verification"
     },
     {
       "path": "docs/verification/dispatch-auth.md",

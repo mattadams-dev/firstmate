@@ -85,7 +85,7 @@ data/                personal fleet records; LOCAL, gitignored as a whole
   learnings.md       fleet-local operational facts and gotchas; LOCAL, gitignored; dated, evidence-backed, curated, and updated with inspect-then-update - rewrite and prune rather than append forever, the same contract as captain.md; created lazily, absent until this home has a learning to store
   projects.md        thin fleet navigation registry recording each project's standing delivery posture; firstmate-private, parsed for mechanical sync and seeding by fm-project-mode.sh (section 6)
   bridge/ledger.jsonl  append-only Bridge ledger, the canonical record behind the captain's board; LOCAL, gitignored; written only by bin/fm-bridge.sh and read only through bin/fm-bridge-render.sh --state (section 9; docs/bridge.md)
-  bridge/bridge.html   the generated captain board; LOCAL, gitignored, rewritten by the supervision cycle's tick and never hand-edited
+  bridge/bridge.html   the generated captain board; LOCAL, gitignored, rewritten by the supervision cycle's tick only when the ledger content changed, and never hand-edited
   secondmates.md      local and remote secondmate routing table; firstmate-private, maintained by the secondmate seed helpers (section 6)
   <id>/brief.md      per-task crewmate brief, or per-secondmate charter brief when kind=secondmate
   <id>/report.md     scout task deliverable, written by the crewmate; survives teardown
@@ -156,7 +156,7 @@ A lock-refused session must not spawn, steer, merge, drain the wake queue, repai
    A file that does not exist prints an explicit `ABSENT` marker, never confused with an empty-but-present file: absence is meaningful (`captain.md` absent means use the firstmate repo's built-in defaults, `projects.md` absent means rebuild it from the clones under `projects/`, etc.).
 5. **Fleet-state digest** - the compact backlog listing owned by `bin/fm-session-start.sh`; every `state/<id>.meta`; a bounded tail of each task's `state/<id>.status` (labeled as wake-EVENT history, not current state, with the full log path printed for a deeper read); the `state/.afk` flag; and one cheap alive/dead read of each task's recorded backend endpoint.
    That liveness line is a fast presence check only, not a full state read - when you need a crew's actual current state (a run-step, not just "is the pane there"), read it with `bin/fm-crew-state.sh <id>` as before; the digest deliberately skips that deeper, slower read for every task so it stays fast and bounded.
-5b. **Bridge board** - refreshes the captain's board so a session opens on current fleet state instead of up to a supervision tick behind; never fatal (`docs/bridge.md`).
+5b. **Bridge board** - brings the captain's board up to date so a session opens on current fleet state instead of up to a supervision tick behind, rewriting it only when the ledger content changed and naming what failed when it could not; never fatal (`docs/bridge.md`).
 6. **Supervision operating instructions and next step** - after the wake queue and before context, the digest emits exactly one operating block for the detected primary harness.
    The closing reminder points back to that emitted block and preserves only the lock, afk, X-mode, and read-once reminders.
    The script itself never starts supervision; the emitted harness protocol owns the exact wait or wake mechanism.

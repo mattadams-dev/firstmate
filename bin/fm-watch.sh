@@ -51,6 +51,12 @@
 #   check: rejected unauthenticated PR poll retirement receipts: <paths>
 #                          invalid pending retirements were preserved without
 #                          running a check or removing poll artifacts
+#   check: the captain board has failed to render N times in a row: <reason>
+#                          the Bridge tick counted three or more CONSECUTIVE
+#                          failed renders and named what failed. One failure is
+#                          transient and stays quiet; a render that lands resets
+#                          the count. Relayed verbatim from the tick, which is
+#                          the only thing that sees the reason
 #   heartbeat              fleet-scan backstop found an unsurfaced captain-relevant
 #                          status, unless afk is active
 # For normal supervision, resume the session-start primary-harness protocol
@@ -926,15 +932,34 @@ while :; do
   touch "$STATE/.last-watcher-beat"
 
   # Bridge board: a deterministic script, zero model involvement, owned by this
-  # cycle so board freshness IS supervision freshness. It runs BEFORE the check
-  # and signal scans because wake() exits the cycle - placed after them, a
-  # chatty fleet would starve the captain's only surface exactly when the most
-  # is happening. When the ledger has not changed the tick only restamps the
-  # freshness line, so the common case is nearly free. Never fatal: a board that
-  # cannot render must not take down supervision.
+  # cycle. It runs BEFORE the check and signal scans because wake() exits the
+  # cycle - placed after them, a chatty fleet would starve the captain's only
+  # surface exactly when the most is happening. When the ledger content has not
+  # changed the tick writes nothing at all, which is both free and deliberate:
+  # the board is hosted, and a write reloads it out from under a ruling the
+  # captain is annotating (docs/verification/bridge-hosted-input.md). This cycle
+  # therefore does not prove its own liveness through the board - the beacon at
+  # state/.last-watcher-beat does. Never fatal: a board that cannot render must
+  # not take down supervision.
+  #
+  # But never silent either. A board rendering fine and a board whose render has
+  # been failing for an hour look IDENTICAL to the captain - an older content
+  # clock is also what a quiet fleet looks like - so the tick's stderr is READ
+  # rather than discarded. The tick counts its own consecutive failures and
+  # raises a "bridge-alarm:" line on the third, carrying the reason it failed
+  # for; this relays that one line, verbatim, as an actionable wake. Relaying is
+  # all it does: the counting, the threshold, and the reason belong to the tick,
+  # which is the only thing that sees the failure. The BRIDGE_INTERVAL gate above
+  # is the alarm's rate limit; there is deliberately no second one.
   if [ "$(age_of "$STATE/.last-bridge")" -ge "$BRIDGE_INTERVAL" ]; then
-    FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-bridge-render.sh" --tick >/dev/null 2>&1 || true
+    bridge_out=$(FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-bridge-render.sh" --tick 2>&1 >/dev/null) || true
     touch "$STATE/.last-bridge"
+    bridge_alarm=$(printf '%s\n' "$bridge_out" | grep '^bridge-alarm: ' | tail -1 || true)
+    if [ -n "$bridge_alarm" ]; then
+      reason="check: ${bridge_alarm#bridge-alarm: }"
+      fm_wake_append check bridge-render "$reason" || exit 1
+      wake "$reason"
+    fi
   fi
 
   # Parent-owned secondmate pending-reply reconciliation: resolve correlated
