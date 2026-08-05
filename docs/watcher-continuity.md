@@ -16,7 +16,11 @@ Claude's `.claude/settings.json` Stop `asyncRewake` hook (`bin/fm-claude-stop-au
 The hook fires on every Stop, and an eligible primary with supervision need admits one home-scoped owner that foregrounds `bin/fm-watch-arm.sh` inside the hook-owned process tree.
 A numeric session-lock owner that fails the shared `fm_harness_pid_alive` predicate is reclaimed through `bin/fm-lock.sh` before auto-arm state changes, while a live owner, absent lock, or malformed lock keeps the competing hook inert.
 The stale-owner claim occurs only after the existing AFK and supervision-need gates pass.
-While supervision is still needed and away mode remains inactive, an actionable close or typed failure wakes the idle session through exit 2.
+After each non-actionable arm close, the hook rechecks the identity-matched watcher lock and fresh beacon before retrying a bounded number of times.
+A cycle-end failure is benign when that live-watcher predicate is true, and the hook suppresses the arm output and continues silently.
+Only an exhausted failure with no verified watcher emits one last-resort notice for the continuous failure episode; later consecutive Stop cycles exit 2 to guarantee another Stop-owned retry without repeating the notice until the turn-end guard consumes the attended fail-open.
+The Claude turn-end guard owns the monotonic failure progression, one-time attended fail-open, post-alarm continuation suppression, and positive recovery reset described in [`turnend-guard.md`](turnend-guard.md#harness-integrations).
+While supervision is still needed and away mode remains inactive, an actionable close wakes the idle session through exit 2.
 
 ## Actionable wake ordering
 
@@ -32,6 +36,8 @@ This matters most where the hook cannot run at all - a forked session leaves `st
 The durable wake queue preserves actionable events during the residual active-turn window, and the unchanged bounded turn-end guard enforces recovery at Stop when no watcher or auto-arm claim is present.
 No PreToolUse hook denies fleet commands based on watcher status.
 The model no longer re-arms after ordinary wakes.
+No PreToolUse hook denies fleet commands based on watcher status.
+A genuine auto-arm failure describes the automatic mechanism as broken and never directs a routine manual background arm.
 Terminal arm-output classification (`started`, `attached`, or `FAILED`) remains defense in depth for the manual recovery path.
 Codex retains its bounded foreground checkpoint protocol.
 Grok retains its tracked background-task notification protocol.
@@ -49,6 +55,14 @@ An attached arm follows verified identity-matched successors and reports the sam
 An attached cycle that closes on a genuine wake is not that case: the successor writes its one reason to `state/.watch-successor-output.<pid>` before releasing the singleton, and the attached arm claims and delivers it, arming the next successor first.
 A successor is armed only for a delivered actionable wake in a home that still needs supervision and is not away, so a typed failure stays loud and unarmed and an idle home is never left with a detached watcher.
 
+Post-sync 2026-08-04, two delivery-record mechanisms coexist: the fork's pid-keyed `state/.watch-successor-output.<pid>` handoff (above) and upstream's identity-matched `state/.watch-deliveries.log` ledger (below). Both are live in `bin/fm-watch-arm.sh`; their unification is owned by the supervisor-singleton lane's subsumption round. This coexistence is declared so it reads as known state, not drift.
+
+A zero/empty child return rechecks the home lock and beacon, attaches to a verified healthy successor when one exists, or resolves the close against the watcher's bounded terminal-delivery ledger.
+An attached arm follows verified identity-matched successors and resolves the same way when that chain ends without one, because it holds no handle on the watcher's stdout and cannot read the reason line itself.
+Before releasing its singleton lock after printing an actionable reason, the watcher records that reason with its PID and process identity in `state/.watch-deliveries.log`.
+A matching PID and identity lets an attached arm report the delivered reason and exit zero even after the durable wake queue was drained, while an unrelated queue producer or a recycled PID cannot satisfy the match.
+Only a cycle with no matching delivery record emits `watcher: FAILED - cycle ended without an actionable reason` and exits nonzero.
+
 The arm layer appends one tab-separated record per observed cycle to `state/.watch-cycle-exits.log`.
 Each record includes arm and watcher PIDs, start and end timestamps, exit code and signal, classified reason, beacon age, lock identity before and after close, and successor disposition.
 The file is size-capped through `FM_WATCH_CYCLE_LOG_MAX_BYTES` and `FM_WATCH_CYCLE_LOG_KEEP_LINES`.
@@ -65,9 +79,9 @@ The same suite covers ordinary same-process session replacement for `/new`, `/re
 The same suite proves the arm layer's own floor: a delivered wake has a live successor holding the singleton at the moment it is delivered, an attached arm delivers its successor cycle's wake instead of a false empty-close failure, an idle home is left with no detached watcher, and the preserved 499-record capture in `tests/fixtures/watch-cycle-exits/cycle-exits.log` still shows the `successor=none` defect that a fresh cycle no longer reproduces.
 `tests/fm-watch-triage.test.sh` proves the parked check-in cadence: overdue lanes batch into one wake per window, a fresh cycle inside that window no longer dies on them, the cadence still comes due, and a lane whose declared wait has actually cleared surfaces at once regardless.
 `tests/fm-subagent-pretool-check.test.sh` proves Claude retains only the non-status Bash seatbelts.
-`tests/fm-claude-stop-autoarm.test.sh` covers the auto-arm's scope, stale and live session owners, unchanged AFK and need boundaries, single-flight, and exit-2 translation.
+`tests/fm-claude-stop-autoarm.test.sh` covers the auto-arm's scope, stale and live session owners, unchanged AFK and need boundaries, single-flight, bounded failure retries, benign live-watcher cycle ends, one-notice failure episodes, and exit-2 translation.
 `FM_CLAUDE_LIVE_E2E=1 tests/fm-claude-stop-autoarm-live-e2e.test.sh` starts with the reproduced stale-lock state, runs session start first, completes two tokenless cycles, and checks the competing-live-owner negative control.
-`tests/fm-turnend-guard.test.sh` covers the cooperative `--claude` guard.
+`tests/fm-turnend-guard.test.sh` covers the cooperative `--claude` guard, including monotonic failed-epoch progression, the integrated bounded fail-open, post-alarm continuation suppression, and positive recovery reset.
 
 ## Active limits and verification
 
