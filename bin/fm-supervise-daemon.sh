@@ -641,18 +641,24 @@ escalate_add() {  # <state> <distilled-item>
 # supervisor pane. Returns 0 on successful inject (or empty buffer), non-zero on
 # inject failure (buffer preserved for retry / catch-up).
 escalate_flush() {  # <state>
-  local state=$1 buf n kinds msg
+  local state=$1 buf n kinds kind_list msg
   buf="$state/.subsuper-escalations"
   [ -s "$buf" ] || return 0
   # Counted off the one buffer-to-kind reading, in the same non-blank-item unit
   # wedge_summary_line reports, so a delivered record and a wedged one can never
   # disagree about what the buffer held. A buffer this never got to read reports
   # `unknown` rather than a confident zero: a batch is being delivered either
-  # way, and naming it "0 event(s)" would be a count nothing observed.
+  # way, and naming it "0 event(s)" would be a count nothing observed. Both
+  # halves of the record report the SAME observation state - an unread buffer
+  # renders `kinds=unknown` too, because a bare `kinds=` reads as "observed, and
+  # it held no kinds", which is the same collapse of unknown the count avoids.
   if kinds=$(wedge_buffer_kinds "$buf"); then
     n=$(fm_kind_count "$kinds")
+    kind_list=$(fm_kind_list "$kinds")
+    [ -n "$kind_list" ] || kind_list=none
   else
     n=unknown
+    kind_list=unknown
   fi
   # Join buffered items with the literal " | " separator into one digest line.
   msg=$(awk 'NR>1{printf " | "} {printf "%s",$0} END{print ""}' "$buf" 2>/dev/null)
@@ -665,7 +671,7 @@ escalate_flush() {  # <state>
     # one are directly comparable in the record. Rendered from the reading the
     # digest was already built from, so the retry path a wedge drives never pays
     # for a second scan of a buffer that only grows.
-    log "escalation flush delivered: $n item(s), kinds=$(fm_kind_list "$kinds")"
+    log "escalation flush delivered: $n item(s), kinds=$kind_list"
     : > "$buf"; rm -f "${buf}.since" "$state/.subsuper-inject-wedged"; return 0
   fi
   return 1
@@ -872,20 +878,30 @@ wedge_alarm_via_herdr() {  # <summary>
 # that never does.
 #
 # The predicate is deliberately the narrowest one that names that broken shape:
-# a single word, no shell metacharacter, and resolvable to an executable. Every
-# other directive keeps its exact previous invocation, because handing an extra
-# argument to a directive that already carries its own is not safe in general -
-# a command may reject or misread it (`sleep 30` treats it as a second duration,
-# `notify-send SUMMARY BODY` has no third parameter). Those directives already
-# place `$1` themselves or read stdin, which every shape still receives.
+# a single word, no shell metacharacter, and resolving to a real executable FILE.
+# Every other directive keeps its exact previous invocation, because handing an
+# extra argument to a directive that already carries its own is not safe in
+# general - a command may reject or misread it (`sleep 30` treats it as a second
+# duration, `notify-send SUMMARY BODY` has no third parameter). Those directives
+# already place `$1` themselves or read stdin, which every shape still receives.
+#
+# WHAT the directive resolved to is classified BEFORE it can be invoked, and a
+# function, builtin, alias or keyword is refused outright. A plain resolution
+# check succeeds for the daemon's OWN functions, so a directive colliding with
+# one would run in-process, exit 0, and be reported as a DELIVERED channel - a
+# false success in the very alarm chain that exists to break silence. Refusing
+# the collision sends it down the `sh -c` path, where it fails loudly exactly as
+# it did before this branch.
 wedge_alarm_command_is_bare_program() {  # <cmd>
-  local cmd=$1
+  local cmd=$1 resolved
   case "$cmd" in
     '') return 1 ;;
     *[[:space:]]*) return 1 ;;
     *[\;\|\&\<\>\$\`\(\)\{\}\'\"\*\?\[\]\~\\]*) return 1 ;;
   esac
-  command -v -- "$cmd" >/dev/null 2>&1
+  [ "$(type -t -- "$cmd" 2>/dev/null)" = file ] || return 1
+  resolved=$(type -P -- "$cmd" 2>/dev/null) || return 1
+  [ -n "$resolved" ] && [ -f "$resolved" ] && [ -x "$resolved" ]
 }
 
 # Run a captain-supplied command with the summary on $1 and on stdin, so an
@@ -982,15 +998,25 @@ wedge_alarm_notify() {  # <summary> <marker>
 # them inside the consumer's identity truncation regardless of marker path length.
 
 # One kind slug per buffered escalation item. The item text is produced by
-# escalate_add's callers and by the wake classifiers, so the two shapes that
-# carry no status verb are matched on their own leading text and everything else
-# keys off the strongest status verb it carries (a batched signal item can name
-# several tasks, and the strongest verb is the one that decides urgency).
+# escalate_add's callers and by the wake classifiers, so the shapes that carry no
+# status verb are matched on their own text and everything else keys off the
+# strongest status verb it carries (a batched signal item can name several tasks,
+# and the strongest verb is the one that decides urgency).
+#
+# The SAME pane condition reaches this classifier by two paths: housekeeping's
+# stale-persistence recheck writes `stale persisted <n>s (possible wedge): <win>`
+# and handle_wake's wedge branch writes the watcher's own
+# `<win> (idle <n>s, possible wedge, escalation <n>...)`. Both are the one
+# idle-pane wedge, so both are `stale-idle`; letting severity depend on which
+# internal path noticed the condition is the instrument disagreeing with itself.
+# The second pattern names that shape exactly, so it cannot swallow the declared
+# pause or any item carrying a status verb.
 wedge_escalation_kind() {  # <buffered-item> -> kind slug
   local item=$1
   case "$item" in
     'paused '*) printf 'pause-recheck'; return ;;
     'stale persisted '*) printf 'stale-idle'; return ;;
+    *' (idle '*'s, possible wedge, escalation '*) printf 'stale-idle'; return ;;
   esac
   case "$item" in
     *needs-decision:*) printf 'decision'; return ;;
@@ -1059,11 +1085,18 @@ wedge_kind_severity() {  # <kind> -> LOW|MEDIUM|HIGH
 # An unreadable or empty buffer reports severity=UNKNOWN rather than defaulting
 # to either direction: the alarm genuinely fired, but this instrument did not
 # observe what it holds, and saying LOW there would be fabrication.
+#
+# The two ways of holding nothing are DIFFERENT observations and are worded
+# differently. A buffer that was read and held no item is a real reading, so it
+# reports `count=0`; a buffer that could never be read is a reading that did not
+# happen, so it reports `count=unknown` and says so in prose. Collapsing the
+# second into the first would claim a zero nothing counted - the same lie the
+# delivered record avoids from this same helper.
 wedge_summary_line() {  # <state> <age-seconds> <marker>
-  local state=$1 age=$2 marker=$3 buf kind sev
+  local state=$1 age=$2 marker=$3 buf kind sev read_ok=1
   local count max='' kinds='' kind_list
   buf="$state/.subsuper-escalations"
-  kinds=$(wedge_buffer_kinds "$buf") || kinds=''
+  kinds=$(wedge_buffer_kinds "$buf") || { read_ok=0; kinds=''; }
   count=$(fm_kind_count "$kinds")
   while IFS= read -r kind; do
     [ -n "$kind" ] || continue
@@ -1073,8 +1106,13 @@ wedge_summary_line() {  # <state> <age-seconds> <marker>
       *) max=${max:-$sev} ;;
     esac
   done <<< "$kinds"
+  if [ "$read_ok" -eq 0 ]; then
+    printf 'FMWEDGE/1 severity=UNKNOWN count=unknown kinds=unknown age=%ss: away-mode escalations are held undelivered but the buffered list could not be read; see %s' \
+      "$age" "$marker"
+    return 0
+  fi
   if [ "$count" -eq 0 ]; then
-    printf 'FMWEDGE/1 severity=UNKNOWN count=0 kinds=none age=%ss: away-mode escalations are held undelivered but the buffered list could not be read; see %s' \
+    printf 'FMWEDGE/1 severity=UNKNOWN count=0 kinds=none age=%ss: away-mode escalations are held undelivered and the buffered list was read but named no item; see %s' \
       "$age" "$marker"
     return 0
   fi
