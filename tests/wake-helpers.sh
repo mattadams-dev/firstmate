@@ -100,6 +100,9 @@ SH
 # A per-id override FM_FAKE_CREW_STATE_<sanitized-id> wins; otherwise the shared
 # FM_FAKE_CREW_STATE; otherwise an unknown verdict (NOT provably working), the
 # safe default so a test that forgets to set one surfaces rather than absorbs.
+# The `--steps` mode serves the same way from FM_FAKE_CREW_STEPS_<sanitized-id>
+# / FM_FAKE_CREW_STEPS, defaulting to EMPTY - no readable run record, which the
+# watcher must read as unknown and therefore never as grounds to reset an alarm.
 make_fake_crew_state() {  # <fakebin>
   local fakebin=$1
   cat > "$fakebin/fm-crew-state.sh" <<'SH'
@@ -107,6 +110,12 @@ make_fake_crew_state() {  # <fakebin>
 set -u
 id=${1:-}
 key=$(printf '%s' "$id" | tr -c 'A-Za-z0-9' '_')
+if [ "${2:-}" = --steps ]; then
+  var="FM_FAKE_CREW_STEPS_$key"
+  val=${!var:-${FM_FAKE_CREW_STEPS:-}}
+  [ -n "$val" ] && printf '%s\n' "$val"
+  exit 0
+fi
 var="FM_FAKE_CREW_STATE_$key"
 val=${!var:-${FM_FAKE_CREW_STATE:-}}
 printf '%s\n' "${val:-state: unknown · source: none · fake default}"

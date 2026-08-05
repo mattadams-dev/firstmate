@@ -139,8 +139,9 @@ make_no_timeout_toolbin() {  # <dir> -> echoes toolbin path
 
 # Run the helper for one case dir. FM_FAKE_* env (run output, busy flag) are read
 # from the caller's environment by the fakes above.
-run_crew_state() {  # <case-dir> <id>
-  PATH="$1/fakebin:$PATH" FM_STATE_OVERRIDE="$1/state" "$CREW_STATE" "$2"
+run_crew_state() {  # <case-dir> <id> [args...]
+  local d=$1; shift
+  PATH="$d/fakebin:$PATH" FM_STATE_OVERRIDE="$d/state" "$CREW_STATE" "$@"
 }
 
 new_case() {  # <name> -> echoes case dir with an empty state/
@@ -1216,6 +1217,73 @@ test_usage_error() {
   pass "usage error exits 2"
 }
 
+# --- --steps: the lane's COMPLETED-step evidence ----------------------------
+# The watcher clears a wedge escalation when this lane's own run record shows a
+# step completed since the previous escalation. Only a step that ACTUALLY
+# completed may appear here: a running, pending, or gate-parked step is work in
+# progress, and treating one as evidence would pardon a lane wedged inside it.
+test_steps_lists_only_completed_steps() {
+  reset_fakes
+  local d out
+  d=$(new_case steps-completed)
+  make_repo_on_branch "$d/wt" fm/feat-steps
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-steps.meta" "window=fm:fm-feat-steps" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_ci_monitoring fm/feat-steps)"
+  out=$(run_crew_state "$d" feat-steps --steps)
+  assert_contains "$out" "run=01RUN" "--steps names the run the evidence came from"
+  assert_contains "$out" "completed=intent,review,push" "--steps lists the completed steps"
+  assert_not_contains "$out" "ci" "a still-running step is not completed evidence"
+  pass "--steps reports the completed steps of this lane's own run"
+}
+
+test_steps_excludes_uncompleted_steps() {
+  reset_fakes
+  local d out
+  d=$(new_case steps-uncompleted)
+  make_repo_on_branch "$d/wt" fm/feat-gate
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-gate.meta" "window=fm:fm-feat-gate" "worktree=$d/wt" "kind=ship"
+  # intent,completed / review,fix_review / test,pending
+  FM_FAKE_AXI_STATUS="$(run_parked_in_gate_block fm/feat-gate)"
+  out=$(run_crew_state "$d" feat-gate --steps)
+  assert_contains "$out" "completed=intent" "the one completed step is reported"
+  assert_not_contains "$out" "review" "a gate-parked step is not completed evidence"
+  assert_not_contains "$out" "test" "a pending step is not completed evidence"
+  pass "--steps excludes running, pending, and gate-parked steps"
+}
+
+test_steps_reports_a_run_with_nothing_completed_yet() {
+  reset_fakes
+  local d out
+  d=$(new_case steps-none-yet)
+  make_repo_on_branch "$d/wt" fm/feat-fresh
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-fresh.meta" "window=fm:fm-feat-fresh" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_fixing fm/feat-fresh)"
+  out=$(run_crew_state "$d" feat-fresh --steps)
+  assert_contains "$out" "run=01RUN" "an attributed run is still identified"
+  assert_contains "$out" "completed=-" "no completed step yet is stated, not left blank"
+  pass "--steps distinguishes an attributed run with nothing completed from no record"
+}
+
+test_steps_is_empty_without_an_attributed_run() {
+  reset_fakes
+  local d out
+  d=$(new_case steps-other-branch)
+  make_repo_on_branch "$d/wt" fm/feat-mine
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-mine.meta" "window=fm:fm-feat-mine" "worktree=$d/wt" "kind=ship"
+  # The active run belongs to a different branch: nothing here is evidence
+  # about this lane, and unknown must read as empty rather than as a record.
+  FM_FAKE_AXI_STATUS="$(run_ci_monitoring fm/someone-else)"
+  out=$(run_crew_state "$d" feat-mine --steps)
+  [ -z "$out" ] || fail "another branch's run was reported as this lane's step evidence: $out"
+  out=$(run_crew_state "$d" no-such-task --steps)
+  [ -z "$out" ] || fail "a task with no metadata reported step evidence: $out"
+  pass "--steps stays empty when no run is attributable to this lane"
+}
+
 # Head-binding: same branch name with a rewritten/diverged worktree tip must not
 # attribute a historical no-mistakes run (multi-stage branch reuse incident).
 test_historical_same_branch_rewritten_head_not_current() {
@@ -1354,6 +1422,10 @@ test_missing_meta
 test_provably_working_via_runs_list_fallback
 test_not_provably_working_when_stopped
 test_usage_error
+test_steps_lists_only_completed_steps
+test_steps_excludes_uncompleted_steps
+test_steps_reports_a_run_with_nothing_completed_yet
+test_steps_is_empty_without_an_attributed_run
 test_historical_same_branch_rewritten_head_not_current
 test_active_run_descendant_fix_head_remains_current
 test_local_advanced_past_run_head_invalidates
