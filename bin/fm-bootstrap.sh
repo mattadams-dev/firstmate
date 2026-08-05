@@ -79,8 +79,10 @@
 #          Fork freshness is the weekly half of the fork sweep rule: it runs
 #          bin/fm-fork-freshness.sh sweep --if-due, which is silent between
 #          cadences and reports its own coverage, and is bounded here by
-#          FM_FORK_SWEEP_BOOTSTRAP_TIMEOUT (default 45s) with a timeout reported
-#          as unknown coverage rather than silence.
+#          FM_FORK_SWEEP_BOOTSTRAP_TIMEOUT (default 45s) with a timeout, or any
+#          exit outside its normal 0/3/4/5 vocabulary, reported as unknown
+#          coverage rather than silence. The sweep's stderr is relayed too, so a
+#          BACKLOG_MANUAL: line reaches this digest beside its reading.
 #          Set FM_BOOTSTRAP_DETECT_ONLY=1 to skip the six MUTATING sweeps
 #          (PR-check migration, secondmate_sync, secondmate_liveness_sweep,
 #          x_mode_setup, fleet_sync, fork_freshness) while still printing every read-only detect line
@@ -210,19 +212,38 @@ fork_freshness() {
   # surface it runs on. A timeout is reported as unknown coverage, never as
   # silence, because "the sweep did not finish" and "no fork is behind" are
   # different worlds and must not print the same thing.
+  #
+  # Stderr is relayed rather than discarded: the sweep writes its BACKLOG_MANUAL:
+  # line there because stdout carries the reading, and a sync task whose backlog
+  # entry silently failed is a tracked item nobody is tracking. And 0, 3, 4 and 5
+  # are the sweep's whole vocabulary of normal results, so any other status is a
+  # crash and gets its own unknown line - "the sweep died" must not print the
+  # same nothing as "the sweep was not due".
   [ -x "$FM_ROOT/bin/fm-fork-freshness.sh" ] || return 0
   local out status=0 timeout_secs=${FM_FORK_SWEEP_BOOTSTRAP_TIMEOUT:-45}
   case "$timeout_secs" in ''|*[!0-9]*) timeout_secs=45 ;; esac
+  # timeout treats 0 as "no limit", which is the unbounded wait this bounds.
+  [ "$timeout_secs" -gt 0 ] || timeout_secs=45
   if command -v timeout >/dev/null 2>&1; then
     out=$(FM_HOME="$FM_HOME" timeout "$timeout_secs" \
-      "$FM_ROOT/bin/fm-fork-freshness.sh" sweep --if-due 2>/dev/null) || status=$?
+      "$FM_ROOT/bin/fm-fork-freshness.sh" sweep --if-due 2>&1) || status=$?
   else
-    out=$(FM_HOME="$FM_HOME" "$FM_ROOT/bin/fm-fork-freshness.sh" sweep --if-due 2>/dev/null) || status=$?
+    out=$(FM_HOME="$FM_HOME" "$FM_ROOT/bin/fm-fork-freshness.sh" sweep --if-due 2>&1) || status=$?
   fi
   [ -z "$out" ] || printf '%s\n' "$out"
-  if [ "$status" = 124 ]; then
-    echo "FORK_FRESHNESS_COVERAGE: status=unknown reason=freshness sweep timed out after ${timeout_secs}s"
-  fi
+  case "$status" in
+    0) ;;
+    3|4|5)
+      [ -n "$out" ] ||
+        echo "FORK_FRESHNESS_COVERAGE: status=unknown reason=freshness sweep reported status $status and no reading"
+      ;;
+    124)
+      echo "FORK_FRESHNESS_COVERAGE: status=unknown reason=freshness sweep timed out after ${timeout_secs}s"
+      ;;
+    *)
+      echo "FORK_FRESHNESS_COVERAGE: status=unknown reason=freshness sweep exited $status before completing"
+      ;;
+  esac
 }
 
 secondmate_sync() {

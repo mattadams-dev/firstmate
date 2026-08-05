@@ -22,7 +22,11 @@
 # payload that does not parse. Coverage has its own suite, because a fork the
 # sweep silently skips is the failure the sweep was built to end: private repos,
 # forks with no local clone, ignored forks and archived forks are all accounted
-# for by name or by count, never dropped.
+# for by name or by count, never dropped. That suite also holds the ways coverage
+# can be quietly incomplete rather than quietly wrong - a fork whose slug is a
+# suffix of another's, a clone whose origin URL ends in a slash, and an
+# enumeration that came back at its cap - and each has its opposite-direction
+# case, because "declare coverage unknown every run" passes none of them.
 #
 # The forge is faked, but the fake applies the script's real --jq filters with
 # real jq to real JSON payloads, so a filter that stops matching GitHub's
@@ -427,6 +431,91 @@ test_archived_forks_are_reported_as_ignored() {
   pass "fm-fork-freshness: an archived fork is reported with its reason"
 }
 
+test_fork_named_inside_another_forks_slug_is_still_swept() {
+  local dir out rc=0
+  dir=$(new_case)
+  # "me/firstmate" is a suffix of "acme/firstmate": a substring dedupe against
+  # the owned enumeration drops the second fork with no line and no count, which
+  # is the silent omission this whole sweep exists to end, reproduced inside it.
+  repolist "$dir" '[{"nameWithOwner":"acme/firstmate","isFork":true,"isArchived":false,"parent":{"owner":{"login":"upstream"},"name":"firstmate"},"defaultBranchRef":{"name":"main"}}]'
+  printf 'me/firstmate\n' > "$dir/home/config/maintained-forks"
+  repo_fixture "$dir" upstream/firstmate false - main
+  repo_fixture "$dir" me/firstmate true up2/firstmate main
+  repo_fixture "$dir" up2/firstmate false - main
+  compare_fixture "$dir" upstream/firstmate main acme main identical 0 0 >/dev/null
+  compare_fixture "$dir" up2/firstmate main me main behind 0 5 >/dev/null
+  out=$(run_sweep "$dir" sweep --owner acme) || rc=$?
+
+  expect_code 3 "$rc" "the second fork is behind, so the sweep must not exit clean"
+  printf '%s\n' "$out" | grep -q '^FORK_FRESHNESS: me/firstmate status=behind behind=5' ||
+    fail "a fork whose slug is a suffix of an enumerated one was dropped without a line"$'\n'"--- output ---"$'\n'"$out"
+  assert_contains "$out" "forks=2" "the swallowed fork was missing from the coverage counts too"
+  assert_present "$dir/home/data/fm-sync-me-firstmate/brief.md" \
+    "the swallowed fork never got its sync task"
+  pass "fm-fork-freshness: a fork whose slug is a suffix of another's is swept, not swallowed"
+}
+
+test_cloned_fork_with_a_trailing_slash_origin_is_swept() {
+  local dir out rc=0
+  dir=$(new_case)
+  repolist "$dir" '[]'
+  fm_git_init_commit "$dir/home/projects/tool"
+  git -C "$dir/home/projects/tool" remote add origin 'https://github.com/other-org/tool/'
+  repo_fixture "$dir" other-org/tool true upstream/tool main
+  repo_fixture "$dir" upstream/tool false - main
+  compare_fixture "$dir" upstream/tool main other-org main behind 0 4 >/dev/null
+  out=$(run_sweep "$dir" sweep --owner acme) || rc=$?
+
+  expect_code 3 "$rc" "a cloned fork that is behind must not exit clean"
+  assert_contains "$out" "other-org/tool status=behind behind=4" \
+    "a clone whose origin URL ends in a slash contributed no candidate at all"
+  pass "fm-fork-freshness: a clone with a trailing-slash origin URL is still a candidate"
+}
+
+test_capped_enumeration_reads_unknown_coverage() {
+  local dir out rc=0 now last
+  dir=$(new_case)
+  # The list came back at exactly the cap, so repositories exist that this run
+  # never saw. Two clean readings do not make that a clean sweep.
+  repolist "$dir" '[
+    {"nameWithOwner":"acme/one","isFork":true,"isArchived":false,"parent":{"owner":{"login":"upstream"},"name":"one"},"defaultBranchRef":{"name":"main"}},
+    {"nameWithOwner":"acme/two","isFork":true,"isArchived":false,"parent":{"owner":{"login":"upstream"},"name":"two"},"defaultBranchRef":{"name":"main"}}
+  ]'
+  repo_fixture "$dir" upstream/one false - main
+  repo_fixture "$dir" upstream/two false - main
+  compare_fixture "$dir" upstream/one main acme main identical 0 0 >/dev/null
+  compare_fixture "$dir" upstream/two main acme main identical 0 0 >/dev/null
+  now=1800000000
+  printf '%s\n' "$((now - 8 * 86400))" > "$dir/home/state/.fork-freshness-last"
+  out=$(FM_FORK_FRESHNESS_NOW=$now FM_FORK_SWEEP_LIST_LIMIT=2 \
+    run_sweep "$dir" sweep --if-due --owner acme) || rc=$?
+
+  expect_code 4 "$rc" "a sweep whose enumeration hit its cap must not exit clean"
+  assert_contains "$out" "FORK_FRESHNESS_COVERAGE: status=unknown" \
+    "a truncated enumeration must report coverage as unknown"
+  assert_contains "$out" "cap" "the unknown coverage line does not name the cap it hit"
+  assert_contains "$out" "swept=2" \
+    "the readings it did take must still be reported alongside the unknown coverage"
+  last=$(cat "$dir/home/state/.fork-freshness-last")
+  [ "$last" != "$now" ] ||
+    fail "a truncated sweep stamped itself complete, buying a week of silence over forks it never read"
+  pass "fm-fork-freshness: an enumeration that hit its cap reads unknown and stays due"
+}
+
+test_full_enumeration_under_the_cap_reads_clean() {
+  local dir out rc=0
+  dir=$(new_case)
+  one_fork "$dir" identical 0 0
+  out=$(FM_FORK_SWEEP_LIST_LIMIT=2 run_sweep "$dir" sweep --owner acme) || rc=$?
+
+  # The other half of the cap check: a list that fits must not read as truncated,
+  # or the sweep cries unknown every run and the distinction stops meaning anything.
+  expect_code 0 "$rc" "a complete enumeration below the cap must exit clean"
+  assert_not_contains "$out" "status=unknown" \
+    "an enumeration that fit under the cap was reported as truncated"
+  pass "fm-fork-freshness: an enumeration that fits under the cap reads clean"
+}
+
 test_configured_extra_fork_outside_enumeration_is_swept() {
   local dir out rc=0
   dir=$(new_case)
@@ -639,6 +728,10 @@ test_check_cannot_read_reads_unknown() {
 # Both triggers the rule names must fire it. These prove the call happens
 # through the real caller, with a recorder standing in for the sweep.
 
+# The recorder also stands in for what a real sweep does to its caller: it can
+# print a reading, write to stderr the way the backlog failure does, exit with
+# any status, and hang. `exec sleep` rather than a plain sleep, so a bounded
+# caller's timeout kills the process holding the pipe rather than orphaning it.
 fake_root_with_recorder() {  # <case-dir> -> fake FM_ROOT
   local dir=$1 root="$1/root"
   mkdir -p "$root"
@@ -646,10 +739,20 @@ fake_root_with_recorder() {  # <case-dir> -> fake FM_ROOT
   cat > "$root/bin/fm-fork-freshness.sh" <<'SH'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$FM_TEST_SWEEP_LOG"
-exit 0
+[ -z "${FM_TEST_SWEEP_HANG:-}" ] || exec sleep "$FM_TEST_SWEEP_HANG"
+[ -z "${FM_TEST_SWEEP_STDOUT:-}" ] || printf '%s\n' "$FM_TEST_SWEEP_STDOUT"
+[ -z "${FM_TEST_SWEEP_STDERR:-}" ] || printf '%s\n' "$FM_TEST_SWEEP_STDERR" >&2
+exit "${FM_TEST_SWEEP_RC:-0}"
 SH
   chmod +x "$root/bin/fm-fork-freshness.sh"
   printf '%s\n' "$root"
+}
+
+run_bootstrap() {  # <case-dir> <fake-root> -> the digest on stdout
+  local dir=$1 root=$2
+  FM_ROOT_OVERRIDE="$root" FM_HOME="$dir/home" FM_TEST_SWEEP_LOG="$dir/sweep.log" \
+    PATH="$dir/bin:$PATH" \
+    "$root/bin/fm-bootstrap.sh" 2>/dev/null || true
 }
 
 test_pr_check_takes_the_reading_before_a_fork_pr() {
@@ -702,6 +805,78 @@ test_session_start_sweep_runs_and_detect_only_skips_it() {
   pass "fm-fork-freshness: the scheduled sweep runs at session start and never in a read-only session"
 }
 
+test_session_start_relays_everything_the_sweep_says() {
+  local dir root out
+  dir=$(new_case)
+  root=$(fake_root_with_recorder "$dir")
+  rmdir "$dir/home/projects"
+
+  # The backlog failure goes to stderr because stdout carries the reading. If the
+  # trigger drops stderr, the digest shows a queued sync task and nothing else,
+  # and the captain tracks an item that is on no backlog.
+  out=$(FM_TEST_SWEEP_RC=3 \
+    FM_TEST_SWEEP_STDOUT='FORK_FRESHNESS: acme/widget status=behind behind=3 ahead=0 upstream=upstream/widget compare=main...main action=task fm-sync-acme-widget queued' \
+    FM_TEST_SWEEP_STDERR='BACKLOG_MANUAL: add fm-sync-acme-widget to the backlog by hand' \
+    run_bootstrap "$dir" "$root")
+
+  assert_contains "$out" "action=task fm-sync-acme-widget queued" \
+    "the session-start digest lost the sweep's reading"
+  assert_contains "$out" "BACKLOG_MANUAL: add fm-sync-acme-widget" \
+    "a sync task whose backlog write failed reached the digest as a clean queued task"
+  pass "fm-fork-freshness: session start relays the sweep's backlog failure, not only its reading"
+}
+
+test_session_start_never_prints_a_crashed_sweep_as_a_quiet_one() {
+  local dir root quiet crashed
+  dir=$(new_case)
+  root=$(fake_root_with_recorder "$dir")
+  rmdir "$dir/home/projects"
+
+  # The two world-states: the sweep was not due (silence is the correct reading)
+  # and the sweep died before taking one (silence would be a fabrication).
+  quiet=$(run_bootstrap "$dir" "$root")
+  crashed=$(FM_TEST_SWEEP_RC=1 run_bootstrap "$dir" "$root")
+
+  assert_not_contains "$quiet" "FORK_FRESHNESS" \
+    "a sweep that was not due must add nothing to the digest"
+  assert_contains "$crashed" "FORK_FRESHNESS_COVERAGE: status=unknown" \
+    "a sweep that crashed without a reading printed exactly what a not-due sweep prints"
+  pass "fm-fork-freshness: a crashed sweep and a not-due sweep never read the same at session start"
+}
+
+test_pr_check_bounds_the_freshness_reading() {
+  local dir root out started elapsed
+  dir=$(new_case)
+  root=$(fake_root_with_recorder "$dir")
+  : > "$dir/sweep.log"
+  cat > "$dir/bin/gh" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "${FM_TEST_GH_HEAD:-0123456789abcdef0123456789abcdef01234567}"
+SH
+  chmod +x "$dir/bin/gh"
+  fm_write_meta "$dir/home/state/task-b.meta" \
+    "window=firstmate:fm-task-b" "endpoint_task_id=task-b" "worktree=$dir/wt" \
+    "project=$dir/project" "kind=ship" "mode=no-mistakes"
+  chmod 0600 "$dir/home/state/task-b.meta"
+
+  # A forge that accepts the connection and never answers must cost a reading,
+  # not the task: the merge watch is already armed by the time this runs.
+  started=$SECONDS
+  out=$(FM_ROOT_OVERRIDE="$root" FM_HOME="$dir/home" FM_TEST_SWEEP_LOG="$dir/sweep.log" \
+    FM_TEST_SWEEP_HANG=20 FM_FORK_SWEEP_PR_TIMEOUT=1 \
+    PATH="$dir/bin:$PATH" \
+    "$root/bin/fm-pr-check.sh" task-b https://github.com/acme/widget/pull/9 2>/dev/null) || true
+  elapsed=$((SECONDS - started))
+
+  [ "$elapsed" -lt 15 ] ||
+    fail "a stalled freshness reading hung the PR-ready path for ${elapsed}s"
+  assert_contains "$out" "armed: state/task-b.check.sh" \
+    "a stalled freshness reading cost the merge watch its arming"
+  assert_contains "$out" "acme/widget status=unknown" \
+    "a freshness reading that timed out reported nothing at all"
+  pass "fm-fork-freshness: a stalled pre-PR reading is bounded and reads unknown"
+}
+
 test_behind_creates_a_sync_task
 test_in_sync_creates_no_task
 test_ahead_only_creates_no_task
@@ -716,6 +891,10 @@ test_private_and_uncloned_forks_are_covered
 test_coverage_counts_match_the_readings
 test_ignored_forks_are_reported_not_omitted
 test_archived_forks_are_reported_as_ignored
+test_fork_named_inside_another_forks_slug_is_still_swept
+test_cloned_fork_with_a_trailing_slash_origin_is_swept
+test_capped_enumeration_reads_unknown_coverage
+test_full_enumeration_under_the_cap_reads_clean
 test_configured_extra_fork_outside_enumeration_is_swept
 test_same_named_forks_under_two_owners_get_two_tasks
 test_sync_task_carries_the_proven_procedure
@@ -730,4 +909,7 @@ test_check_is_silent_for_a_repository_that_is_not_a_fork
 test_check_reports_a_fork_that_is_behind
 test_check_cannot_read_reads_unknown
 test_pr_check_takes_the_reading_before_a_fork_pr
+test_pr_check_bounds_the_freshness_reading
 test_session_start_sweep_runs_and_detect_only_skips_it
+test_session_start_relays_everything_the_sweep_says
+test_session_start_never_prints_a_crashed_sweep_as_a_quiet_one
