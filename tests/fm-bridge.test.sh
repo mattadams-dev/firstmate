@@ -272,15 +272,22 @@ case "$boardhtml" in
   *"<title>Bridge - 3 need you</title>"*) : ;;
   *) fail "asks: the tab title does not carry the open-ask count" ;;
 esac
+# THE TAB TITLE IS THE COUNTER THAT NEVER SCROLLS AWAY. It is visible when the
+# board is scrolled, when it is behind another window, and when it has been open
+# for a day - and unlike anything drawn on the page, it cannot come to cover a
+# row. So the on-page count sits in normal flow with the other tallies, and does
+# not need to travel.
 case "$boardhtml" in
-  *'<div id="pin">'*) : ;;
-  *) fail "asks: the board has no viewport-fixed ask counter" ;;
+  *'<b>3</b>waiting on you'*) : ;;
+  *) fail "asks: the board's own header does not carry the open-ask count" ;;
 esac
+# It still reaches the index in one click, which is the one thing a bare number
+# would have lost.
 case "$boardhtml" in
-  *'title="3 waiting on you'*) : ;;
-  *) fail "asks: the counter does not carry the open-ask count" ;;
+  *'class="tally ask" href="#waiting"'*) : ;;
+  *) fail "asks: the count does not jump to the asks index" ;;
 esac
-pass "the open-ask count rides in the tab title and a counter that travels with the viewport"
+pass "the open-ask count rides in the tab title and in the header, in normal flow"
 
 # Resolving must clear the ask, and must carry a pointer to the outcome.
 FM_HOME=$HOME4 "$BRIDGE" resolve -q --id o-one \
@@ -666,8 +673,8 @@ case "$routed" in
   *) fail "routing: the tab title counts co-captain items as captain asks" ;;
 esac
 case "$routed" in
-  *'title="1 waiting on you'*) : ;;
-  *) fail "routing: the viewport counter counts co-captain items as captain asks" ;;
+  *'<b>1</b>waiting on you'*) : ;;
+  *) fail "routing: the header count counts co-captain items as captain asks" ;;
 esac
 tally=$(state_query "$HOME15" 'd["summary"]["needs-captain"]')
 [ "$tally" = 1 ] || fail "routing: the captain tally counts $tally instead of 1"
@@ -700,7 +707,7 @@ pass "routing refuses an unknown reader"
 # like a board that failed to load.
 allclear=$(FM_HOME=$HOME15 "$RENDER" --html)
 case "$allclear" in
-  *"the queue is clear"*) : ;;
+  *"Nothing is waiting on you"*) : ;;
   *) fail "routing: with all asks routed away the board does not report a clear queue" ;;
 esac
 pass "with every ask routed away the captain's queue reads as clear, not as empty"
@@ -1100,14 +1107,20 @@ FM_HOME=$HOME20 "$BRIDGE" lint >/dev/null 2>&1 \
   || fail "lint: a readable, clean record no longer exits 0"
 pass "a readable clean record still lints clean"
 
-# --- 21. every out-of-flow element is confined to a column the page reserves --
+# --- 21. nothing on this board is out of flow -------------------------------
 #
 # Two browser audits proved text on this board fully occluded, on rows in two
 # different zones. The rows were never the cause: chrome that travels with a
 # vertically scrolling page and sits across the top ends up over every row that
-# passes it, and parks an anchor target underneath itself. What replaced it is
-# geometric - the page reserves a column, no content is laid out inside it, and
-# everything out of flow lives there.
+# passes it, and parks an anchor target underneath itself.
+#
+# That was answered for a while by a reserved gutter no content was laid out
+# inside, which fixed chrome could occupy without covering anything. Once the
+# ruling composer was removed, the only thing left in that gutter was a number -
+# and the count already rides the one place that can never cover a row and never
+# scrolls away: the tab title. So the gutter went, the count moved into the
+# page's own header, and what is pinned now is the stronger and simpler
+# property: there is nothing out of flow to place.
 #
 # A shell suite cannot measure geometry, so this does NOT claim the page has no
 # overlap; a browser audit is what says that. It pins the structural property
@@ -1115,7 +1128,7 @@ pass "a readable clean record still lints clean"
 # rather than matching how it happens to be written, so reformatting the CSS
 # cannot break the guard and cannot quietly satisfy it either.
 
-python3 - "$TMP_ROOT/links.html" <<'RAIL' || fail "rail: see the reported rule"
+python3 - "$TMP_ROOT/links.html" <<'RAIL' || fail "layout: see the reported rule"
 import re, sys
 
 html = open(sys.argv[1]).read()
@@ -1173,38 +1186,33 @@ rules = parse(re.sub(r"/\*.*?\*/", " ", sheet.group(1), flags=re.S))
 
 out_of_flow = sorted(selector for selector, declarations in rules.items()
                      if declarations.get("position") in ("fixed", "absolute", "sticky"))
-if out_of_flow != ["#rail"]:
-    sys.exit("out-of-flow elements other than the reserved column exist: %s"
-             % out_of_flow)
+if out_of_flow:
+    sys.exit("something on the board is out of flow and can therefore come to "
+             "cover the rows it sits over: %s" % out_of_flow)
 
-rail_width = rules["#rail"].get("width", "")
-reserved = rules.get("body", {}).get("padding-right", "")
-variable = re.search(r"var\((--[a-z-]+)\)", rail_width)
-if variable is None:
-    sys.exit("the fixed column has no stated width to reserve: %r" % rail_width)
-if variable.group(1) not in reserved:
-    sys.exit("the page reserves %r, which is not the fixed column's width %r"
-             % (reserved, rail_width))
-if rules["#rail"].get("right") != "0":
-    sys.exit("the fixed column is not pinned to the edge it reserves")
+# And the page reserves no gutter for chrome that no longer exists - a reserved
+# column with nothing in it is a stripe of dead space on every screen.
+for edge in ("padding-right", "padding-left"):
+    reserved = rules.get("body", {}).get(edge, "0")
+    if reserved not in ("", "0", "0px", "0rem"):
+        sys.exit("the page still reserves %s: %r, with nothing out of flow to "
+                 "put there" % (edge, reserved))
 
-# The column is fixed-width and stays that way. It once widened to open a
-# ruling composer; with no composer there is nothing left that may resize it,
-# and a rule that grew the reserved column again would move every row on the
-# page for chrome that no longer exists.
-widening = [selector for selector, declarations in rules.items()
-            if selector != ":root" and variable.group(1) in declarations]
-if widening:
-    sys.exit("something still resizes the reserved column: %s" % widening)
 sys.exit(0)
 RAIL
-pass "the only out-of-flow element is the column the page reserves for it"
+pass "nothing on the board is out of flow, and no gutter is reserved for chrome that is gone"
 
+# The job the retired gutter counter did is still done, by the two things that
+# can do it without covering anything: the tab title, and a count in the header.
 case "$(cat "$TMP_ROOT/links.html")" in
-  *'<aside id="rail">'*'<div id="pin">'*) : ;;
-  *) fail "rail: the ask counter is not inside the reserved column" ;;
+  *'<title>Bridge - '*'need you</title>'*) : ;;
+  *) fail "layout: the tab title does not carry the count, so nothing does when the page is scrolled away" ;;
 esac
-pass "the ask counter travels with the viewport from inside that column"
+case "$(cat "$TMP_ROOT/links.html")" in
+  *'class="tally ask" href="#waiting"'*) : ;;
+  *) fail "layout: the header count no longer reaches the asks index" ;;
+esac
+pass "the count rides the tab title and reaches the index from the header, with no travelling chrome"
 
 # --- 22. two axes: who owes it, and how it ended ---------------------------
 #
@@ -1375,8 +1383,8 @@ case "$askboard" in
   *) fail "asks: the tab title still counts work that ended as needing the captain" ;;
 esac
 case "$askboard" in
-  *'title="1 waiting on you'*) : ;;
-  *) fail "asks: the rail badge still counts work that ended" ;;
+  *'<b>1</b>waiting on you'*) : ;;
+  *) fail "asks: the header count still counts work that ended" ;;
 esac
 # An override's provenance carries the accent; an ordinary note does not, so a
 # routine event never reads as a problem on a board where orange means one thing.

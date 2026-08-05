@@ -76,12 +76,18 @@ ARTIFACT_DIR="$LAB/.lavish"
 ARTIFACT="$ARTIFACT_DIR/bridge-live-guard.html"
 mkdir -p "$ARTIFACT_DIR" "$LAB/home/state" "$LAB/home/data/bridge"
 
+# A hosted session outlives this script unless it is ended, and one left behind
+# shows up in the captain's own Lavish list. So it is ended FIRST, while the file
+# it is keyed to still exists - `lavish-axi end` resolves the path, so deleting
+# the lab first would strand the session as permanently open - and on an
+# interrupt as well as a clean exit, because a killed run is exactly when this
+# gets forgotten.
 cleanup() {
   lavish-axi end "$ARTIFACT" >/dev/null 2>&1 || true
   CHROME_DEVTOOLS_AXI_SESSION="$SESSION_NAME" chrome-devtools-axi stop >/dev/null 2>&1 || true
   rm -rf "$LAB"
 }
-trap cleanup EXIT
+trap cleanup EXIT INT TERM
 
 FM_HOME="$LAB/home" "$BRIDGE" ask -q --id live-one --project orca \
   --title "an ask to annotate" --answer "A: retire it" --answer "B: keep it" >/dev/null \
@@ -100,6 +106,52 @@ chrome-devtools-axi open "$SESSION_URL" >/dev/null 2>&1 \
 snap() { chrome-devtools-axi snapshot 2>&1; }
 uid_of() { snap | grep -oE "uid=[^ ]+ $1" | head -1 | sed -E 's/uid=([^ ]+).*/\1/'; }
 
+# Lavish holds the artifact behind a "waiting for fonts and final geometry"
+# curtain until its own layout check settles, which on a headless browser can
+# take a while - and it offers its own "Show anyway" reveal for exactly that.
+# Waiting for the reveal, and saying so if it never comes, keeps "not revealed
+# yet" from being reported as "the board rendered no ask", which would send the
+# next reader after entirely the wrong thing.
+revealed=0
+attempt=0
+while [ "$attempt" -lt 45 ]; do
+  current=$(snap)
+  case "$current" in
+    *'"O1: A: retire it"'*) revealed=1; break ;;
+  esac
+  reveal_uid=$(printf '%s\n' "$current" | grep -oE 'uid=[^ ]+ button "Show anyway"' \
+    | head -1 | sed -E 's/uid=([^ ]+).*/\1/')
+  if [ -n "$reveal_uid" ]; then
+    chrome-devtools-axi click "@$reveal_uid" >/dev/null 2>&1 || true
+  fi
+  attempt=$((attempt + 1))
+  sleep 2
+done
+[ "$revealed" -eq 1 ] \
+  || fail "lavish-axi $LAVISH_VERSION never revealed the hosted board, so nothing about annotation was measured"
+
+# One helper for "did an annotation card open", because a card can render a beat
+# after the click returns and a single look would call that a refusal.
+annotation_card_opened() {  # <uid>
+  local out
+  out=$(chrome-devtools-axi click "@$1" 2>&1)
+  case "$out" in
+    *"Tell the agent what to change"*) return 0 ;;
+  esac
+  sleep 1
+  case "$(snap)" in
+    *"Tell the agent what to change"*) return 0 ;;
+  esac
+  return 1
+}
+
+dismiss_card() {
+  local cancel
+  cancel=$(snap | grep -oE 'uid=[^ ]+ button "Cancel"' | head -1 | sed -E 's/uid=([^ ]+).*/\1/')
+  [ -n "$cancel" ] && chrome-devtools-axi click "@$cancel" >/dev/null 2>&1
+  return 0
+}
+
 # Three different worlds, three different readings. "No card opened" alone
 # cannot tell them apart, and reporting the wrong one sends the next reader
 # after the wrong thing entirely.
@@ -115,20 +167,22 @@ case "$option_line" in
 esac
 option_uid=$(printf '%s' "$option_line" | sed -E 's/.*uid=([^ ]+).*/\1/')
 
-if ! chrome-devtools-axi click "@$option_uid" 2>&1 | grep -q "Tell the agent what to change"; then
+if ! annotation_card_opened "$option_uid"; then
   fail "lavish-axi $LAVISH_VERSION opened no annotation card on the board's answer option.
   The board's only input path is annotation, so this is the captain being unable
   to answer an ask - re-measure docs/verification/bridge-hosted-input.md."
 fi
+dismiss_card
 pass "a real hosted session opens an annotation card on a real ask's answer option"
 
 # The ref has to be annotatable too: it is what an annotation carries to say
 # WHICH ask was ruled on.
 ref_uid=$(uid_of 'StaticText "O1"')
 [ -n "$ref_uid" ] || fail "the hosted board rendered no visible ref for the ask"
-if ! chrome-devtools-axi click "@$ref_uid" 2>&1 | grep -q "Tell the agent what to change"; then
+if ! annotation_card_opened "$ref_uid"; then
   fail "lavish-axi $LAVISH_VERSION opened no annotation card on the ask's visible ref"
 fi
+dismiss_card
 pass "the ask's visible ref is annotatable, so an annotation can name what it ruled on"
 
 echo "all live Lavish annotation guards passed against lavish-axi $LAVISH_VERSION"
