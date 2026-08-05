@@ -57,6 +57,50 @@ The headless floor (54,136) is lower than the interactive floor (~61,500) becaus
 The delta between a matched headless pair is still the delta the same edit produces interactively, because the edit changes only the `AGENTS.md` share that both modes carry in full.
 Quote deltas from the headless pair and absolute floors from the interactive readings; never mix the two.
 
+### Measured result, section 2 layout-tree removal, 2026-08-05
+
+`AGENTS.md` went from 65,903 to 54,405 bytes by deleting the duplicated operational-home tree.
+Matched headless pair, same worktree, same prompt, three runs each:
+
+| State | `AGENTS.md` bytes | Birth weight |
+| --- | --- | --- |
+| before | 65,903 | 54,136 / 54,136 / 54,136 |
+| after | 54,405 | 49,908 / 49,908 / 49,908 |
+
+Delta: 4,228 tokens off every call, from 11,498 bytes removed - about 2.7 bytes per token, which is the expected density for text this full of paths and identifiers.
+The delta clears the interactive baseline's 134-token spread by more than thirty times and the headless instrument's own zero spread outright, so it is a real saving rather than measurement drift.
+
+## A loaded skill is as resident as AGENTS.md
+
+This is the fact that decides which blocks are worth moving, and it is easy to get backwards.
+
+Measured 2026-08-05, headless, claude 2.1.222.
+A session was asked to invoke the `firstmate-coding-guidelines` skill and then reply.
+Successive `message.usage` sums in the resulting transcript:
+
+| Turn | Birth-weight sum | What just happened |
+| --- | --- | --- |
+| 1 | 49,935 | initial context |
+| 2 | 49,935 | skill tool call issued |
+| 3 | 53,517 | skill body now in context |
+
+The skill body added 3,582 tokens, and every turn after it pays that cost for the rest of the session, exactly as `AGENTS.md` text does.
+
+The consequence for the diet is that moving a block into a skill does not save its tokens.
+It defers them, and only for the sessions that never fire the trigger:
+
+```
+saving per session = block tokens x P(this session never loads the skill)
+```
+
+A trigger that fires in nearly every session therefore saves nearly nothing, and costs an extra tool round trip on top.
+Session start, supervision, escalation, and backlog updates are all in that class, so those blocks are poor extraction candidates on economics alone, independent of whether they are law or verb.
+
+This also bounds the birth-weight instrument.
+Birth weight is read before any skill loads, so it will report the full nominal saving for a conversion that in practice saves nothing.
+Read a birth-weight delta together with the trigger's real fire rate; the delta alone is an upper bound, not the achieved saving.
+Removing a duplicate outright - as the section 2 tree was removed, in favor of an owner that is read on demand rather than loaded wholesale - has no such discount, which is why it is the preferred move wherever an owner already exists.
+
 ## Cross-harness skill-listing coverage
 
 The question this settles: does each supported harness inject the `.agents/skills/` listing, with each skill's trigger-bearing description, into its own context?
