@@ -29,10 +29,23 @@ The sweep owner defaults to the account that owns this home's own `origin`.
 
 A registered project this home *has* cloned is identified by its clone's origin,
 which is the fork's real identity rather than a name qualified with a guessed
-owner. A project registered `local-only` and not cloned here has no forge
-repository to read at all, so it is reported as ignored by name rather than read
-as a 404: a permanent false unknown would withhold the completion stamp on every
-sweep forever.
+owner. For a project registered `local-only` and not cloned here, no forge
+repository can be resolved at all - there is no clone to read an origin from, and
+the posture does not promise a remote - so it is reported as ignored by name
+rather than read as a 404: a permanent false unknown would withhold the
+completion stamp on every sweep forever.
+
+A registry name that does not resolve under the sweep owner - a project owned by
+another organisation, a repository whose name differs from its project name, a
+registry line left behind by a clone that was removed - reads as an honest
+`status=unknown` for exactly the same structural reason, and that unknown
+withholds the completion stamp, so the sweep stays due and re-runs at every
+session start behind its retry floor. That is correct while the entry might be a
+real fork nobody can reach, and pointless once it is known not to be: add the
+name to `config/fork-sweep-ignore` (or `config/maintained-forks` with its real
+`owner/repo`, if it is a fork after all). The ignore list is the documented way
+to retire a registry entry from the sweep, and the entry stays reported as
+ignored either way.
 
 Nothing drops out silently. An ignored fork, an archived fork, and a fork whose
 reading failed each get their own output line, and the closing
@@ -113,31 +126,51 @@ never costs the task its brief.
 Because the id is derived from the fork, a second sweep finds the first sweep's
 task instead of creating another, and a sync already under way is left alone.
 
-### The guard expires
+### The brief proves creation; the backlog answers liveness
 
-`data/<id>/` is never deleted - teardown keeps it as the task's evidence
-custodian - so a guard that meant only "this file exists" would outlive the
-episode that created it. The fork gets synced, the task closes, and months later
-the same fork falls fifty behind while every sweep prints `already queued` over a
-backlog item, a wake and a Bridge row that no longer exist. That is the
-instrument decaying back into the warning it replaced, and it is exactly the
-failure the ordering contract above is built to prevent one episode earlier.
+Those are two different questions, and one file cannot answer both. The brief
+proves the task was **created** - that is the job the atomic move above gives it,
+and it keeps it. Whether that task is still **open** is asked of the task system
+on every reading.
 
-So the guard has a lifetime. The first reading that comes back `behind=0` with no
-sync in flight (no `state/<id>.meta`) ends the episode and retires it: the brief
-is moved aside to `data/<id>/brief.retired-<stamp>.md` - kept, not deleted,
-because it carries the reading that opened the task and the directory is
-evidence - and the reading says so:
+It has to be, because `data/<id>/` is never deleted: teardown keeps it as the
+task's evidence custodian. A guard that meant only "this file exists" would
+outlive the episode that created it - the fork gets synced, the task closes, and
+months later the same fork falls fifty behind while every sweep prints
+`already queued` over a backlog item, a wake and a Bridge row that no longer
+exist. Waiting for a `behind=0` reading to notice is not enough either: upstream
+often moves again within hours (see
+[`verification/fork-freshness.md`](verification/fork-freshness.md)), so the level
+window can close between two weekly sweeps and never be observed at all.
+
+So each reading with a brief in place resolves to one of three verdicts:
+
+| Verdict | Evidence | What the sweep does |
+| --- | --- | --- |
+| live | a worker holds `state/<id>.meta`, or the backlog reports the task queued, in flight or held | short-circuits: `action=task <id> already queued (<evidence>)` |
+| spent | the backlog reports the task done, or has no such task | retires the marker and materialises a fresh sync task |
+| unknown | the task system could not be asked (no `tasks-axi`, an unreadable backlog, a state it does not recognise) | creates nothing, retires nothing, and says which two worlds it could not tell apart |
+
+Retirement is a recorded event, never a silent delete. The brief is moved aside
+to `data/<id>/brief.retired-<stamp>.md` - kept, because it carries the reading
+that opened its episode and because a retirement that turns out to have been
+wrong must stay discoverable - and the reading that decided it carries both the
+file and the reason:
 
 ```
-FORK_FRESHNESS: acme/widget status=in-sync behind=0 ahead=0 upstream=up/widget compare=main...main action=task fm-sync-acme-widget retired
+FORK_FRESHNESS: acme/widget status=behind behind=50 ahead=0 upstream=up/widget compare=main...main action=task fm-sync-acme-widget queued RETIRED=brief.retired-20260805T101500Z.md (the backlog reports it done)
 ```
 
-The fork's next episode then materialises a real task. A retirement that could
-not be performed is reported the same way a missing artifact is - `RETIRE_MANUAL:`
-on stderr and `action=task <id> NOT retired: ...` on the reading - because a
-stale guard left silently in place is the same false `already queued`, one
-episode later.
+A fork that reads `behind=0` while its marker is spent has nothing left to guard,
+so that reading retires the marker there and then rather than leaving it for the
+next episode to discover: `action=task <id> retired RETIRED=<file> (<reason>)`.
+
+Neither failure mode is allowed to be quiet. A liveness question that could not be
+answered prints `GUARD_UNKNOWN:` on stderr and says on the reading itself that
+nothing was created and why; a retirement that could not be performed prints
+`RETIRE_MANUAL:` and `action=task <id> NOT created: a spent brief ... could not be
+moved aside`. Duplicating a live task and sitting silently on a dead one are both
+worse than naming the two worlds that could not be told apart.
 
 The sweep does not launch the worker by default. The sync pushes a merge commit
 straight to a default branch, which is not something this fleet does without a

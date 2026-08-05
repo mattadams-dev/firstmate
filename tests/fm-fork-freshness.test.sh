@@ -11,11 +11,17 @@
 #     test_in_sync_creates_no_task and test_ahead_only_creates_no_task.
 #     "Always warn" is not a way to pass the first pair: a sweep that cries wolf
 #     every run gets ignored, which is the same failure one mirror over.
-#   - The mutant that lets the idempotency guard outlive the episode that created
-#     it breaks exactly test_guard_expires_once_the_fork_is_level_again: the
-#     instrument keeps reading, and stops creating work, which is the same decay
-#     into "merely warning" one indirection down. Its opposite - retiring the
-#     guard on any level reading - breaks test_a_sync_under_way_keeps_its_guard.
+#   - The mutant that answers "is a sync task open for this fork?" from the marker
+#     file instead of the task system breaks exactly
+#     test_closed_task_frees_a_behind_fork_to_queue_again and
+#     test_absent_task_frees_a_behind_fork_to_queue_again: the instrument keeps
+#     reading, and stops creating work, which is the same decay into "merely
+#     warning" one indirection down. Its opposite - treating every marker as
+#     spent - breaks test_repeat_sweep_creates_no_duplicate_task and
+#     test_a_sync_under_way_keeps_its_guard, because a live task would be
+#     duplicated on every sweep. The third world has its own case:
+#     test_unreadable_task_state_neither_duplicates_nor_retires, where the two
+#     cannot be told apart and the sweep is required to say so.
 #   - The mutant that collapses a failed reading into either direction breaks the
 #     unknown suite, whose centre is test_outage_and_in_sync_are_distinguishable:
 #     name the two world-states the reading claims to separate, and if a network
@@ -113,13 +119,35 @@ SH
 # [flags]`, unknown flag means rc=2 - because a fake that exits 0 on any shape
 # lets a call the installed tasks-axi refuses pass the whole suite, and the
 # backlog item then goes missing only in production.
+#
+# It answers `show <id>` too, in the installed CLI's shape: an indented
+# `state: <queued|in_flight|held|done>` line at rc=0, and `code: NOT_FOUND` on
+# STDOUT at rc=1 for a task the backlog does not have (verified against the
+# installed tasks-axi 0.2.x - the error goes to stdout, not stderr). That is the
+# call the sweep uses to tell an open sync task from one that closed, so a fake
+# that answered only `add` would let the guard's whole liveness question pass
+# untested.
 install_fake_tasks_axi() {  # <bin-dir>
   cat > "$1/tasks-axi" <<'SH'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$FM_TEST_TASKS_LOG"
+store=${FM_TEST_TASKS_STORE:-}
+if [ "${1:-}" = show ]; then
+  id=${2:-}
+  state=""
+  [ -z "$store" ] || [ ! -f "$store" ] ||
+    state=$(grep "^$id " "$store" 2>/dev/null | tail -1 | cut -d' ' -f2)
+  if [ -z "$state" ]; then
+    printf 'error: "Task \\"%s\\" not found in this backlog"\ncode: NOT_FOUND\n' "$id"
+    exit 1
+  fi
+  printf 'task:\n  id: %s\n  state: %s\n  body: -\n' "$id" "$state"
+  exit 0
+fi
 if [ "${1:-}" = add ]; then
   shift
   case "${1:-}" in ''|-*) echo 'error: "add takes an id first"' >&2; exit 2 ;; esac
+  added=$1
   shift
   case "${1:-}" in ''|-*) echo 'error: "add takes a title"' >&2; exit 2 ;; esac
   shift
@@ -132,6 +160,12 @@ if [ "${1:-}" = add ]; then
       *) printf 'error: "Unknown flag: %s"\n' "$1" >&2; exit 2 ;;
     esac
   done
+  # Recorded for every add the real CLI would have completed, including the one
+  # whose caller is killed immediately after it: the kill stands in for the
+  # caller dying, not for the backlog write failing.
+  if [ -n "$store" ] && [ "${FM_TEST_TASKS_RC:-0}" = 0 ]; then
+    printf '%s queued\n' "$added" >> "$store"
+  fi
 fi
 if [ -n "${FM_TEST_TASKS_KILL:-}" ]; then
   grandparent=$(ps -o ppid= -p "$PPID" 2>/dev/null | tr -d ' ')
@@ -145,6 +179,19 @@ fi
 exit "${FM_TEST_TASKS_RC:-0}"
 SH
   chmod +x "$1/tasks-axi"
+}
+
+# close_task <case> <id>: the backlog now reports that task done, which is what
+# completing a sync looks like from the sweep's side.
+close_task() {
+  printf '%s done\n' "$2" >> "$1/tasks.store"
+}
+
+# drop_task <case> <id>: the backlog no longer has that task at all - pruned,
+# archived, or written by a home that has since been rebuilt.
+drop_task() {
+  grep -v "^$2 " "$1/tasks.store" > "$1/tasks.store.next" 2>/dev/null || true
+  mv -f "$1/tasks.store.next" "$1/tasks.store"
 }
 
 # --- fixtures ---------------------------------------------------------------
@@ -163,6 +210,7 @@ new_case() {
   install_fake_tasks_axi "$bin"
   : > "$dir/gh.log"
   : > "$dir/tasks.log"
+  : > "$dir/tasks.store"
   printf '%s\n' "$dir"
 }
 
@@ -215,6 +263,7 @@ run_sweep() {  # <case> [args...]
     FM_TEST_GH_LOG="$dir/gh.log" \
     FM_TEST_GH_FIXTURES="$dir/fixtures" \
     FM_TEST_TASKS_LOG="$dir/tasks.log" \
+    FM_TEST_TASKS_STORE="$dir/tasks.store" \
     PATH="$dir/bin:$TOOLBOX" \
     "${FM_TEST_SWEEP_BIN:-$SWEEP}" "$@" 2>"$dir/stderr.log"
 }
@@ -705,6 +754,10 @@ test_repeat_sweep_creates_no_duplicate_task() {
   expect_code 3 "$rc" "the fork is still behind on the second sweep"
   assert_contains "$second" "action=task fm-sync-acme-widget already queued" \
     "a repeat sweep must find the first sweep's task, not create another"
+  # The short-circuit is only allowed over a task that is genuinely open, so the
+  # reading has to name the evidence it short-circuited on.
+  assert_contains "$second" "the backlog reports it queued" \
+    "already queued named no open task; it may not be printed on the marker file alone"
   out=$(find "$dir/home/data" -maxdepth 1 -name 'fm-sync-*' | wc -l)
   [ "$out" = 1 ] || fail "expected exactly 1 sync task after two sweeps, found $out"
   pass "fm-fork-freshness: repeating the sweep never creates a second task for one fork"
@@ -769,24 +822,37 @@ test_guard_expires_once_the_fork_is_level_again() {
   run_sweep "$dir" sweep --owner acme >/dev/null || true
   assert_present "$brief" "the first episode created no sync task at all"
 
-  # The sync happens and the fork goes level. data/<id>/ is never deleted -
-  # teardown keeps it as the task's evidence custodian - so a guard that means
-  # only "this file exists" outlives the episode that created it, and the
-  # instrument decays back into the warning it replaced.
+  # The fork goes level while the sync task is still open in the backlog. The
+  # task is real work somebody still owes, so its instructions stay.
   compare_fixture "$dir" upstream/widget main acme main identical 0 0 >/dev/null
   out=$(run_sweep "$dir" sweep --owner acme) || rc=$?
+  expect_code 0 "$rc" "a fork level with its upstream must read clean"
+  assert_contains "$out" "action=none" \
+    "a level fork whose sync task is still open has nothing to retire"
+  assert_present "$brief" \
+    "an open sync task had its instructions retired out from under it"
 
-  expect_code 0 "$rc" "a fork level with its upstream again must read clean"
+  # The task is completed and closed. data/<id>/ is never deleted - teardown
+  # keeps it as the task's evidence custodian - so a marker that meant only
+  # "this file exists" now outlives the episode it belonged to.
+  close_task "$dir" fm-sync-acme-widget
+  rc=0
+  out=$(run_sweep "$dir" sweep --owner acme) || rc=$?
+
+  expect_code 0 "$rc" "a level fork reads clean whatever happened to its marker"
   assert_contains "$out" "action=task fm-sync-acme-widget retired" \
-    "the reading that ended the episode did not retire its spent idempotency guard"
+    "the reading that found the marker spent did not retire it"
+  assert_contains "$out" "RETIRED=brief.retired-" \
+    "the retirement named no file, so a wrong retirement is undiscoverable afterwards"
+  assert_contains "$out" "the backlog reports it done" \
+    "the retirement recorded no reason for judging the marker spent"
   assert_absent "$brief" \
-    "the spent guard is still in place, so the fork's next episode will report a task nobody created"
+    "the spent marker is still in place, so the fork's next episode will report a task nobody created"
   retired=$(find "$dir/home/data/fm-sync-acme-widget" -name 'brief.retired-*.md' | wc -l)
   [ "$retired" = 1 ] ||
     fail "retirement must keep the brief as evidence, not delete it; found $retired retired brief(s)"
 
-  # Weeks later, upstream moves and the same fork is behind again. This is the
-  # episode a lifetime-less guard swallows forever.
+  # Weeks later, upstream moves and the same fork is behind again.
   compare_fixture "$dir" upstream/widget main acme main behind 0 50 >/dev/null
   rc=0
   out=$(run_sweep "$dir" sweep --owner acme) || rc=$?
@@ -799,7 +865,83 @@ test_guard_expires_once_the_fork_is_level_again() {
   assert_present "$brief" "the second episode left the task without instructions"
   assert_grep "behind 50, ahead 0" "$brief" \
     "the second episode's instructions still quote the first episode's reading"
-  pass "fm-fork-freshness: the idempotency guard expires with its episode, so the next one is real"
+  pass "fm-fork-freshness: a marker no open task backs is retired, and the next episode is real"
+}
+
+test_closed_task_frees_a_behind_fork_to_queue_again() {
+  local dir out rc=0 adds
+  dir=$(new_case)
+  one_fork "$dir" behind 0 21
+  run_sweep "$dir" sweep --owner acme >/dev/null || true
+
+  # The worker syncs, closes the task - and upstream moves again before any
+  # reading catches the fork level. Waiting for behind=0 to expire the marker
+  # never gets its chance here, which is the whole reason liveness is asked of
+  # the task system rather than inferred from a transient reading.
+  close_task "$dir" fm-sync-acme-widget
+  compare_fixture "$dir" upstream/widget main acme main behind 0 14 >/dev/null
+  out=$(run_sweep "$dir" sweep --owner acme) || rc=$?
+
+  expect_code 3 "$rc" "the fork is behind again and must not exit clean"
+  assert_not_contains "$out" "already queued" \
+    "the reading claimed a queued task over a backlog item that closed with the first episode"
+  assert_contains "$out" "action=task fm-sync-acme-widget queued" \
+    "a fork behind with no open sync task must get a real new one"
+  assert_contains "$out" "RETIRED=brief.retired-" \
+    "the marker was retired without naming what was retired"
+  assert_contains "$out" "the backlog reports it done" \
+    "the reading did not record why the marker was judged spent"
+  assert_grep "behind 14, ahead 0" "$dir/home/data/fm-sync-acme-widget/brief.md" \
+    "the fresh task still carries the first episode's reading"
+  adds=$(grep -c '^add fm-sync-acme-widget' "$dir/tasks.log" || true)
+  [ "$adds" = 2 ] || fail "expected a second backlog item for the second episode, found $adds add(s)"
+  pass "fm-fork-freshness: a closed sync task frees its fork to raise a fresh one"
+}
+
+test_absent_task_frees_a_behind_fork_to_queue_again() {
+  local dir out rc=0
+  dir=$(new_case)
+  one_fork "$dir" behind 0 3
+  run_sweep "$dir" sweep --owner acme >/dev/null || true
+  # The backlog no longer has the task at all - pruned, or written by a home
+  # since rebuilt. Nothing open backs the marker either way.
+  drop_task "$dir" fm-sync-acme-widget
+  out=$(run_sweep "$dir" sweep --owner acme) || rc=$?
+
+  expect_code 3 "$rc" "the fork is still behind"
+  assert_contains "$out" "action=task fm-sync-acme-widget queued" \
+    "a marker backed by no task at all still suppressed the work it was tracking"
+  assert_contains "$out" "the backlog has no task fm-sync-acme-widget" \
+    "the reading did not record why the marker was judged spent"
+  pass "fm-fork-freshness: a marker the backlog has no task for is retired, not honoured"
+}
+
+test_unreadable_task_state_neither_duplicates_nor_retires() {
+  local dir out stderr rc=0 adds
+  dir=$(new_case)
+  one_fork "$dir" behind 0 3
+  run_sweep "$dir" sweep --owner acme >/dev/null || true
+
+  # No task system to ask. An open sync task and one that closed months ago now
+  # look identical, so the sweep may neither duplicate live work nor retire a
+  # marker that may still be doing its job - and it may not stay quiet about it.
+  rm -f "$dir/bin/tasks-axi"
+  out=$(run_sweep "$dir" sweep --owner acme) || rc=$?
+  stderr=$(cat "$dir/stderr.log")
+
+  expect_code 3 "$rc" "the fork is behind whatever the backlog could say"
+  assert_contains "$stderr" "GUARD_UNKNOWN:" \
+    "a liveness question that could not be answered passed silently"
+  assert_contains "$out" "not re-queued" \
+    "the reading claimed a state of the sync task that was never read"
+  assert_absent "$dir/home/state/fm-sync-acme-widget.meta" "no worker was ever spawned here"
+  assert_present "$dir/home/data/fm-sync-acme-widget/brief.md" \
+    "a marker whose task state is unknown was retired anyway"
+  [ -z "$(find "$dir/home/data/fm-sync-acme-widget" -name 'brief.retired-*.md')" ] ||
+    fail "an unreadable task state must retire nothing"
+  adds=$(grep -c '^add fm-sync-acme-widget' "$dir/tasks.log" || true)
+  [ "$adds" = 1 ] || fail "expected no second backlog item, found $adds add(s)"
+  pass "fm-fork-freshness: an unreadable task state duplicates nothing, retires nothing, and says so"
 }
 
 test_a_sync_under_way_keeps_its_guard() {
@@ -1191,6 +1333,9 @@ test_repeat_sweep_creates_no_duplicate_task
 test_task_already_under_way_is_left_alone
 test_interrupted_materialisation_leaves_no_guard
 test_guard_expires_once_the_fork_is_level_again
+test_closed_task_frees_a_behind_fork_to_queue_again
+test_absent_task_frees_a_behind_fork_to_queue_again
+test_unreadable_task_state_neither_duplicates_nor_retires
 test_a_sync_under_way_keeps_its_guard
 test_a_task_that_could_not_be_created_keeps_its_reason
 test_sync_brief_never_carries_a_remote_credential

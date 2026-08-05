@@ -58,14 +58,19 @@
 # MANUAL=<step>[+<step>], because "queued" claims all four artifacts.
 # Re-running never creates a second task for the same fork.
 #
-# The guard has a lifetime, because a guard that never expires turns the
-# instrument back into the warning it replaced: the first reading that comes back
-# behind=0 with no state/<id>.meta in flight retires it - the brief is moved
-# aside to data/<id>/brief.retired-<stamp>.md, keeping the evidence and clearing
-# the guard - so the fork's NEXT episode materialises a real task instead of
-# printing "already queued" over a task that closed weeks ago. A retirement that
-# could not be performed says so (RETIRE_MANUAL: on stderr, action= on the
-# reading) rather than leaving a stale guard silently in place. --dispatch
+# The brief proves the task was created; whether that task is still OPEN is asked
+# of the task system (tasks-axi) on every reading, because a guard that never
+# expires turns the instrument back into the warning it replaced - "already
+# queued" printed over a backlog item that closed months ago. An open task (or a
+# worker holding state/<id>.meta) short-circuits with its evidence. A task the
+# backlog reports done, or does not have at all, makes the marker spent: it is
+# moved aside to data/<id>/brief.retired-<stamp>.md - kept, never deleted - and a
+# fresh sync task is materialised, with RETIRED=<file> and the reason recorded on
+# that same reading, because retiring a guard removes what was suppressing the
+# work. A liveness question that could not be answered creates nothing and
+# duplicates nothing: it says so, on the reading and as GUARD_UNKNOWN: on stderr.
+# A retirement that could not be performed says so too (RETIRE_MANUAL:) rather
+# than leaving a spent guard silently in place. --dispatch
 # additionally launches the worker through bin/fm-spawn.sh when this home has a
 # clone of that fork and FM_FORK_SYNC_HARNESS or config/fork-sync-harness names
 # the harness to use; without it the task stays queued, because the sync pushes
@@ -375,6 +380,36 @@ backlog_add() {
   ( cd "$FM_HOME" && tasks-axi add "$id" "$title" --body "$note" ) >/dev/null 2>&1
 }
 
+# task_liveness <id>: what the task system says about that sync task -
+# "open <state>", "closed <state>", "absent", or "unknown <reason>". The backlog
+# is the fleet's record of open work, so it is what "already queued" has to be
+# true of; a file on disk can only prove the task was once created. Read from
+# $FM_HOME, the same working directory backlog_add writes from, so the two are
+# asking the same backend by construction.
+task_liveness() {
+  local id=$1 out state
+  command -v tasks-axi >/dev/null 2>&1 || {
+    printf 'unknown no tasks-axi on PATH to ask\n'
+    return 0
+  }
+  if out=$( cd "$FM_HOME" && tasks-axi show "$id" 2>&1 ); then
+    state=$(printf '%s\n' "$out" |
+      LC_ALL=C sed -n 's/^[[:space:]]*state:[[:space:]]*//p' |
+      head -1 | LC_ALL=C tr -d '"[:space:]')
+    case "$state" in
+      queued|in_flight|held) printf 'open %s\n' "$state" ;;
+      done) printf 'closed %s\n' "$state" ;;
+      '') printf 'unknown %s\n' "$(clean_reason "tasks-axi named no state for $id")" ;;
+      *) printf 'unknown %s\n' "$(clean_reason "tasks-axi named an unrecognised state: $state")" ;;
+    esac
+    return 0
+  fi
+  case "$out" in
+    *NOT_FOUND*) printf 'absent\n' ;;
+    *) printf 'unknown %s\n' "$(clean_reason "tasks-axi could not be read: $out")" ;;
+  esac
+}
+
 bridge_ask() {
   local slug=$1 title=$2 body=$3
   [ -x "$SCRIPT_DIR/fm-bridge.sh" ] || return 1
@@ -400,6 +435,44 @@ brief_tmp_cleanup() {
   BRIEF_TMP=
 }
 
+# guard_verdict <id>: whether the brief standing in data/<id>/ is still backed by
+# open work - "live <evidence>", "spent <evidence>" or "unknown <reason>".
+#
+# The brief proves the task was CREATED, and it keeps that job. It cannot answer
+# whether the task is still OPEN, and those are different questions: the fork is
+# synced, the task closes, data/<id>/ stays (teardown keeps it as the evidence
+# custodian), and a guard keyed on the file alone then suppresses every later
+# episode of the same fork - "already queued" printed over a backlog item, a wake
+# and a Bridge row that closed months ago. So liveness is asked of the task
+# system, and a marker no open task backs is spent.
+guard_verdict() {
+  local id=$1 probe
+  if [ -f "$STATE/$id.meta" ]; then
+    printf 'live a worker holds state/%s.meta\n' "$id"
+    return 0
+  fi
+  probe=$(task_liveness "$id")
+  case "$probe" in
+    'open '*) printf 'live the backlog reports it %s\n' "${probe#open }" ;;
+    'closed '*) printf 'spent the backlog reports it %s\n' "${probe#closed }" ;;
+    absent) printf 'spent the backlog has no task %s\n' "$id" ;;
+    *) printf 'unknown %s\n' "${probe#unknown }" ;;
+  esac
+}
+
+# retire_guard <id>: move the spent brief aside, printing the name it was kept
+# under. Never a delete: retiring a guard removes the thing that was preventing
+# work, so a retirement that turns out to have been wrong must stay discoverable
+# afterwards, and the brief carries the reading that opened its episode.
+retire_guard() {
+  local id=$1 stamp name
+  stamp=$(date -u -d "@$(now_epoch)" '+%Y%m%dT%H%M%SZ' 2>/dev/null ||
+    date -u '+%Y%m%dT%H%M%SZ')
+  name="brief.retired-$stamp.md"
+  mv -f "$DATA/$id/brief.md" "$DATA/$id/$name" 2>/dev/null || return 1
+  printf '%s\n' "$name"
+}
+
 # ensure_sync_task <slug> <upstream> <fork-branch> <upstream-branch> <behind> <ahead> <status>
 # Echoes the action taken. Idempotent by construction: the task id is derived
 # from the fork, so a second sweep finds the first sweep's task.
@@ -412,9 +485,17 @@ brief_tmp_cleanup() {
 # Whichever of the three did not happen is named on stderr and marked on the
 # reading itself: "queued" claims four artifacts, and it may not be printed over
 # one nobody observed.
+#
+# A brief already in place is not by itself a reason to stay quiet. It proves a
+# task was created; guard_verdict asks the task system whether that task is still
+# open. Open short-circuits with its evidence, spent retires the marker and
+# materialises a fresh task - recorded on this same reading, because retirement
+# removes the thing that was suppressing the work - and unknown does neither,
+# because duplicating a live task and silently sitting on a dead one are both
+# worse than saying which of the two could not be told apart.
 ensure_sync_task() {
   local slug=$1 up=$2 fork_branch=$3 up_branch=$4 behind=$5 ahead=$6 status=$7
-  local id brief taken harness clone manual=""
+  local id brief taken harness clone manual="" verdict name retired=""
   id=$(sync_task_id "$slug")
   brief="$DATA/$id/brief.md"
 
@@ -423,8 +504,28 @@ ensure_sync_task() {
     return 0
   fi
   if [ -f "$brief" ]; then
-    printf 'task %s already queued\n' "$id"
-    return 0
+    verdict=$(guard_verdict "$id")
+    case "$verdict" in
+      'live '*)
+        printf 'task %s already queued (%s)\n' "$id" "${verdict#live }"
+        return 0
+        ;;
+      'unknown '*)
+        printf 'GUARD_UNKNOWN: %s is behind and data/%s/brief.md is in place, but whether that sync task is still open could not be read (%s); confirm the task by hand, because this reading created nothing\n' \
+          "$slug" "$id" "${verdict#unknown }" >&2
+        printf 'task %s not re-queued: its brief is in place and whether it is still open could not be read (%s)\n' \
+          "$id" "${verdict#unknown }"
+        return 0
+        ;;
+    esac
+    if ! name=$(retire_guard "$id"); then
+      printf 'RETIRE_MANUAL: %s is behind and no open task backs data/%s/brief.md (%s), but it could not be moved aside; move it by hand or every later sweep will report this fork queued\n' \
+        "$slug" "$id" "${verdict#spent }" >&2
+      printf 'task %s NOT created: a spent brief (%s) is in the way and could not be moved aside\n' \
+        "$id" "${verdict#spent }"
+      return 1
+    fi
+    retired=" RETIRED=$name (${verdict#spent })"
   fi
 
   taken=$(date -u -d "@$(now_epoch)" '+%Y-%m-%d %H:%M UTC' 2>/dev/null ||
@@ -433,13 +534,13 @@ ensure_sync_task() {
   trap 'exit 1' HUP INT TERM
   if ! mkdir -p "$DATA/$id" 2>/dev/null ||
     ! BRIEF_TMP=$(mktemp "$DATA/$id/.brief.XXXXXX" 2>/dev/null); then
-    printf 'task %s NOT created: instructions could not be written\n' "$id"
+    printf 'task %s NOT created: instructions could not be written%s\n' "$id" "$retired"
     return 1
   fi
   if ! write_sync_brief "$BRIEF_TMP" "$slug" "$up" "$fork_branch" "$up_branch" \
     "$behind" "$ahead" "$status" "$taken"; then
     brief_tmp_cleanup
-    printf 'task %s NOT created: instructions could not be written\n' "$id"
+    printf 'task %s NOT created: instructions could not be written%s\n' "$id" "$retired"
     return 1
   fi
 
@@ -464,62 +565,59 @@ ensure_sync_task() {
   # the brief somewhere nobody looks while the reading says queued.
   if ! mv -f "$BRIEF_TMP" "$brief" 2>/dev/null || [ ! -f "$brief" ]; then
     brief_tmp_cleanup
-    printf 'task %s NOT created: instructions could not be placed%s\n' "$id" "$manual"
+    printf 'task %s NOT created: instructions could not be placed%s%s\n' "$id" "$manual" "$retired"
     return 1
   fi
   BRIEF_TMP=
 
   harness=$(dispatch_harness)
   if [ "$DISPATCH" != 1 ]; then
-    printf 'task %s queued%s\n' "$id" "$manual"
+    printf 'task %s queued%s%s\n' "$id" "$manual" "$retired"
     return 0
   fi
   if ! clone=$(clone_dir_for "$slug"); then
-    printf 'task %s queued (no local copy of %s in this home)%s\n' "$id" "${slug##*/}" "$manual"
+    printf 'task %s queued (no local copy of %s in this home)%s%s\n' "$id" "${slug##*/}" "$manual" "$retired"
     return 0
   fi
   if [ -z "$harness" ]; then
-    printf 'task %s queued (no fork-sync-harness configured)%s\n' "$id" "$manual"
+    printf 'task %s queued (no fork-sync-harness configured)%s%s\n' "$id" "$manual" "$retired"
     return 0
   fi
   if "$SCRIPT_DIR/fm-spawn.sh" "$id" "$clone" --harness "$harness" >/dev/null 2>&1; then
-    printf 'task %s dispatched%s\n' "$id" "$manual"
+    printf 'task %s dispatched%s%s\n' "$id" "$manual" "$retired"
   else
-    printf 'task %s queued (worker could not be launched)%s\n' "$id" "$manual"
+    printf 'task %s queued (worker could not be launched)%s%s\n' "$id" "$manual" "$retired"
   fi
 }
 
 # retire_sync_task <slug>
-# The guard's lifetime, and the reason the instrument does not decay into the
-# warning it replaced. data/<id>/ is never removed - teardown keeps it as the
-# task's evidence custodian - so a guard keyed on the brief's mere existence
-# outlives the episode that created it: the fork is synced, the task closes, and
-# months later the same fork falls 50 behind and every sweep prints "already
-# queued" over a backlog item, a wake and a Bridge row that no longer exist.
+# The level-fork half of the same lifetime. A fork that reads behind=0 while its
+# marker is backed by no open task has nothing left to guard, so the marker goes
+# now rather than waiting for the fork's next episode to discover it. An open
+# task keeps its brief - the worker may still be reading it - and a liveness
+# question that could not be answered changes nothing, because at behind=0 no
+# work is being suppressed and a wrong retirement would be.
 #
-# A reading of behind=0 with no state/<id>.meta in flight IS the end of the
-# episode, so that reading retires the guard: the brief is moved aside, not
-# deleted, because it carries the reading that opened the task and the directory
-# is evidence. Prints the action when there was one, nothing when there was
-# nothing to retire, and returns non-zero having printed why when the guard is
-# still standing - a stale guard left silently in place is the same false
-# "already queued" one episode later.
+# Prints the action when there was one, nothing when there was nothing to do, and
+# returns non-zero having printed why when a spent marker could not be moved.
 retire_sync_task() {
-  local slug=$1 id brief stamp
+  local slug=$1 id brief verdict name
   id=$(sync_task_id "$slug")
   brief="$DATA/$id/brief.md"
   [ -f "$brief" ] || return 0
-  [ ! -f "$STATE/$id.meta" ] || return 0
+  verdict=$(guard_verdict "$id")
+  case "$verdict" in
+    'spent '*) ;;
+    *) return 0 ;;
+  esac
 
-  stamp=$(date -u -d "@$(now_epoch)" '+%Y%m%dT%H%M%SZ' 2>/dev/null ||
-    date -u '+%Y%m%dT%H%M%SZ')
-  if ! mv -f "$brief" "$DATA/$id/brief.retired-$stamp.md" 2>/dev/null; then
-    printf 'RETIRE_MANUAL: %s is level again but sync task %s still holds data/%s/brief.md; move it aside by hand or the next behind reading will report it queued\n' \
-      "$slug" "$id" "$id" >&2
-    printf 'task %s NOT retired: stale instructions could not be moved aside\n' "$id"
+  if ! name=$(retire_guard "$id"); then
+    printf 'RETIRE_MANUAL: %s is level again and no open task backs data/%s/brief.md (%s), but it could not be moved aside; move it by hand or the next behind reading will report this fork queued\n' \
+      "$slug" "$id" "${verdict#spent }" >&2
+    printf 'task %s NOT retired: spent instructions could not be moved aside\n' "$id"
     return 1
   fi
-  printf 'task %s retired\n' "$id"
+  printf 'task %s retired RETIRED=%s (%s)\n' "$id" "$name" "${verdict#spent }"
 }
 
 # --- one fork ---------------------------------------------------------------
@@ -623,11 +721,15 @@ qualify() {
 #
 # A registered project this home has cloned needs nothing from here: the clone
 # scan already contributes its origin, which is the fork's real identity and
-# beats a name qualified with the wrong owner. One registered local-only is not
-# a forge repository at all, so it is emitted as "!<name>" and reported as
-# ignored: reading it as a 404 would spend an unknown on it every sweep, and
-# unknown coverage withholds the completion stamp, so a permanent false unknown
-# would make the sweep re-run forever without ever banking a clean one.
+# beats a name qualified with the wrong owner. A registered local-only project
+# has no forge identity this home can resolve - no clone to read an origin from,
+# and a delivery posture that does not promise a remote - so it is emitted as
+# "!<name>" and reported as ignored: reading it as a 404 would spend an unknown
+# on it every sweep, and unknown coverage withholds the completion stamp, so a
+# permanent false unknown would make the sweep re-run forever without ever
+# banking a clean one. A name that does not resolve under the sweep owner reads
+# unknown for the same structural reason, and config/fork-sweep-ignore is the
+# documented way to retire the entry from the sweep.
 registry_candidates() {
   local owner=$1 reg="$DATA/projects.md" name mode
   [ -f "$reg" ] || return 0
@@ -772,13 +874,15 @@ cmd_sweep() {
     case "$seen" in *$'\n'"$slug"$'\n'*) continue ;; esac
     seen="$seen$slug"$'\n'
     repos=$((repos + 1))
-    # A registered local-only project has no forge identity to read, and saying
-    # so out loud is the point: it is accounted for by name, not dropped.
+    # No forge identity could be resolved for this one, and saying so out loud is
+    # the point: it is accounted for by name, not dropped. The reason states what
+    # was observed - the registry annotation and the absent clone - rather than
+    # asserting the repository does not exist, which the sweep never checked.
     case "$slug" in
       '!'*)
         name=${slug#'!'}
         ignored=$((ignored + 1))
-        printf 'FORK_FRESHNESS: %s status=ignored reason=registered local-only in data/projects.md and not cloned here, so it has no forge repository to read\n' "$name"
+        printf 'FORK_FRESHNESS: %s status=ignored reason=registered local-only in data/projects.md and not cloned here, so no forge repository could be resolved for it\n' "$name"
         continue
         ;;
     esac
