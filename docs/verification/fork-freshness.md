@@ -253,9 +253,99 @@ should not have happened stays discoverable from the reading and the kept file.
 
 The fake `tasks-axi` in the suite gained `show <id>` in the installed CLI's
 shape, checked against the installed one (tasks-axi 0.2.3): an indented
-`state: <queued|in_flight|held|done>` line at rc=0, and `code: NOT_FOUND` on
+`state: <queued|in_flight|done>` line at rc=0, and `code: NOT_FOUND` on
 **stdout** at rc=1. The stream matters - a fake that wrote NOT_FOUND to stderr
 would let a mis-parsed absent task pass here and read as unknown in production.
+
+## What the installed task CLI actually does
+
+Taken 2026-08-05 against tasks-axi 0.2.3 in a throwaway backlog, because the
+redesign below rests on these four facts and every one of them had been assumed
+rather than read. `--file` is elided from the echoed commands for width.
+
+`add` over an id that already exists is a **complete no-op at exit 0** - it does
+not transition the task, and it does not even update the body:
+
+```
+$ tasks-axi add sync-probe "Sync acme/widget from up/widget" --body "second reading" --json
+{
+  "ok": true,
+  "action": "add",
+  "already": true,
+  "task": {
+    "id": "sync-probe",
+    "state": "done",
+    "body": "first reading",
+```
+
+```
+[exit 0]
+```
+
+That is the round-3 finding in one reading: `"already": true`, `"state": "done"`,
+the second body discarded, and rc=0. Exit status cannot distinguish a created
+task from a discarded add, so nothing on this path may be inferred from it.
+
+`reopen` is the primitive that does transition, and its `--json` form returns the
+resulting task, so the post-state is available from the mutation itself:
+
+```
+$ tasks-axi reopen sync-probe --json
+{
+  "ok": true,
+  "action": "reopen",
+  "task": {
+    "id": "sync-probe",
+    "state": "queued",
+```
+
+```
+[exit 0]
+```
+
+`reopen` over an absent id fails loudly rather than creating anything, so
+create-vs-reopen is a real branch and not a convenience:
+
+```
+$ tasks-axi reopen sync-probe-absent --json
+error: "Task \"sync-probe-absent\" not found in this backlog"
+code: NOT_FOUND
+[exit 1]
+```
+
+`hold` is an **orthogonal field, not a state**. A held task still reads
+`state: queued`, and there is no state named `held` anywhere in the CLI:
+
+```
+$ tasks-axi hold sync-probe --reason "captain decision pending" --kind captain
+ok: hold sync-probe -> held (captain)
+task:
+  id: sync-probe
+  state: queued
+  held: yes
+  hold_kind: captain
+[exit 0]
+```
+
+This retires the `held)` arm the sweep used to carry in its state classifier and
+the `queued|in_flight|held|done` fake recorded above: the states are exactly
+`queued`, `in_flight`, and `done`. The old arm was unreachable, so the outcome it
+produced was right only by accident - a held task reaches `queued|in_flight` and
+is correctly read as open, which is what it is.
+
+One consequence bounds the redesign: `reopen` moves **Done or In flight** back to
+Queued, so calling it on a task a worker already holds would yank that work back
+to the queue underneath them.
+
+```
+$ tasks-axi show sync-probe   # state: in_flight
+$ tasks-axi reopen sync-probe --json
+  "action": "reopen",
+    "state": "queued",
+```
+
+Reopen is therefore reachable only from a confirmed closed reading, never from an
+open or unknown one.
 
 ## Trigger wiring
 
