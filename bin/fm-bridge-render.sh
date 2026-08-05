@@ -1190,11 +1190,12 @@ h3.projhead .refs {
    was.
    The answer used to be a reserved right-hand gutter that fixed chrome could
    live in without covering anything. With the ruling composer gone, that whole
-   column existed to hold one number - and the count already rides somewhere
-   that can never cover a row and never scrolls away at all: the tab title.
-   So the gutter went with it, the count sits in the page's own header beside
-   the other tallies, and the rule that made the gutter necessary is kept by
-   leaving nothing viewport-fixed to place. */
+   column existed to hold one number, so the gutter went with it and the count
+   sits in the page's own header beside the other tallies, in normal flow. It
+   is the FIRST thing on the page and it links to the asks index, so an ask is
+   one click from anywhere - and unlike anything viewport-fixed, it cannot come
+   to cover a row. The rule that made the gutter necessary is kept by leaving
+   nothing viewport-fixed to place at all. */
 
 ol.asks { list-style:none; margin:0; padding:0; counter-reset:ask; }
 ol.asks li { border-bottom:1px solid rgba(59,66,97,.4); }
@@ -1460,10 +1461,21 @@ def render_html(doc):
     add('<html lang="en"><head><meta charset="utf-8">')
     add('<meta name="viewport" content="width=device-width,initial-scale=1">')
     asks = doc.get("asks", [])
-    # The tab title is the one part of this board that stays visible when the
-    # captain has scrolled away, switched apps, or left it open for a day.
-    add("<title>%s</title>"
-        % ("Bridge - %d need you" % len(asks) if asks else "Bridge - clear"))
+    # THE TITLE NAMES THE BOARD AND COUNTS NOTHING. It used to carry the open-ask
+    # count, on the reasoning that a tab stays visible when the captain has
+    # scrolled away or switched apps. Measured, that reasoning holds only until
+    # the count changes: Lavish copies the artifact's <title> into the HOSTING
+    # page's title at page load and does not re-propagate it when the tick
+    # rewrites the board and the frame live-reloads, so the tab went on
+    # reporting "1 need you" while the page underneath it showed two
+    # (docs/verification/bridge-hosted-input.md). A count change is the only
+    # event that moves the number and is exactly the event that leaves the tab
+    # stale, so the tab was wrong precisely when it mattered.
+    # The count therefore lives in rendered content instead - the header tally
+    # below, drawn from the fold on every render, which a redraw cannot leave
+    # standing because the redraw is what produces it. A tab title Lavish
+    # propagates once may not promise a freshness it cannot keep.
+    add("<title>Bridge</title>")
     add("<style>%s</style></head><body>" % CSS)
 
     add('<header class="top"><div class="wrap">')
@@ -1476,9 +1488,12 @@ def render_html(doc):
     # is always a chip they can find in a tally.
     total = counts["board_items"]
     add('<div class="tallies">')
-    # The count, in normal flow, where it cannot come to cover a row. It jumps
-    # to the index rather than only reporting a number, which is the one thing
-    # the retired gutter counter did that a tally does not - and it carries the
+    # THE OPEN-ASK COUNT LIVES HERE, and nowhere else. In normal flow, where it
+    # cannot come to cover a row, and in rendered content, which is the only
+    # surface on a hosted board that a redraw is guaranteed to refresh - the tab
+    # title is not, and that is why it stopped carrying this number. It jumps to
+    # the index rather than only reporting a number, which is the one thing the
+    # retired gutter counter did that a tally does not - and it carries the
     # longest wait, because "3 waiting" and "3 waiting, oldest 2 days" are
     # different facts and only the second one is alarming.
     if asks:
@@ -1610,8 +1625,8 @@ def render_html(doc):
     add("</section>")
 
     # Routed elsewhere, and shown so the captain can see it is routed rather
-    # than wonder. Deliberately BELOW their own asks, out of the tab title, and
-    # out of the sticky counter: the point of the routing class is that these
+    # than wonder. Deliberately BELOW their own asks and out of the open-ask
+    # count in the header: the point of the routing class is that these
     # never spend captain attention. The co-captain does not read this board at
     # all - they read the same items out of the ledger through --state - so this
     # section exists to reassure, not to deliver.

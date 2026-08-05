@@ -145,20 +145,49 @@ Rewriting the file with byte-identical content, through the same `mkstemp` + `os
 **Consequence the writer depends on:** re-rendering an unchanged board is not free, and "write the same bytes" is not a safe substitute for "do not write".
 The tick has to skip the write itself, which is why an unchanged ledger now leaves the board file untouched instead of restamping a freshness line into it.
 
-## The tab title carries the count when the board is hosted
+## 4. The artifact title reaches the hosting page at page load, and not again
 
 The board's open-ask count used to also ride a viewport-fixed counter in a reserved gutter, so an ask could not be scrolled past.
-Removing the composer left that gutter holding one number, and the question became whether the tab title alone does the never-lose-sight job.
+Removing the composer left that gutter holding one number, and the question became where that number belongs.
 
 Measured in the same sessions: Lavish propagates the artifact's `<title>` into the hosting page's title, so the browser tab of a hosted board reads
 
 ```
-Bridge - 1 need you · Lavish
+Bridge · Lavish
 ```
 
-and the count stays visible while the board is scrolled, while it is behind another window, and after it has been open for a day - from a place that cannot come to cover a row, which is the failure the gutter was built to avoid in the first place.
+That propagation happens **at page load**.
+It does not happen again when the supervision tick rewrites the board and the artifact frame live-reloads underneath it.
 
-That is what let the counter move into the page header in normal flow, and the board now has nothing out of flow at all.
+The first measurement checked the title at load, after the board was scrolled, and after the window was put behind another one, and recorded that the count "stays visible" there.
+That was **incomplete rather than wrong**: it never drove a COUNT CHANGE, which is the one event that moves the number, and is precisely the event that redraws the artifact without re-propagating the title.
+A second session, against `lavish-axi` 0.1.43 in Chrome 145, drove exactly that:
+
+```
+step 1  board on disk: <title>Bridge - 1 need you</title>
+step 2  browser tab at open: "Bridge - 1 need you · Lavish"
+
+step 3  a second ask arrives; the supervision tick redraws the board
+        board on disk now: <title>Bridge - 2 need you</title>
+step 4  the page body did live-reload:
+        link "2waiting on you longest 1m" ... #waiting
+        StaticText "second ask"
+step 5  browser tab title 20s and 90s after the redraw:
+        "Bridge - 1 need you · Lavish"
+
+        ^ the board says 2 need the captain; the tab still says 1.
+          A manual reload of the hosting page re-syncs it.
+```
+
+So a count carried in the tab title was stale exactly when it changed, and correct only while it did not matter - and it bit hardest in the case the tab was kept for, the page not being in front.
+
+**What the board does about it:** the open-ask count is rendered content, in the page's own header, drawn from the fold on every render.
+Rendered content survives a redraw by construction - the redraw is what produces it - which is why moving the count is the fix rather than re-propagating the title.
+The title now names the board and states no count, because the affordance rule reaches browser chrome too: a surface may only claim what it can keep, and a title Lavish copies once may not carry a number that changes.
+`tests/fm-bridge.test.sh` pins both halves against a count change: the rendered count moves with the ledger, and the title is byte-identical across it.
+
+The count is therefore at the top of the page rather than following the viewport, and it links to the asks index so an ask stays one click away.
+Nothing on the board is out of flow at all, which is the property the two layout audits made non-negotiable.
 
 ## Upstream
 

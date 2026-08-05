@@ -264,19 +264,16 @@ grep -q '"state":"needs-captain"' "$(ledger_of "$HOME4")" \
   || fail "disposition: the writer left state implicit in the raw record"
 pass "the writer records disposition explicitly in the raw stream"
 
-# The ask is countable, findable, and cannot be scrolled past.
+# The ask is countable and findable: counted where the board is read, and one
+# click from the index that lists it.
 asks=$(state_query "$HOME4" 'len(d["asks"])')
 [ "$asks" = 3 ] || fail "asks: expected 3 open asks, got $asks"
 boardhtml=$(cat "$TMP_ROOT/mode-board.html")
-case "$boardhtml" in
-  *"<title>Bridge - 3 need you</title>"*) : ;;
-  *) fail "asks: the tab title does not carry the open-ask count" ;;
-esac
-# THE TAB TITLE IS THE COUNTER THAT NEVER SCROLLS AWAY. It is visible when the
-# board is scrolled, when it is behind another window, and when it has been open
-# for a day - and unlike anything drawn on the page, it cannot come to cover a
-# row. So the on-page count sits in normal flow with the other tallies, and does
-# not need to travel.
+# THE COUNT IS RENDERED CONTENT, in normal flow with the other tallies. That is
+# the only surface on a hosted board a redraw is guaranteed to refresh: the tab
+# title is propagated into the hosting page once, at load (section 29), and
+# unlike anything that travels with the viewport a tally cannot come to cover a
+# row.
 case "$boardhtml" in
   *'<b>3</b>waiting on you'*) : ;;
   *) fail "asks: the board's own header does not carry the open-ask count" ;;
@@ -287,7 +284,7 @@ case "$boardhtml" in
   *'class="tally ask" href="#waiting"'*) : ;;
   *) fail "asks: the count does not jump to the asks index" ;;
 esac
-pass "the open-ask count rides in the tab title and in the header, in normal flow"
+pass "the open-ask count is rendered in the board's own header, in normal flow"
 
 # Resolving must clear the ask, and must carry a pointer to the outcome.
 FM_HOME=$HOME4 "$BRIDGE" resolve -q --id o-one \
@@ -846,16 +843,12 @@ pass "routing sets the owner to the reader the item was addressed to"
 # The captain-facing surface must not count it ANYWHERE.
 routed=$(FM_HOME=$HOME15 "$RENDER" --html)
 case "$routed" in
-  *"<title>Bridge - 1 need you</title>"*) : ;;
-  *) fail "routing: the tab title counts co-captain items as captain asks" ;;
-esac
-case "$routed" in
   *'<b>1</b>waiting on you'*) : ;;
   *) fail "routing: the header count counts co-captain items as captain asks" ;;
 esac
 tally=$(state_query "$HOME15" 'd["summary"]["needs-captain"]')
 [ "$tally" = 1 ] || fail "routing: the captain tally counts $tally instead of 1"
-pass "co-captain items are absent from the tab title, the sticky counter, and the captain tally"
+pass "co-captain items are absent from the header count and the captain tally"
 
 # But they are neither hidden from the captain nor lost: visible as routed, and
 # a first-class list for the reader who actually owns them.
@@ -1304,11 +1297,11 @@ pass "a readable clean record still lints clean"
 #
 # That was answered for a while by a reserved gutter no content was laid out
 # inside, which fixed chrome could occupy without covering anything. Once the
-# ruling composer was removed, the only thing left in that gutter was a number -
-# and the count already rides the one place that can never cover a row and never
-# scrolls away: the tab title. So the gutter went, the count moved into the
-# page's own header, and what is pinned now is the stronger and simpler
-# property: there is nothing out of flow to place.
+# ruling composer was removed, the only thing left in that gutter was a number,
+# and a number that links to the asks index does not need chrome of its own. So
+# the gutter went, the count moved into the page's own header, and what is
+# pinned now is the stronger and simpler property: there is nothing out of flow
+# to place.
 #
 # A shell suite cannot measure geometry, so this does NOT claim the page has no
 # overlap; a browser audit is what says that. It pins the structural property
@@ -1390,17 +1383,15 @@ sys.exit(0)
 RAIL
 pass "nothing on the board is out of flow, and no gutter is reserved for chrome that is gone"
 
-# The job the retired gutter counter did is still done, by the two things that
-# can do it without covering anything: the tab title, and a count in the header.
-case "$(cat "$TMP_ROOT/links.html")" in
-  *'<title>Bridge - '*'need you</title>'*) : ;;
-  *) fail "layout: the tab title does not carry the count, so nothing does when the page is scrolled away" ;;
-esac
+# The job the retired gutter counter did is still done by a count in the header
+# that reaches the asks index in one click - the one thing a bare number would
+# have lost, and the reason a count that does not follow the viewport is still
+# enough.
 case "$(cat "$TMP_ROOT/links.html")" in
   *'class="tally ask" href="#waiting"'*) : ;;
   *) fail "layout: the header count no longer reaches the asks index" ;;
 esac
-pass "the count rides the tab title and reaches the index from the header, with no travelling chrome"
+pass "the count reaches the index from the header, with no travelling chrome"
 
 # --- 22. two axes: who owes it, and how it ended ---------------------------
 #
@@ -1566,10 +1557,6 @@ pass "an item nobody owes is not an ask even while the work is still live"
 
 FM_HOME=$HOME23 "$RENDER" --html > "$TMP_ROOT/discard-ask.html"
 askboard=$(cat "$TMP_ROOT/discard-ask.html")
-case "$askboard" in
-  *"<title>Bridge - 1 need you</title>"*) : ;;
-  *) fail "asks: the tab title still counts work that ended as needing the captain" ;;
-esac
 case "$askboard" in
   *'<b>1</b>waiting on you'*) : ;;
   *) fail "asks: the header count still counts work that ended" ;;
@@ -1918,5 +1905,113 @@ if "d-fine" in lint:
 sys.exit(0)
 POINTER
 pass "the board and the linter read one pointer rule and name the axis that triggered it"
+
+# --- 29. the count lives in rendered content, and the tab title says only what
+#         it can keep ---------------------------------------------------------
+#
+# INHERITED MEASUREMENT, recorded in docs/verification/bridge-hosted-input.md
+# and deliberately not re-derived here: Lavish copies the artifact's <title>
+# into the HOSTING page's title at page load, and does not re-propagate it when
+# the tick rewrites the board and the artifact frame live-reloads.
+#
+# The earlier measurement checked the title at load, after scrolling and after
+# backgrounding - never across a COUNT CHANGE, which is the one event that moves
+# the count AND the one event that redraws the board without re-propagating the
+# title. So a count carried in the tab title is stale exactly when it changes,
+# which is the only time anybody needs it.
+#
+# The fix is where the count lives, not a fresher title. Rendered content
+# survives a redraw by construction, because the redraw is what produces it. So
+# the count change is the fixture, and it pins both directions: the rendered
+# count must MOVE with the ledger, and the tab title must not carry a number a
+# redraw would leave standing.
+
+HOME29=$(new_home)
+FM_HOME=$HOME29 "$BRIDGE" ask -q --id count-first --project orca \
+  --title "the first ask" --answer "A: yes" >/dev/null
+FM_HOME=$HOME29 "$RENDER" --html > "$TMP_ROOT/count-before.html"
+FM_HOME=$HOME29 "$BRIDGE" ask -q --id count-second --project orca \
+  --title "the second ask" --answer "A: yes" >/dev/null
+FM_HOME=$HOME29 "$RENDER" --html > "$TMP_ROOT/count-after.html"
+
+python3 - "$TMP_ROOT/count-before.html" "$TMP_ROOT/count-after.html" <<'COUNT' || fail "count: see the reported surface"
+import re, sys
+
+before = open(sys.argv[1]).read()
+after = open(sys.argv[2]).read()
+
+def rendered_count(html, which):
+    body = html.find("<body")
+    if body < 0:
+        sys.exit("the %s board has no body at all" % which)
+    seen = [(match.start(), match.group(1))
+            for match in re.finditer(r"<b>(\d+)</b>waiting on you", html)]
+    if not seen:
+        sys.exit("the %s board renders no open-ask count at all, so the count "
+                 "has nowhere left to live that survives a redraw" % which)
+    if len({value for _, value in seen}) != 1:
+        sys.exit("the %s board renders disagreeing open-ask counts: %r"
+                 % (which, [value for _, value in seen]))
+    if seen[0][0] < body:
+        sys.exit("the %s board's open-ask count is not in rendered content" % which)
+    return seen[0][1]
+
+# The ledger gained an ask, so the rendered count has to have gained one too.
+# A count read off the tab title instead of the fold cannot do this: the title
+# is identical across the change.
+one, two = rendered_count(before, "one-ask"), rendered_count(after, "two-ask")
+if (one, two) != ("1", "2"):
+    sys.exit("the rendered count read %s then %s across a change from one open "
+             "ask to two - it does not track the ledger" % (one, two))
+
+def tab_title(html, which):
+    match = re.search(r"<title>(.*?)</title>", html, re.S)
+    if match is None:
+        sys.exit("the %s board carries no <title> at all" % which)
+    return match.group(1)
+
+first, second = tab_title(before, "one-ask"), tab_title(after, "two-ask")
+if first != second:
+    sys.exit("the tab title changed from %r to %r across a count change, but "
+             "Lavish propagates it at page load only - a hosted board would go "
+             "on showing the old one" % (first, second))
+if re.search(r"\d", first):
+    sys.exit("the tab title carries a number (%r) that a redraw cannot refresh "
+             "in the hosting page" % first)
+sys.exit(0)
+COUNT
+pass "a count change moves the rendered count, and leaves the tab title untouched"
+
+# The documentation may not promise what the tab cannot keep either - the
+# affordance rule reaches browser chrome. A line that names the tab title as
+# where the count lives is the retired claim coming back.
+python3 - "$ROOT/docs/verification/bridge-hosted-input.md" "$ROOT/docs/bridge.md" <<'TABDOC' || fail "docs: see the reported claim"
+import re, sys
+
+SURFACE = re.compile(r"tab title|browser tab|hosting page's title|page's title|page title")
+CLAIM = re.compile(r"carr(y|ies|ied) the (open-ask )?count|count rides|rides in the|"
+                   r"count stays|keeps the count|already carries")
+# A sentence that DENIES the claim is the correction, not the defect. The docs
+# here are one sentence per line, so a line is the unit.
+DENIAL = re.compile(r"\bnot\b|\bnever\b|\bno longer\b|\bstops\b|\bused to\b|\bwould\b")
+
+for path in sys.argv[1:]:
+    for number, line in enumerate(open(path), 1):
+        if SURFACE.search(line) and CLAIM.search(line) and not DENIAL.search(line):
+            sys.exit("%s:%d claims the tab title is where the open-ask count "
+                     "lives, which Lavish propagates only at page load:\n  %s"
+                     % (path, number, line.strip()))
+
+record = open(sys.argv[1]).read()
+if not re.search(r"at page load", record):
+    sys.exit("%s no longer records that the artifact title is propagated at "
+             "page load, which is the whole limit the count was moved for"
+             % sys.argv[1])
+if not re.search(r"re-propagat", record):
+    sys.exit("%s no longer records that the hosting page's title is not "
+             "re-propagated when the board is redrawn" % sys.argv[1])
+sys.exit(0)
+TABDOC
+pass "the documentation states the title is propagated at load, and promises no freshness past it"
 
 echo "all bridge ledger and fold tests passed"

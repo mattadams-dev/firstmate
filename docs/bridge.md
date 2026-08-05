@@ -296,12 +296,15 @@ Zones, in the order the captain reads them:
 5. **Notable events** - capped, with a visible overflow pointer to the record.
 6. **Fleet** - one row per task.
 
-Because an ask that scrolls out of view is the failure this surface exists to prevent, the open-ask count rides in the browser tab title, and again in the page header beside the other tallies.
+Because an ask that scrolls out of view is the failure this surface exists to prevent, the open-ask count is rendered at the top of the page beside the other tallies and links to the asks index.
+It lives in rendered content deliberately: the board is regenerated whenever the ledger changes, and rendered content is the only surface a redraw is guaranteed to refresh.
+The hosted board's browser tab is not one - Lavish copies the artifact's `<title>` into the hosting page when the page loads and never again, so a count kept there would still read the old number after the redraw that changed it (`docs/verification/bridge-hosted-input.md`, section 4).
+The title names the board and states no count at all.
 
 **Nothing on the board is out of flow.**
 Chrome that travels with a vertically scrolling page and spans the content column ends up over every row that passes it, and parks an anchor target underneath itself - two browser layout audits proved exactly that, on rows in two different zones.
 That was answered for a while by a reserved right-hand gutter no content was ever laid out inside, which viewport-fixed chrome could occupy without covering anything.
-Once the ruling composer was removed, the only thing left in that gutter was a number - and the tab title already carries the count, from a place that cannot cover a row and does not scroll at all, including when the board is behind another window.
+Once the ruling composer was removed, the only thing left in that gutter was a number, and a number that links to the index it counts does not need chrome of its own.
 So the gutter went too.
 The header count is an ordinary tally that jumps to the asks index, which is the one thing a bare number would have lost, and the rule the gutter existed to satisfy is now kept by having nothing viewport-fixed left to place.
 `tests/fm-bridge.test.sh` parses the emitted stylesheet and fails on any `fixed`, `absolute`, or `sticky` rule, and on a reserved gutter with nothing to put in it.
