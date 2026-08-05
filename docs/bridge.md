@@ -378,11 +378,16 @@ A board rendering fine and a board whose render has been failing for an hour loo
 Silence there would be a stale surface wearing a freshness promise, so the tick records its own failures where the reason is still in hand.
 
 - Each failed tick appends to `$FM_HOME/state/.bridge-tick.log` (bounded) and increments the consecutive-failure count in `$FM_HOME/state/.bridge-tick-failures`, which also holds the reason it last failed for.
-- The **third consecutive** failure raises `bridge-alarm: ...` on the tick's stderr, naming what failed.
-  `bin/fm-watch.sh` relays that one line verbatim as an actionable `check:` wake, and `bin/fm-session-start.sh` prints the reason instead of telling the reader to go reproduce it.
+- **Every** failure names what failed, on the tick's stderr, at every count - so `bin/fm-session-start.sh`, which runs this same tick, prints the reason instead of telling the reader to go reproduce it.
+  What waits for the threshold is only the `bridge-alarm: ` prefix, because the prefix is what wakes somebody.
+- The **third consecutive** failure raises that prefix, and `bin/fm-watch.sh` relays the line verbatim as an actionable `check:` wake.
 - One failure is transient - the next tick retries by itself - and alarming on it is how a reader learns to ignore the alarm that matters.
 - A render that **lands** resets the count, and the reset is logged before the counter is dropped, so the episode stays reconstructable afterwards.
   Evidence of health clears it; the passage of time never does.
+- A **skip is neutral**: it neither resets the count nor increments it, because a tick with nothing to render observed nothing about whether the renderer works.
+- "Unchanged ledger" means unchanged **since the last successful render**, never since the last tick: the change stamp is written only where the board actually landed, so neither a failed attempt nor a skip advances it.
+  Compared tick-to-tick instead, two failed renders followed by a quiet ledger would skip forever - the count frozen below the threshold, the board stale, the alarm never earned.
+  A skip is only a skip when there is genuinely nothing owed to the surface.
 - There is no rate limit on the alarm itself: `FM_BRIDGE_INTERVAL` already caps how often the tick can run, and a second limiter would be a second owner of one noise budget.
 
 ## Checking it

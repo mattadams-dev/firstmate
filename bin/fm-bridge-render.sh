@@ -2014,6 +2014,11 @@ write_board() {  # <folded-at>
 # that actually landed clears the count, and the reset is logged before the
 # counter is dropped so the episode stays reconstructable afterwards.
 #
+# A SKIP IS NEUTRAL. Only a landed render resets the count and only a failed
+# render increments it; a tick that had nothing to render observed nothing about
+# the renderer's health and may neither clear an alarm a real failure earned nor
+# manufacture one.
+#
 # No rate limit lives here on purpose. The supervision cycle runs this tick at
 # most once per FM_BRIDGE_INTERVAL, so that gate already caps how often the
 # alarm can fire; a second limiter would be a second owner of one noise budget,
@@ -2048,9 +2053,14 @@ consecutive_tick_failures() {
   case "$n" in ''|*[!0-9]*) printf '0' ;; *) printf '%s' "$n" ;; esac
 }
 
-# Prints the alarm on stderr, prefixed so a caller can recognize it without
-# parsing prose. The count is in the record because "how long has this been
-# broken" is the second question every reader asks.
+# EVERY failure says what failed, on stderr, at every count. Only the
+# `bridge-alarm: ` PREFIX is gated behind the threshold, because the prefix is
+# what wakes somebody and the reason is what a reader in front of the terminal
+# needs either way - bin/fm-session-start.sh runs this tick and prints whatever
+# it says, so withholding the reason below the threshold would leave the first
+# two failures reported as "could not be brought up to date" and nothing else.
+# The count travels with it because "how long has this been broken" is the
+# second question every reader asks.
 note_tick_failure() {  # <reason>
   local reason n
   reason=$(one_line "$1")
@@ -2062,6 +2072,9 @@ note_tick_failure() {  # <reason>
   if [ "$n" -ge "$ALARM_AFTER_FAILURES" ]; then
     printf 'bridge-alarm: the captain board has failed to render %s times in a row: %s\n' \
       "$n" "$reason" >&2
+  else
+    printf 'bridge: the board did not render (failure %s of the %s that raise the alarm): %s\n' \
+      "$n" "$ALARM_AFTER_FAILURES" "$reason" >&2
   fi
   return 0
 }
@@ -2107,8 +2120,13 @@ do_tick() {
   board=$(fm_bridge_board_path)
   # The signature IS this call's stdout, so its stderr goes to a file rather
   # than into the value - a diagnostic folded into the signature would read as
-  # a ledger change and rewrite the board for nothing.
-  errf="${TMPDIR:-/tmp}/fm-bridge-tick.$$.err"
+  # a ledger change and rewrite the board for nothing. mktemp, like every other
+  # temporary this script stages: a predictable name in a shared /tmp is a path
+  # somebody else can own first, and this one is opened for truncation.
+  if ! errf=$(mktemp "${TMPDIR:-/tmp}/fm-bridge-tick.XXXXXX.err" 2>/dev/null); then
+    note_tick_failure "cannot stage a temporary file to capture the fold's diagnostics"
+    return 1
+  fi
   sig=$(ledger_signature 2>"$errf") || status=$?
   if [ "${status:-0}" -ne 0 ]; then
     err=$(cat "$errf" 2>/dev/null || true)
@@ -2119,14 +2137,26 @@ do_tick() {
   rm -f "$errf"
   prev=$(cat "$STAMP" 2>/dev/null || true)
 
+  # THE BASELINE IS THE LAST SUCCESSFUL RENDER, NEVER THE LAST TICK. $STAMP is
+  # written only where the board actually landed, so neither a failed attempt
+  # nor a skip advances it. A skip is only a skip when there is genuinely
+  # nothing owed to the surface.
+  #
+  # Compare tick-to-tick instead and the failure is silent: two renders fail,
+  # the ledger then goes quiet, and every later tick sees "unchanged since last
+  # time" and skips forever - the count frozen at two, the board stale, the
+  # alarm never earned. Against the last SUCCESSFUL render the unrendered delta
+  # stays owed, so every tick keeps ATTEMPTING until it lands or the count
+  # crosses the threshold.
+  #
+  # And the skip itself is NEUTRAL: it neither resets the count nor increments
+  # it, because a tick with nothing to render observed nothing about whether the
+  # renderer works.
   if [ "$sig" = "$prev" ] && [ -f "$board" ]; then
-    [ "$verbose" -eq 1 ] && printf 'bridge: ledger unchanged; left %s alone\n' "$board"
+    [ "$verbose" -eq 1 ] && printf 'bridge: ledger unchanged since the last render; left %s alone\n' "$board"
     return 0
   fi
 
-  # The stamp is written only after the board actually landed, so a failed
-  # render leaves the signature stale and the NEXT tick retries instead of
-  # concluding nothing changed and skipping forever.
   if ! err=$(write_board "$now" 2>&1); then
     note_tick_failure "$err"
     return 1

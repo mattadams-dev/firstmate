@@ -599,6 +599,21 @@ esac
 [ "$(cut -f1 "$FAILURES" 2>/dev/null)" = 2 ] || fail "tick: the second consecutive failure was not counted"
 pass "one and two failed renders stay quiet, and both are counted"
 
+# Quiet is about the ALARM, not about the reason. Only the prefix that wakes
+# somebody waits for the threshold; what failed is printed at every count,
+# because bin/fm-session-start.sh runs this same tick and prints whatever it
+# says. Withhold the reason below three and the captain's first two failures
+# read as "could not be brought up to date" and nothing else.
+case "$first" in
+  *"$BLOCKED"*) : ;;
+  *) fail "tick: the first failure never said what failed, so session start has nothing to print: $first" ;;
+esac
+case "$second" in
+  *"$BLOCKED"*) : ;;
+  *) fail "tick: the second failure never said what failed: $second" ;;
+esac
+pass "a below-threshold failure still names its reason; only the alarm prefix waits for the threshold"
+
 third=$(failing_tick)
 case "$third" in
   *bridge-alarm:*) : ;;
@@ -631,6 +646,91 @@ case "$fourth" in
 esac
 [ "$(cut -f1 "$FAILURES" 2>/dev/null)" = 1 ] || fail "tick: the count did not restart at one after the recovery"
 pass "after a recovery the count restarts, so the next alarm needs three fresh failures"
+
+# --- 11c. what a skip is, and what it is measured against -------------------
+#
+# A SKIP IS NEUTRAL. Only a landed render resets the consecutive-failure count
+# and only a failed render increments it; a tick with nothing to render did not
+# observe whether the renderer works, so it may neither clear an alarm a real
+# failure earned nor manufacture one.
+#
+# And "unchanged ledger" means UNCHANGED SINCE THE LAST SUCCESSFUL RENDER, never
+# unchanged since the last tick. Compare tick-to-tick and the failure is silent:
+# two renders fail, the ledger then goes quiet, and every later tick sees "same
+# as last time" and skips forever - the count frozen below the threshold, the
+# board stale, the alarm never earned. A skip is only a skip when there is
+# genuinely nothing owed to the surface.
+
+HOME11C=$(new_home)
+FM_HOME=$HOME11C "$BRIDGE" ask -q --id owed-one --project orca \
+  --title "something to render" --answer "A" >/dev/null
+BOARD11C=$(FM_HOME=$HOME11C "$RENDER" --path)
+BOARDDIR11C=$(dirname "$BOARD11C")
+FAILURES11C="$HOME11C/state/.bridge-tick-failures"
+
+FM_HOME=$HOME11C "$RENDER" --tick >/dev/null 2>&1 \
+  || fail "owed: the first render failed, so this fixture proves nothing"
+[ -f "$BOARD11C" ] || fail "owed: the first render wrote no board"
+
+# The ledger moves on, and the render starts failing with the board file STILL
+# IN PLACE - so the skip's board-exists clause cannot stand in for the stamp and
+# mask the question this fixture asks. The directory is only unwritable for the
+# duration of each attempt, so a failed assertion still leaves a removable tree.
+FM_HOME=$HOME11C "$BRIDGE" note -q --project orca \
+  --title "a fact the board never got" >/dev/null
+attempt_11c() {  # one tick against an unwritable board directory
+  chmod 500 "$BOARDDIR11C"
+  { FM_HOME=$HOME11C "$RENDER" --tick >/dev/null; } 2>&1
+  chmod 700 "$BOARDDIR11C"
+}
+
+owed=$(attempt_11c)
+[ "$(cut -f1 "$FAILURES11C" 2>/dev/null)" = 1 ] \
+  || fail "owed: the first failing render was not counted: $owed"
+
+# FROM HERE THE LEDGER IS QUIET. A tick-to-tick baseline would call this
+# unchanged and skip; the last-successful-render baseline still owes the surface
+# a render, so the tick must keep attempting.
+owed=$(attempt_11c)
+[ "$(cut -f1 "$FAILURES11C" 2>/dev/null)" = 2 ] \
+  || fail "owed: with the ledger quiet the tick stopped attempting, so the count froze at one: $owed"
+owed=$(attempt_11c)
+case "$owed" in
+  *bridge-alarm:*) : ;;
+  *) fail "owed: a quiet ledger let a broken board skip its way past the alarm: $owed" ;;
+esac
+pass "an unrendered delta stays owed while the ledger is quiet, so a failing board still reaches its alarm"
+
+# Reaching a GENUINE skip with a failure already on the record needs a failure
+# from BEFORE the render - the fold itself refusing - because a failed write
+# leaves the delta owed and the next tick re-renders rather than skipping.
+HOME11D=$(new_home)
+FM_HOME=$HOME11D "$BRIDGE" ask -q --id neutral-one --project orca \
+  --title "something to render" --answer "A" >/dev/null
+FAILURES11D="$HOME11D/state/.bridge-tick-failures"
+FM_HOME=$HOME11D "$RENDER" --tick >/dev/null 2>&1 \
+  || fail "neutral: the first render failed, so this fixture proves nothing"
+
+STUBBIN="$TMP_ROOT/fold-refuses"
+mkdir -p "$STUBBIN"
+cat > "$STUBBIN/python3" <<'STUB'
+#!/usr/bin/env bash
+printf 'python3 refused to run the fold\n' >&2
+exit 1
+STUB
+chmod +x "$STUBBIN/python3"
+PATH="$STUBBIN:$PATH" FM_HOME=$HOME11D "$RENDER" --tick >/dev/null 2>&1
+[ "$(cut -f1 "$FAILURES11D" 2>/dev/null)" = 1 ] \
+  || fail "neutral: a fold that refused to run was not counted as a failed render"
+
+# The fold works again, and the ledger has not moved since the last SUCCESSFUL
+# render - so this tick genuinely has nothing to do. It observed nothing about
+# the renderer, so it must leave the count exactly where it found it.
+FM_HOME=$HOME11D "$RENDER" --tick >/dev/null 2>&1 \
+  || fail "neutral: the tick failed once the fold worked again"
+[ "$(cut -f1 "$FAILURES11D" 2>/dev/null)" = 1 ] \
+  || fail "neutral: a tick with nothing to render moved the failure count to $(cut -f1 "$FAILURES11D" 2>/dev/null)"
+pass "a tick with nothing to render is neutral: it neither clears the count nor adds to it"
 
 # --- 12. caps overflow to the record; they never truncate in silence --------
 
