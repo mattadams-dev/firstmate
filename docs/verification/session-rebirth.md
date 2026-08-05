@@ -25,7 +25,7 @@ Four readings taken from live firstmate sessions on 2026-08-05:
 
 | Reading | Provider tokens | What it is |
 | --- | --- | --- |
-| Birth weight, session `ad4af8d4` | 61,602 | First turn. Ambient instruction weight before any orientation, and the floor no rebirth can go below. |
+| Birth weight, session `ad4af8d4` | 61,602 | A session's first turn: ambient instruction weight before any orientation, and the floor no rebirth can go below. |
 | After full orientation, same session | 104,521 | The same session once it had read the complete session-start digest. |
 | Orientation cost | about 43,000 | The difference: what a successor pays to brief itself from the records. |
 | Session `bca2a833` at death | 368,381 | Final usage line, 84% past the threshold. |
