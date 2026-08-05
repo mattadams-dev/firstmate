@@ -46,6 +46,10 @@
 set -u
 
 FM_AFK_LAUNCH_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Termination owner seam. Production always resolves to the real helper; tests
+# substitute a recorder so the stop path can be driven without signalling a real
+# process. The helper - not this script - owns the verified-identity decision.
+FM_AFK_SAFE_KILL="${FM_AFK_SAFE_KILL:-$FM_AFK_LAUNCH_DIR/fm-safe-kill.sh}"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$FM_AFK_LAUNCH_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 case "$FM_HOME" in
@@ -590,14 +594,21 @@ fm_afk_launch_stop() {
     pid_identity=$(fm_pid_identity "$pid" 2>/dev/null) || return 1
   fi
   if [ -n "$pid" ]; then
-    if ! kill -TERM "$pid" 2>/dev/null; then
-      fm_afk_launch_log "failed to signal away-mode daemon pid=$pid"
-      result=1
-    fi
-    for _ in $(seq 1 40); do
-      fm_pid_alive "$pid" || break
-      sleep 0.25
-    done
+    # Authority for this stop comes from the daemon lock, re-derived inside the
+    # helper against the pid it names. Exit 5 means "signalled, not gone yet",
+    # which the identity re-check below already handles; anything else means the
+    # stop was never authorized and must be reported.
+    fm_afk_launch_stop_rc=0
+    "$FM_AFK_SAFE_KILL" --pid "$pid" --role supervise-daemon --signal TERM --wait 10 \
+      --reason "away mode is ending; flush buffered escalations before exit" >/dev/null 2>&1 \
+      || fm_afk_launch_stop_rc=$?
+    case "$fm_afk_launch_stop_rc" in
+      0|5|6) ;;   # stopped, still retiring, or already gone - none is an unauthorized stop
+      *)
+        fm_afk_launch_log "failed to signal away-mode daemon pid=$pid"
+        result=1
+        ;;
+    esac
   fi
   if [ -n "$pid" ] && fm_pid_alive "$pid"; then
     current_identity=$(fm_pid_identity "$pid" 2>/dev/null) || {

@@ -1,0 +1,201 @@
+= Carry-forward: findings that must survive the cancelled round, 2026-08-04 =
+
+Provenance
+  run              : 01KZ7CJ27Y858HZJV1T7YER061 (no-mistakes), CANCELLED at the review gate
+  branch head      : 88d832c0, unchanged by the run
+  gate state       : review awaiting_approval - NO fix round ran, so no pipeline
+                     commit ever existed and nothing was lost to the abort
+  why cancelled    : captain's order. The fork main this branch was cut from is
+                     diverged from upstream (behind 20, ahead 5), and six of the
+                     files being restructured here were rewritten upstream:
+                       bin/fm-watch.sh          bin/fm-watch-arm.sh
+                       bin/fm-wake-lib.sh       bin/fm-claude-stop-autoarm.sh
+                       docs/watcher-continuity.md
+                       tests/fm-watcher-lock.test.sh
+                     Fixing against the current base would polish work about to be
+                     rebased onto genuinely different code.
+
+The captain has NOT ruled on the two ask-user findings. The order supersedes the
+ROUND, not the findings. They are recorded here because aborting the run is what
+would otherwise erase them, and a successor will not trust a defect it only hears
+about second-hand.
+
+Verbatim where marked. The two ask-user descriptions were truncated by the tool
+at capture time at the character counts shown; the untruncated review summary
+prose that covers the same ground follows each one, and no gap between them is
+papered over.
+
+-------------------------------------------------------------------------------
+(a) busy-alarm-reset - error - bin/fm-watch.sh - ask-user - UNRESOLVED
+-------------------------------------------------------------------------------
+Verbatim (truncated by the tool at 1448 chars total):
+
+  The health reset is applied to the busy-no-completed-turn alarm, which the
+  intent forbids. Intent PART 4: "Scoped deliberately to the stale alarms only:
+  the busy-no-completed-turn alarm asks a different question, and a pane
+  producing output while completing no turn is exactly what it exists to catch."
+  wedge_timer_check calls health_evidence_reset unconditionally before consulting
+  the timer, and the busy call sites (bin/fm-watch.sh:1113 and :1125) pass no
+  rendered hash. An absent rendered hash only sets that single component to '?';
+  fm_health_sample still reads cpu and children, and fm_health_c… [truncated]
+
+Review summary prose, untruncated:
+
+  `health_evidence_reset` is called unconditionally at the top of
+  `wedge_timer_check` (`bin/fm-watch.sh:329`), including from the two
+  busy-no-completed-turn call sites (`:1113`, `:1125`). Passing an empty rendered
+  hash only makes that *one* component `?` - `cpu` and `children` are still
+  sampled and compared, and a busy pane's process-tree CPU advances between polls
+  by definition. So the busy alarm resets on essentially every poll and can never
+  escalate. The intent explicitly requires the opposite. The comment above the
+  call states the scoping; the code does not implement it, and no test covers it.
+
+Why this one matters most, in the captain's framing: this is the mirror-image
+failure arriving from the unwatched direction. Not a guard that refuses
+everything - an alarm that can never sound.
+
+The test that should have caught it is ALSO defective and must be fixed with the
+code. tests/fm-health-evidence.test.sh's ratchet case passes `window_backend()`
+returning `none`, so fm_health_sample cannot read cpu or children and the
+comparison goes unknown for a reason unrelated to the scoping it claims to prove.
+It is vacuous on exactly the property at issue. A fixed version must drive a
+backend whose process signals ARE readable and assert that the busy path still
+escalates while the stale path still resets.
+
+-------------------------------------------------------------------------------
+(b) reclaim-failure-reported-as-live-peer - warning - bin/fm-wake-lib.sh
+    ask-user - UNRESOLVED
+-------------------------------------------------------------------------------
+Verbatim (truncated by the tool at 1259 chars total):
+
+  A failed reclaim is returned as verdict 1, whose documented meaning is 'a
+  verified-live holder has it', so the caller announces a peer it never verified.
+  In fm_supervisor_singleton_acquire the verdict-1 branch calls
+  fm_singleton_reclaim_reused; that helper returns 1 whenever it cannot take the
+  sibling .steal token, or when its re-check returns 0 or 2 rather than 1. All of
+  those paths fall through to `return 1`. bin/fm-watch.sh:766 then prints
+  'watcher: already running pid <reused-pid>' and exits 0, and
+  bin/fm-supervise-daemon.sh:1334 prints 'another fm-supervise-daemon is already
+  running' and … [truncated]
+
+This is false certainty inside a three-outcome design whose entire point is that
+`undecidable` is first-class - the same family as the standing rule the whole
+task exists to enforce: emit no state stronger than what was actually observed.
+
+-------------------------------------------------------------------------------
+The three auto-fix findings also survive
+-------------------------------------------------------------------------------
+1. safe-kill-already-gone - bin/fm-safe-kill.sh
+   fm-safe-kill.sh:181 refuses with code 4 when the target is already gone, and
+   both bin/fm-watch-arm.sh:502 and the standalone migration treat that as "stop
+   was never authorized" - so a one-shot watcher exiting during the check window
+   turns --restart into a hard `watcher: FAILED`.
+
+2. afk-start-clears-live-buffer - bin/fm-afk-start.sh
+   fm-afk-start.sh:144 now clears a live daemon's escalation buffer and then
+   execs a daemon that immediately stands down. Removing the lock-unlink left the
+   artifact clearing unguarded.
+
+3. health-tree-portability - bin/fm-health-evidence-lib.sh
+   fm_health_tree_pids uses GNU-only `ps --ppid`; every other ppid walk in bin/
+   uses the portable `-o ppid= -p` form. On macOS - a supported platform - the
+   BFS never finds a child and fm_health_tree_size returns a literal 1.
+   This one deserves the same care as an ask-user finding: it is a FABRICATED
+   OBSERVATION on the exact evidence channel the captain specified must be real,
+   where the file's own contract says an unreadable component must be recorded as
+   '?' so a comparison can tell "did not move" apart from "could not be seen".
+   It also adds a per-pid fork to the watcher's hot poll loop.
+
+-------------------------------------------------------------------------------
+What the next round does, in order
+-------------------------------------------------------------------------------
+1. WAIT for firstmate to confirm the synced base exists. The co-captain syncs
+   fork main from upstream by the proven procedure - a true merge commit pushed
+   directly, never through a PR. Starting before that defeats the purpose.
+2. SUBSUMPTION REVIEW FIRST, before writing any more code. For each of the six
+   files above, classify upstream's changes against this branch's:
+     subsumed      - upstream already does it; drop ours, carry no duplicate
+     conflicting   - same problem solved differently; say which is better and
+                     why, in terms of the property protected, never authorship
+     complementary - independent, both needed; say how they compose
+   Write the classification down as the round's deliverable. It is what stops a
+   blind rebase from silently discarding an upstream fix or reintroducing a bug
+   upstream already closed.
+3. THEN build the Part 4 ratchet-reset against the seam's new shape, plus the
+   findings above, with the guard-class mutation requirements unchanged -
+   including both mirror-image mutants, time-alone-resets and nothing-resets.
+
+Do not rebase blind and reconcile conflicts as they arise; the classification
+comes first. Do not treat upstream as authoritative merely because it is
+upstream, nor this branch because it is newer. Do not drop the lab reproduction
+fixture beside this file - it is the evidence the cause was proven rather than
+inferred, and it survives any rebase.
+
+===============================================================================
+CAPTAIN'S AMENDMENT TO PART 4, received after the rebase: ONE reset owner
+===============================================================================
+"Either compose your wedge-escalation reset into upstream's existing turn-end
+recovery progression, or prove they are genuinely different seams and document
+the boundary; two resetters coexisting is not an acceptable outcome, and the
+both-directions mutation proof applies to the composed result rather than to
+your half."
+
+The classification called these COMPLEMENTARY. That answer is not sufficient as
+it was written: it asserted the separation rather than proving it, and it left
+two reset mechanisms live on one seam with nothing enforcing that they stay out
+of each other's state.
+
+THE ANSWER, argued from the property rather than convenience: they are genuinely
+different seams, and composing them into one function would make things worse.
+
+  upstream  fm_failure_episode_reset
+            subject  : the HOME's supervision chain - is anything supervising?
+            state    : .turnend-claude-blocks, .claude-autoarm-failure-notified,
+                       .claude-autoarm-failure-alarmed
+            evidence : fm_watcher_healthy - a verified live identity-matched
+                       watcher with a fresh beacon
+            consumers: the Claude Stop hook and the turn-end guard
+
+  this lane health_evidence_reset
+            subject  : ONE crewmate's pane - is that worker wedged?
+            state    : .wedge-escalations-<key>, .stale-since-<key>
+            evidence : that pane's own rendered output, process-tree CPU, live
+                       descendants
+            consumers: the watcher's stale triage
+
+Neither signal can answer the other's question. A healthy watcher says nothing
+about whether crewmate X is stuck, and crewmate X computing says nothing about
+whether the home is supervised at all. A single function spanning both would be
+a dispatcher with two disjoint branches - two mechanisms wearing one name, which
+HIDES the boundary instead of making it checkable. That is the failure mode the
+one-owner rule exists to prevent, arrived at from the other side.
+
+WHAT ONE-OWNER THEREFORE MEANS HERE, and what the rebuild must deliver:
+  1. One owner of the RULE, not two rules. The seam gets a single documented
+     reset principle - alarm state is cleared only by positive evidence about
+     the alarm's own subject, never by elapsed time - with two named
+     applications and one explicitly stated boundary between them.
+     Upstream already obeys that rule: fm_failure_episode_reset fires on
+     fm_watcher_healthy and never on a timer. So this is a rule the seam already
+     has, stated once and applied twice, not a rule this lane is inventing.
+  2. The boundary is PROVEN, not documented only. A test drives each reset with
+     the other's state present and asserts it is untouched:
+       - firing the failure-episode reset with a wedge ratchet present leaves
+         .wedge-escalations-<key> and .stale-since-<key> exactly as they were
+       - firing the health reset with a failure episode present leaves
+         .turnend-claude-blocks and both .claude-autoarm-failure-* records
+         exactly as they were
+     That converts "genuinely different seams" from a claim into a fixture.
+  3. The mutation proof covers the COMPOSED result, four mutants, not two:
+       - time alone resets                  (pardons a real slow wedge)
+       - nothing resets                     (restores the ratchet)
+       - the health reset also clears the failure episode   (crosses up)
+       - the failure-episode reset also clears the ratchet  (crosses down)
+     Each must break exactly its own test. The last two are the ones that only
+     exist because the amendment was made; without them the boundary is
+     unenforced no matter how carefully it is written down.
+
+NOT YET BUILT. The rebased tree still carries Part 4 in its pre-amendment form,
+including the busy-alarm-reset defect above. The amendment governs the rebuild;
+it is recorded here so it survives this round rather than living in a
+conversation.

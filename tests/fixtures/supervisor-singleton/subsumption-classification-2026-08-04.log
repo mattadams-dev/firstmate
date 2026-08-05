@@ -1,0 +1,328 @@
+= Subsumption classification: this branch against upstream, 2026-08-04 =
+
+Written BEFORE the rebase and before any further code, as ordered. It is what
+stops a blind rebase from silently discarding an upstream fix or reintroducing a
+bug upstream already closed.
+
+Bases
+  merge-base   8b8cc7d  "fix(watch): keep supervision alive across delivered wakes and parked lanes (#3)"
+  synced main  806e05b  verified by hash against the captain's stated value
+  divergence   this branch +13, origin/main +25 from the merge-base
+
+Overlap set. The captain's order named six seam files. The set of files changed
+by BOTH sides is twelve; the extra six are listed and classified too, because a
+rebase does not care which list a file was on.
+
+  SEAM (named)                        ALSO OVERLAPPING (not named)
+  bin/fm-watch.sh                     bin/fm-session-lock-lib.sh
+  bin/fm-watch-arm.sh                 bin/fm-test-run.sh
+  bin/fm-wake-lib.sh                  AGENTS.md
+  docs/watcher-continuity.md          docs/configuration.md
+  tests/fm-watcher-lock.test.sh       docs/scripts.md
+  bin/fm-claude-stop-autoarm.sh       docs/verification/supervision.md
+    (named, but NOT in the overlap    .agents/skills/harness-adapters/SKILL.md
+     set - this branch never touched
+     it; classified anyway)
+
+===============================================================================
+FIRST: two of the round's leads do not survive verification
+===============================================================================
+Both were given as leads, not conclusions, with instructions to verify. Neither
+holds, and the same evidence check kills both.
+
+LEAD: "Upstream reordered continuity to Option B - fm-watch-arm.sh now owns a
+harness-independent floor that arms and verifies one detached successor BEFORE
+delivering the wake."
+
+  NOT UPSTREAM'S. That text and that behavior are already present at the
+  merge-base, in docs/watcher-continuity.md and in bin/fm-watch-arm.sh. They
+  arrived with the fork's own #3, the commit this branch was cut from.
+      git show 8b8cc7d:docs/watcher-continuity.md | grep -c "harness-independent floor"   -> 1
+      git diff 8b8cc7d origin/main -- docs/watcher-continuity.md | grep -c "^+.*harness-independent floor" -> 0
+  The upstream diff adds neither the phrase nor the mechanism.
+
+LEAD: "Your Part 1 prime suspect may be subsumed - docs/watcher-continuity.md NOW
+states explicitly that a forked session leaves state/.lock naming the still-live
+pre-fork harness, so the hook stays inert by design."
+
+  ALSO NOT UPSTREAM'S, and the word "now" is doing false work. That sentence is
+  likewise already at the merge-base and is not added by the upstream diff:
+      git show 8b8cc7d:docs/watcher-continuity.md | grep -c "forked session leaves"       -> 1
+      git diff 8b8cc7d origin/main -- docs/watcher-continuity.md | grep -c "^+.*forked session leaves" -> 0
+  Reading the post-sync file and attributing pre-existing fork text to upstream is
+  how both leads formed. Upstream additionally leaves the gate itself untouched:
+  bin/fm-claude-stop-autoarm.sh's fm_session_lock_owned_by_self / stale-owner
+  recovery block is not modified by the upstream diff at all.
+
+  So Part 1's finding is NOT subsumed, and there is nothing to drop. It was also
+  never the finding those leads describe: that forked hooks are inert was already
+  recorded in the incident doc before this lane started. Part 1's contribution was
+  deciding WHICH of three stated hypotheses actually caused the duplication - by
+  probe, with the pre-fix capture preserved - and upstream touches none of that.
+
+This is the reason the order says leads are not conclusions. Recorded here so the
+next reader does not re-derive it, and so the classification below is trusted on
+evidence rather than on who wrote what.
+
+===============================================================================
+PER-FILE CLASSIFICATION
+===============================================================================
+
+-------------------------------------------------------------------------------
+bin/fm-wake-lib.sh - CONFLICTING (one field, two vocabularies) + COMPLEMENTARY
+-------------------------------------------------------------------------------
+Upstream added:
+  - FM_WATCHER_MATCHED_IDENTITY / FM_WATCHER_HEALTHY_IDENTITY, publishing the
+    matched lock identity to callers.
+  - fm_lock_set_role / fm_lock_role, plus "role" in fm_lock_clean_known_files.
+  - fm_failure_episode_reset, the positive recovery reset.
+
+This branch added: the supervisor singleton (fm_supervisor_singleton_acquire,
+fm_singleton_holder_verified, fm_singleton_reclaim_reused, fm_singleton_seed),
+the owner-seed seam, fm_pid_is_zombie, and "role" + "state" in
+fm_lock_clean_known_files.
+
+CONFLICTING - the `role` field. Both sides introduced a file named `role` inside
+the shared lock primitive, with disjoint vocabularies and opposite write
+disciplines:
+    upstream : values autoarm|terminal-check, written by fm_lock_set_role AFTER
+               acquisition, by the holder, only on state/.claude-autoarm.lock,
+               and rejects any value outside its enum
+    this lane: values watcher|supervise-daemon|pr-check-migration, written into
+               the owner directory BEFORE the symlink publishes the lock, on
+               .watch.lock and .supervise-daemon.lock
+They do not collide at runtime today - different locks, and nothing reads
+fm_lock_role on the watch lock - but this is one field name with two owners in
+one shared primitive, which is the shape this fleet already knows produces silent
+failures. fm_lock_clean_known_files is genuinely shared and both sides edited it.
+
+  WHICH IS BETTER, by the property protected: they protect different properties
+  and neither should be dropped. Upstream's answers "which of two co-operating
+  Claude mechanisms holds this owner lock", set after the fact. This lane's
+  answers "what kind of supervisor is this, published atomically with the lock so
+  a peer can never observe a lock it cannot identify" - the before-publish timing
+  is load-bearing for singleton-at-birth and cannot be moved to a setter.
+  RESOLUTION: keep both behaviors, remove the name collision. This lane renames
+  its field to `supervisor-role` and leaves `role` to upstream's enum, since
+  upstream's is the narrower, already-validated vocabulary and its setter would
+  reject this lane's values anyway. Both entries stay in the shared cleanup.
+
+COMPLEMENTARY - FM_WATCHER_*_IDENTITY. Independent of the singleton and useful
+to it; keep upstream's as-is. No change needed on either side.
+
+COMPLEMENTARY, with a shared principle - fm_failure_episode_reset. See the Part 4
+section below; it is the most consequential item in this classification.
+
+-------------------------------------------------------------------------------
+bin/fm-watch.sh - COMPLEMENTARY
+-------------------------------------------------------------------------------
+Upstream added: the process-event surfacing path (procevent_surface_queued and
+its .seen-procevent markers), the Bridge board tick, and FM_WATCH_DELIVERY_PID /
+FM_WATCH_DELIVERY_IDENTITY feeding the delivery ledger.
+
+This branch changed: the startup ordering - singleton acquired first, beacon
+published immediately, PR-check migration moved BEHIND the gate into
+--watcher-owned mode - and the wedge-alarm health reset.
+
+Independent concerns; both needed. Upstream adds work INSIDE the supervision
+loop, this lane fixes what happens BEFORE the loop is entitled to start. They
+compose directly: upstream's new loop work inherits the guarantee that it only
+runs in a process that already holds the singleton.
+
+One real interaction to preserve through the rebase: upstream writes
+FM_WATCH_DELIVERY_IDENTITY at the same place this branch deleted - the
+post-acquisition identity write, which this lane moved into the owner seed. The
+rebase must keep upstream's two assignments while sourcing the identity from the
+seeded lock rather than recomputing it, so the ledger and the lock cannot
+disagree about who the watcher is.
+
+-------------------------------------------------------------------------------
+bin/fm-watch-arm.sh - COMPLEMENTARY, plus one ASSIGNED reconciliation
+-------------------------------------------------------------------------------
+Upstream added: the identity-matched terminal-delivery ledger
+(state/.watch-deliveries.log, written by watch_delivery_publish in
+bin/fm-push-transition-lib.sh before the watcher releases its lock) and
+close_unobserved_cycle, so an arm that never saw the reason line can still
+recover it; plus identity threading through cycle_begin and attach_and_wait.
+
+This branch changed: the --restart stop routed through bin/fm-safe-kill.sh, the
+re-verify in clear_stale_recorded_watcher_lock, and home= / state= in the cycle
+ledger.
+
+Independent; both needed. Upstream repairs how a delivered wake is RECOVERED,
+this lane repairs how a watcher is STOPPED and how a cycle is ATTRIBUTED.
+
+ASSIGNED: docs/watcher-continuity.md names this lane as owner of unifying the two
+delivery-record mechanisms - the fork's pid-keyed
+state/.watch-successor-output.<pid> handoff and upstream's identity-matched
+ledger. Recording the honest scope: this branch is not a party to that conflict.
+The successor-output handoff is merge-base fork code this branch never touched,
+and the ledger is upstream's. The assignment is real and accepted, but it is a
+THIRD piece of work alongside the two ask-user defects, not something the rebase
+resolves. Both mechanisms stay live and correct until it is done; upstream's own
+doc declares the coexistence deliberately so it reads as known state.
+
+Preliminary reading, to be verified when that work starts rather than assumed:
+the ledger is the stronger primitive - identity-matched rather than pid-keyed,
+bounded, and it survives a drained wake queue - so the likely end state is the
+handoff retiring into it. That is a preliminary reading and nothing in this round
+depends on it.
+
+-------------------------------------------------------------------------------
+bin/fm-claude-stop-autoarm.sh - UPSTREAM ONLY (no overlap)
+-------------------------------------------------------------------------------
+Named in the order, but this branch never modified it, so there is nothing of
+this lane's to subsume, conflict with, or compose. Upstream added bounded failure
+retries, the benign live-watcher cycle-end, and one-notice failure episodes
+(.claude-autoarm-failure-notified / .claude-autoarm-failure-alarmed).
+
+Checked for hidden coupling rather than assumed absent: nothing in this branch
+reads those markers or the auto-arm epoch, and upstream leaves the session-lock
+gate untouched. Take upstream's version whole.
+
+-------------------------------------------------------------------------------
+bin/fm-session-lock-lib.sh - CONFLICTING (this lane's change is SUBSUMED)
+-------------------------------------------------------------------------------
+Not in the captain's six, but both sides changed it and upstream rewrote it
+substantially: fm_harness_ancestry_pid became fm_harness_ancestry_pids returning
+a set, with a new exact-harness-name helper, and fm_harness_pid_alive rewritten.
+
+This branch's change was one line: replacing a basename fork with ${comm##*/} in
+fm_harness_pid_alive, because that predicate now runs inside bin/fm-safe-kill.sh
+before a stop is delivered, and every subprocess spawned there is time the target
+keeps running after the decision to stop it.
+
+  WHICH IS BETTER, by the property protected: upstream's, and this lane's change
+  is SUBSUMED - but only in the sense that it lands in rewritten code and must be
+  re-derived rather than re-applied. Upstream's rewrite protects correctness of
+  harness identification across install paths, which is the more important
+  property and is not something this lane examined. The fork-cost concern is real
+  but strictly secondary, and it applies to whatever the new code does.
+  RESOLUTION: drop this lane's line, take upstream's rewrite, then re-measure
+  whether the new fm_harness_pid_alive still forks on the pre-stop path and, if it
+  does, raise it against upstream's shape rather than re-applying a patch written
+  for code that no longer exists.
+
+-------------------------------------------------------------------------------
+tests/fm-watcher-lock.test.sh - COMPLEMENTARY
+-------------------------------------------------------------------------------
+Upstream changed test_guard_warnings: new neutral automatic-recovery guidance
+wording, and its "fresh watcher" fixture now installs a real live pid plus
+identity rather than only a beacon.
+
+This branch replaced the beacon-age case with the unidentifiable-holder and
+wedged-incumbent cases, and added the no-eviction, identity-at-birth, safe-kill
+and health-evidence coverage.
+
+Disjoint test functions; both needed. Upstream's fixture change is in the same
+direction as this lane's contract - it stops proving liveness from a beacon alone
+and starts proving it from a verified identity - so they agree on the property.
+
+-------------------------------------------------------------------------------
+bin/fm-test-run.sh, AGENTS.md, docs/configuration.md, docs/scripts.md,
+docs/verification/supervision.md, .agents/skills/harness-adapters/SKILL.md
+  - COMPLEMENTARY (additive, textual conflicts only)
+-------------------------------------------------------------------------------
+Both sides append to shared lists and tables: family registrations, the state-file
+inventory, env-knob and script tables, verification records, and the seatbelt
+description. No semantic disagreement found in any of them; the rebase resolves
+each by keeping both additions.
+
+Two specifics not to lose while resolving them mechanically:
+  - docs/configuration.md: this lane DELETED FM_WATCHER_STALE_GRACE because the
+    beacon-age judgment it configured is gone. If upstream reintroduces a use of
+    that knob the deletion must be reconsidered, not silently re-applied.
+    (Checked: upstream does not use it.)
+  - docs/verification/supervision.md: this lane's mutation matrix and probe
+    record must survive intact; it is the evidence the guard-class requirement
+    was met, and it is not reconstructable from the diff.
+
+===============================================================================
+PART 4 AGAINST THE SEAM'S NEW SHAPE - the reconciliation that matters
+===============================================================================
+The order is right that two reset mechanisms on one seam is the two-owners shape,
+and that this must compose rather than sit beside. Here is what they actually are,
+verified rather than assumed.
+
+Upstream's positive recovery reset - fm_failure_episode_reset - clears
+  .turnend-claude-blocks, .claude-autoarm-failure-notified,
+  .claude-autoarm-failure-alarmed
+which is the CLAUDE STOP AUTO-ARM FAILURE EPISODE: how many times the turn-end
+guard has blocked a stop, and whether the last-resort notice and attended
+fail-open have been spent. Its trigger, at bin/fm-turnend-guard.sh:149 and
+bin/fm-claude-stop-autoarm.sh:208, is fm_watcher_healthy - a verified live,
+identity-matched watcher with a fresh beacon.
+
+This lane's Part 4 reset clears
+  .wedge-escalations-<key>, .stale-since-<key>
+which is the PER-PANE WEDGE ESCALATION RATCHET: how many times one crewmate's
+pane has escalated as possibly wedged. Its trigger is evidence that the lane
+moved - rendered output, process-tree CPU, or live descendants.
+
+CLASSIFICATION: COMPLEMENTARY, and NOT duplicates. Different state, different
+alarms, different subjects (the home's supervision chain vs one crewmate's pane),
+different evidence. Neither can clear the other's alarm and neither should.
+
+THE FINDING THAT MATTERS MORE THAN THE CLASSIFICATION: upstream's reset already
+embodies Part 4's principle. It fires on POSITIVE EVIDENCE of health and never on
+elapsed time. So "evidence of health resets alarm state, never time" is not a new
+idea this lane is introducing to the seam - it is an established property of the
+seam that Part 4 extends to a second alarm. That is a much stronger footing than
+"bolted beside", and it changes how Part 4 should be written: as the same rule
+applied consistently, using the same vocabulary, not as a parallel invention.
+
+One distinction to state precisely, because it is exactly where a careless
+reading would break the constraint. fm_watcher_healthy includes a beacon FRESHNESS
+requirement, which is an age comparison. That does not violate "never time".
+Requiring recent positive evidence ("something proved alive lately") is the
+opposite of a time-based amnesty ("it has been quiet a while, so clear the
+alarm"). The forbidden shape is elapsed silence CAUSING a reset. Upstream requires
+evidence and additionally requires it to be recent; Part 4 requires evidence and
+compares two samples. Both are evidence-first. Part 4's prohibition stands
+unchanged and upstream does not weaken it.
+
+CONSEQUENCE FOR THE BUILD: Part 4 is rebuilt on the post-sync fm-watch.sh, still
+scoped to the stale alarms only, and states its relationship to
+fm_failure_episode_reset explicitly in docs/watcher-continuity.md so the seam has
+one documented reset PRINCIPLE with two named, non-overlapping applications -
+rather than two undocumented mechanisms a later reader would have to discover.
+
+===============================================================================
+STILL OWED FROM THE CANCELLED ROUND - unchanged by the sync
+===============================================================================
+Carried in carry-forward-2026-08-04.log beside this file; neither is affected by
+anything upstream did.
+
+1. busy-alarm-reset (ask-user, unresolved by the captain). health_evidence_reset
+   fires unconditionally including at the busy-no-completed-turn sites that were
+   deliberately scoped out, so that alarm resets every poll and can never
+   escalate. Withholding the rendered hash blanks one component while cpu and
+   children are still sampled, and a busy pane's CPU advances by definition.
+   Its test is vacuous on exactly that property: the fake backend makes the
+   evidence unreadable for an unrelated reason. Code and test both.
+2. reclaim-failure-reported-as-live-peer (ask-user, unresolved). A failed reclaim
+   returns the verdict meaning "a verified-live holder has it", so the watcher
+   announces a peer it never verified - false certainty inside a three-outcome
+   design whose point is that undecidable is first-class.
+Plus three auto-fix findings, including the GNU-only ppid form that fabricates
+children=1 on macOS instead of reporting unknown - a fabricated observation on
+the exact evidence channel the captain specified must be real.
+
+Guard-class mutation requirements are unchanged, both mirror directions included:
+time-alone-resets and nothing-resets each still need their own fixture.
+
+===============================================================================
+REBASE PLAN THIS CLASSIFICATION AUTHORIZES
+===============================================================================
+  drop      this lane's bin/fm-session-lock-lib.sh line; take upstream's rewrite,
+            then re-measure the pre-stop fork cost against the new shape
+  rename    this lane's lock field role -> supervisor-role, leaving `role` to
+            upstream's validated enum; keep both in fm_lock_clean_known_files
+  keep both everywhere else, resolving each textual conflict by union
+  preserve  upstream's FM_WATCH_DELIVERY_* assignments, sourcing the identity
+            from the seeded lock so ledger and lock cannot disagree
+  preserve  this lane's lab reproduction fixture, the mutation matrix, and the
+            deleted FM_WATCHER_STALE_GRACE knob
+  then      rebuild Part 4 on the post-sync seam and fix the two ask-user defects
+            and the three auto-fix findings
+No conflict is to be resolved by whichever side is upstream or newer.

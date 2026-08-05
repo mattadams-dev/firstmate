@@ -388,6 +388,197 @@ A name that resolves to a shell function, builtin, alias, or keyword is refused 
 Narrowing it that way is what keeps a directive that already carries its own arguments from being handed an extra one, which the existing hung-notifier test rejected.
 [`wedge-alarm.md`](../wedge-alarm.md) owns that dispatch contract, and the regression test covers both directive shapes.
 
+## Supervisor singleton at birth
+
+Measured 2026-08-04 on Linux 6.18.33.2-microsoft-standard-WSL2, against the tree that introduced `fm_supervisor_singleton_acquire`.
+
+### Cause, decided by probe rather than by plausibility
+
+Three hypotheses were proposed for why the pre-existing singleton locks did not prevent a reported supervisor duplication.
+The probes that decide them are preserved with their pre-fix capture in `tests/fixtures/supervisor-singleton/`; each takes the repo root as its one argument.
+Each ends on an explicit `RESULT:` line and exits from that verdict rather than from its last cleanup command: zero when the tree it is pointed at is in the state this round left it in, nonzero when the defect reproduces or the measurement is inconclusive.
+
+| Hypothesis | Probe | Verdict |
+| --- | --- | --- |
+| A dying predecessor's release-by-path unlinks a rotated successor's lock | `h2-release-by-path.sh` | KILLED. `fm_lock_release` resolves the symlink to the owner directory it currently points at and releases only when that owner's `pid` names the releasing process, so a rotated lock is left alone. |
+| Work performed before the lock widens the window | `h3-prelock-evicts.sh` | PROVEN, and stronger than proposed. The pre-lock PR-check migration does not merely widen a window; it SIGTERMs the incumbent watcher. A newcomer that had passed no singleton gate terminated the incumbent as its first act. |
+| The lock is keyed by an address rather than a home identity | `h1-lock-path-identity.sh` | PROVEN. Path variation for one physical state directory still resolves to one lock, but two different state directories each take their own lock while both record the SAME `fm-home`. The lock recorded an identity it was never keyed by. |
+
+Two further generators were found in the daemon layer while tracing the same shape, both in `bin/fm-afk-start.sh`:
+a live daemon whose lock failed an identity match had that lock unlinked outright before a replacement was started, unserialized and outside the lock it was overriding;
+and the identity match itself fell back to a command-line substring test when no identity was published.
+
+What remains `unknown`: which of these fired during the original incident.
+`state/.watch-cycle-exits.log` recorded arm and watcher pids and lock identity but never the resolved home or state address of a cycle, so the record cannot distinguish two cycles in one home from one cycle each in two homes.
+That is treated as a defect in the instrument rather than as evidence in either direction, and both fields are now recorded per cycle.
+
+A pattern-based census run during the same incident reported four supervise daemons where zero existed.
+It matched each process's whole command line as a substring and so counted two live crewmates - whose briefs quote the script names on argv - and the inspecting shell itself.
+This is why `bin/fm-safe-kill.sh` accepts only a pid a role lock already names, and compares identity as whole-command-line bytes rather than testing for containment.
+
+### Guard-class mutation results
+
+One mutation per protection, each applied to its own copy of the tree, never to a working checkout.
+Baselines read against: `tests/fm-watcher-lock.test.sh` 39 `ok -` lines, `tests/fm-safe-kill.test.sh` 13, `tests/fm-arm-pretool-check.test.sh` 205, all exiting 0.
+A failing case aborts its suite, so each mutation was run twice: once to see which case it kills, once with that case's invocation removed to prove nothing else depends on the mutated protection.
+Both directions are covered deliberately: a guard that refuses everything is the same failure as one that permits everything, and it is the direction that gets missed.
+
+| Mutation | Direction | Cases killed, in the order the suite reaches them | Tail |
+| --- | --- | --- | --- |
+| A verified-live peer no longer stops a second acquisition | permits too much | `test_singleton_start`, then `test_wedged_incumbent_is_loud_from_the_arm_layer` | see below |
+| Restore the pre-lock PR-check migration | permits too much | `test_a_starting_watcher_never_evicts_the_incumbent` | 37 clean |
+| Publish the command substitution's identity instead of the holder's | permits too much | `test_stale_watch_lock_reclaimed`, then `test_a_starting_watcher_never_evicts_the_incumbent`, then `test_lock_publishes_its_real_holder_identity`, then `test_watch_restart_rejects_reused_pid` | not chased to clean |
+| The migration's exclusion publishes the watcher's path AND the watcher predicate stops checking the published role | permits too much | `test_migration_exclusion_never_reads_as_a_healthy_watcher` | redundantly guarded; see below |
+| Never reclaim a provably-dead or reused holder | refuses too much | `test_stale_watch_lock_reclaimed`, then `test_lock_steals_dead_pid_lock` | see below |
+| Drop the session-lock refusal in the kill helper | permits too much | `test_refuses_the_session_lock_holder`, then `test_every_outcome_is_recorded` | 10 clean |
+| The kill helper can never complete a stop | refuses too much | `test_authorized_supervisor_stop_succeeds`, `test_daemon_role_stop_succeeds`, `test_every_outcome_is_recorded` | 9 clean |
+| The policy stops classifying terminations | permits too much | matrix `K01` (`kill -TERM 17907`) | 158 clean |
+| The policy denies signal-0 probes and job specs too | refuses too much | matrix `L01` (`kill -0 17907`) | 172 clean |
+| The unmodelled-grammar fallback stops exempting the sanctioned helper | refuses too much | matrix `L13`, and `L14`-`L17` with it | 181 clean |
+| The unmodelled-grammar fallback stops exempting signal-0 probes | refuses too much | matrix `L18`, and `L19`-`L22` with it | 192 clean |
+| The signal-0 exemption stops requiring plain targets after the signal | permits too much | matrix `K25` (`kill -0 -TERM $p`) | 196 clean |
+| The modelled watcher-pid guard stops exempting signal-0 probes | refuses too much | matrix `L24` (`pid=$(pgrep -f fm-watch); kill -0 $pid`) | 204 clean |
+| The raw fallback stops exempting signal-0 probes beside `fm-watch` text | refuses too much | matrix `L23`, then `L25` | 203 clean |
+| The watcher-pid guard exempts every kill, not signal 0 alone | permits too much | none alone; redundantly guarded, see below | 205, unchanged |
+| The stand-down line reports every holder as a running watcher | permits too much | `test_migration_exclusion_never_reads_as_a_healthy_watcher` (its stand-down half) | 38 clean |
+| A real watcher peer gets the non-watcher holder wording | refuses too much | `test_singleton_start` | not chased to a clean suite |
+| Elapsed time alone resets the wedge alarm | permits too much | `test_a_frozen_lane_is_never_pardoned` | 2 before the kill |
+| Nothing resets the wedge alarm | refuses too much | `test_a_busy_pane_still_escalates_while_its_cpu_advances` (its liveness half) | 7 before the kill |
+| The pane reset also clears the home's failure episode | boundary crossing | `test_the_two_resets_do_not_touch_each_others_state` | 6 before the kill |
+| The home reset also clears a pane's wedge ratchet | boundary crossing | `test_the_two_resets_do_not_touch_each_others_state` | 6 before the kill |
+| The busy alarm accepts movement as its counterpart | permits too much | `test_a_busy_pane_still_escalates_while_its_cpu_advances` | 7 before the kill |
+
+### The exemption the helper's own name required
+
+The termination policy directs every kill through `bin/fm-safe-kill.sh`, and that name ends in the same bytes the raw fallback scans for.
+Grammar this parser does not model - a `for` loop, an `if`, a `while` - falls back to that scan, so every mention of the one mandated command inside ordinary shell control flow was denied.
+A recovery kill is written in exactly that grammar, which made the escape hatch unreachable at the moment it exists for.
+The refusal named a rule rather than a missing capability, so nothing about it read as a defect.
+
+This was not found by review.
+It fired twice against ordinary work in this repo within minutes of each other, once as `broad-watcher-kill` and once as `unverified-kill`, on commands whose only offence was naming a watcher test file and a safe-kill test file in the same loop.
+That is the mirror-image direction this matrix exists to catch: a guard that refuses a legitimate recovery is the same failure as one that permits an illegitimate kill, and it is the direction that presents as working.
+
+`L13`-`L17` are the fixture, and the mutation that removes the exemption kills `L13` first and all five together, with the remaining 181 clean.
+
+`K21`-`K23` are the laundering direction.
+`K22` (`fm-safe-killall`) is reported here as redundantly guarded rather than as a single-mutation proof, because it is: the pattern scan deliberately does not take this exemption, and the exemption's own trailing boundary refuses the token independently.
+Removing either alone left `K22` denied with the rest of the matrix clean - measured at 186 cases, before `K24`-`K29` and `L18`-`L22` were added - and removing both together kills it.
+Defence in depth is the intended design, so the honest record is that no single mutation kills that case, not a proof shaped to look like the others.
+
+### The same mirror one command over: signal-0 probes
+
+The fallback denied `if kill -0 "$pid"; then`, and its own refusal text said `kill -0` remained available for probing.
+The classifier comment asserted the opposite invariant explicitly, and so did the allowed-forms list in `docs/arm-pretool-check.md`.
+Three statements of the contract, one implementation, and all three disagreed with it.
+
+The cost is not the refusal itself; it is where a refused caller goes next.
+Liveness in shell is written as `kill -0` inside an `if` or a loop, and with that denied the remaining way to ask is `ps | grep`, the census that counted four supervise daemons in this fleet where zero existed.
+A guard whose refusal pushes callers onto the road it was built to close is a safety regression wearing a safety guard's clothes.
+
+Signal 0 is now exempt in every grammar position, and it is exactly one signal wide.
+`L18`-`L22` are the probe direction; `K24`-`K29` are the laundering direction, and each one is a shape that textually contains a probe: a probe standing next to a real kill, a second signal riding behind the `-0` (`kill -0 -TERM $p`), a `-0` glued to a signal by quoting (`kill -0"9" 5`), a kill inside the probe's own substitution, a non-null `-s`, and a `pkill` sharing the loop.
+Only the kill VERB is dropped by the exemption, never its arguments, which is what keeps the substitution case denied.
+
+### The last refusal was drawn on proximity, not on targeting
+
+The first pass at the exemption withheld it from the broad-watcher guard, on the reasoning that the modelled path denies a kill naming a watcher pid at any signal, so a fallback taking the exemption would be more permissive than the grammar it stands in for.
+Measured, that reasoning was inverted for the case that actually bites.
+The raw scan fires on the CO-OCCURRENCE of the bytes `fm-watch` with a kill verb, not on a reference to a watcher pid, so the fallback was STRICTER than the modelled path, not looser: `kill -0 5; echo fm-watch-arm` allowed, and the same two commands inside a loop denied as `broad-watcher-kill`.
+That second shape is fixture `L17` plus a liveness check - naming a watcher test file and a safe-kill test file in one loop is the exact command pair recorded above as having fired twice against ordinary work.
+
+The boundary belongs on what a command DOES - observe versus act - and never on what text it happens to sit near.
+Refusing an observation primitive because `fm-watch` appears elsewhere in the same command re-draws it on proximity, which is the substring-versus-position defect tracked as `fm-guard-command-vs-data-position`.
+So signal 0 is now exempt from the watcher-pid guard on both its paths, and the deny text, the policy comment, and the behaviour say the same thing.
+This concedes nothing: signal 0 cannot terminate a watcher any more than it can terminate anything else.
+
+What the guard exists for is untouched, and `K30`-`K33` hold it: a pid resolved off a watcher `pgrep` into a variable and then sent `-TERM`, the same pid sent a bare `kill` with no signal named, `kill -0 $(pgrep -f fm-watch)` - which is target selection by pattern with a harmless signal attached, still the census shape - and a real `kill -9` beside a watcher test file in unmodelled grammar.
+`pattern-kill` therefore keeps no exemption at all, since `pkill` and `killall` select by matching text whatever signal they carry.
+`L23`-`L26` are the probe direction, including the modelled `pid=$(pgrep -f fm-watch); kill -0 $pid` that both paths used to deny.
+The guard has two paths and each has its own fixture: removing the modelled exemption kills `L24` alone with 204 clean, and removing the raw fallback's kills `L23` and then `L25` with 203 clean.
+
+The permits-too-much direction here is REDUNDANTLY GUARDED, and it is recorded that way rather than dressed up as a proof.
+Exempting every kill from the watcher-pid guard regardless of signal changes nothing the suite can see: `kill -TERM $pid` and `kill $pid` off a watcher `pgrep` are still denied, by the by-pid termination rule instead, and the matrix stays at 205.
+Dropping the probe test's requirement that the target be a word this layer can see is the same story: `kill -0 $(pgrep -f fm-watch)` falls to `pattern-kill` instead, and the matrix stays at 205.
+Only the combined mutation - the watcher guard exempting everything AND the termination classifier disabled - lets those commands through, and it does: both classify as `allow`, with `D30` the first case the suite reaches.
+`K30`-`K33` are therefore held by two independent rules each.
+That is the intended design, so the honest statement is that no single mutation kills them, not a number shaped to look like the rows above.
+
+### The stand-down line said "watcher" about something that was not one
+
+While the standalone migration holds the lock, a starting watcher correctly stands down - and printed `watcher: already running pid N`, which `bin/fm-watch-checkpoint.sh` then reported as a watcher running outside the checkpoint.
+The behaviour was right and the report was not: no watcher was running in that window.
+That is the same false-confidence class this round fixed on the health-predicate side, one layer up, and `FM_SINGLETON_PEER_ROLE` - populated only once the seed and the reader agreed on the field name - is the only thing that can tell the two worlds apart.
+A non-watcher holder now gets a line that names it, a holder publishing no role keeps the peer wording that is honest for the pre-upgrade case, and the checkpoint's own summary claims only what it established: that this checkpoint does not own the cycle.
+
+Both directions are single-mutation proofs here, and the observation is taken inside the real window: a watcher is started while the real migration holds the lock, from the same `stat` shim, and its stand-down line is read from that run.
+Making the stand-down report every holder as a running watcher kills that half with the defect printed verbatim - `role=pr-check-migration` alongside `watcher: already running pid 921121`, the same pid.
+Giving a real watcher peer the non-watcher wording instead kills `test_singleton_start`, which is the mirror: a guard that can never say "a watcher is already running" breaks the arm layer's attach path as surely as one that always says it.
+That mirror mutation was not chased to a clean suite, and that is recorded as measured rather than assumed.
+
+### A non-watcher holder of the watcher lock
+
+`fm_watcher_lock_matches_pid` answers "is this home's watcher alive?" from three published fields: the home, the watcher's executable path, and the holder's pid identity.
+The PR-check migration takes that same lock as an exclusion and published all three - it passed the watcher's path as its own - so for the length of a migration the health check answered yes and named a process that is not a watcher.
+This is the false-report direction of the same instrument the wedge alarm depends on: unknown collapsed into a confident yes.
+
+The fix is on both sides of the seam.
+The migration publishes its own executable path, and the predicate now also refuses a lock whose published `supervisor-role` names something other than a watcher - a lock with no role at all predates the field and is still judged on the remaining evidence, because refusing those would leave every pre-upgrade home unable to recognize its own running watcher.
+
+`test_migration_exclusion_never_reads_as_a_healthy_watcher` takes its verdict WHILE the real migration holds the lock, from inside a `stat` shim the migration itself invokes as its first act after acquiring, and it is the production predicate that answers.
+Asserting after the migration returns would have passed for the wrong reason: the holder is gone by then, so the health check fails on liveness and never reaches the question.
+The liveness beacon is seeded fresh for the same reason - a watcher that was just paused leaves one - so the case cannot pass on a stale-beacon technicality either.
+
+Like `K22`, this case is reported as redundantly guarded rather than as a single-mutation proof, and for the same reason: it is.
+Measured, each half alone leaves the case passing at `ok`, and only the pair kills it.
+Reverting just the published path leaves the role check refusing the lock; removing just the role check leaves the published path failing to match the watcher's.
+Mutating both prints the defect verbatim - `role=pr-check-migration path=.../bin/fm-watch.sh` with `verdict=healthy-watcher` naming the migration's own pid - which is the shape the live incident would have produced.
+Two independent refusals on a false-health report is the intended design, so the honest record is that no single mutation kills this case.
+
+The last five rows are the alarm-reset rule, proven against the COMPOSED result rather than against this lane's half.
+Two of them are boundary crossings that exist only because the one-reset-owner amendment was made: without them the separation between the home-level and pane-level resets is unenforced however carefully it is documented.
+
+Two fixtures in that group were vacuous before they were fixed, and both failed the same way, which is worth recording because the failure is invisible from a green run.
+The original busy-alarm case passed because its fake backend made CPU and children unreadable, so the comparison went unknown for a reason unrelated to the scoping it claimed to prove.
+Its first replacement passed for a second, different version of the same reason: the busy path deliberately never samples, so neither call established a predecessor and the comparison was unknown again.
+The working fixture seeds a predecessor sample directly and drives a live CPU burner through a substituted `fm_health_target_pid`, so every layer below that one seam runs for real against evidence that genuinely advances.
+A mutation matrix is the only thing that surfaced either defect; both suites were green throughout.
+
+A third defect in the same fixture surfaced only from a full-suite sweep: the drivers observed the test shell itself, a live process doing work, so every frozen-pane assertion held only while the harness burned less than one clock tick between two calls.
+It passed standalone and failed under load - a verdict that depended on ambient load rather than on its subject.
+Each test now observes the process it claims to: a `sleep` for a frozen pane, a spin loop for a busy one.
+Verified by six consecutive runs against four competing CPU loaders, zero failures.
+
+Eleven of the twenty-two are the mirror-image or boundary-crossing direction on purpose.
+A supervisor that can never arm and a helper that can never terminate anything are the same failure as their opposites, one mirror over, and they fail silently rather than loudly.
+
+Two mutations are broad by nature and are reported as such rather than forced into a one-to-one claim.
+Published holder identity and dead-holder reclaim are load-bearing under most of the lock suite, so each kills a chain: the identity mutation was followed through four cases and the reclaim mutation through two.
+The identity chain was not chased to a clean suite, and that is recorded here as measured rather than assumed.
+
+The identity mutation is the one this work found in its own first implementation, which is why the seed takes the identity as a parameter instead of computing it.
+`test_lock_publishes_its_real_holder_identity` fails it with the difference visible: `linux-starttime=34502521` published against `34502518` actual, three clock ticks apart on an identical command line.
+A fork landing inside the same tick would have matched, so the defect reproduces roughly never under test and is invisible to every assertion that does not compare the two values directly.
+
+The time-alone-resets and nothing-resets rows are the wedge-alarm ratchet, and they are exact mirrors.
+Letting time alone reset the alarm pardons a lane frozen on every signal, which is what a real slow wedge looks like; letting nothing reset it restores the ratchet that put a healthy lane under permanent deep inspection.
+Both mutants also kill the receding-counter case, because a shrinking process tree and a still one are the two things a time-based pardon stops distinguishing.
+
+The session-lock refusal is shared by two cases because the durable-record case uses that refusal to produce a recorded refusal; both guard it from their own direction.
+The kill-helper success path is shared by three for the same reason.
+
+Deterministic entry points for this contract:
+
+```sh
+tests/fm-watcher-lock.test.sh
+tests/fm-safe-kill.test.sh
+tests/fm-arm-pretool-check.test.sh
+tests/fm-health-evidence.test.sh
+tests/fixtures/supervisor-singleton/h1-lock-path-identity.sh .
+tests/fixtures/supervisor-singleton/h2-release-by-path.sh .
+tests/fixtures/supervisor-singleton/h3-prelock-evicts.sh .
+```
+
 ## Wedge-alarm channels
 
 The two real notification channels were bounded manually on 2026-07-10 on macOS 26.5.2 with Herdr 0.7.3.

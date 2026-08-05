@@ -23,10 +23,150 @@ const REASONS = {
   "watcher-redirection": "a protected watcher command must not use shell redirection",
   "watcher-bundled": "a protected watcher command must be the sole final command after approved setup nodes",
   "watcher-nested": "a protected watcher command must not run through a wrapper, substitution, or compound command",
-  "broad-watcher-kill": "a broad process kill targeting the firstmate watcher is forbidden",
+  "broad-watcher-kill": "a broad process kill targeting the firstmate watcher is forbidden; a signal-0 probe delivers nothing and is not a kill this code denies",
   "unclassifiable-protected-command": "unsupported or malformed shell syntax contains a protected watcher command",
   "watcher-direct": "bin/fm-watch.sh must not be run directly; arm the watcher with bin/fm-watch-arm.sh or run bin/fm-watch-checkpoint.sh instead",
+  "pattern-kill": "a process kill that selects its target by matching text (pkill, killall, or a grep/pgrep pipeline into kill) is forbidden; terminate a verified pid with bin/fm-safe-kill.sh",
+  "unverified-kill": "terminating a process by pid is routed through bin/fm-safe-kill.sh, which takes its authority from the lock that names the target; a signal-0 probe (kill -0) delivers nothing and stays available in every grammar",
 };
+
+// Process termination.
+//
+// pkill and killall select their target by matching text, and in this fleet an
+// agent's task brief travels on argv: the processes most likely to match a
+// supervisor pattern are the crewmates assigned to fix that supervisor, and the
+// shell running the search. A recorded census matched four "supervise daemons"
+// where zero existed - two live crewmates and the observer. Pattern selection is
+// not merely imprecise here, it is biased toward the most costly targets, so it
+// is denied outright rather than bounded.
+//
+// A bare `kill <pid>` is denied for a different reason: the command carries no
+// evidence about what the pid IS. `kill -TERM 17907` was issued against a
+// correctly resolved pid, with identity and ancestry both checked, and was still
+// wrong - 17907 was the captain's own session holding the home's lock. The
+// judgment belongs to bin/fm-safe-kill.sh, which derives authority from a lock
+// rather than from inspection.
+//
+// kill -0 and kill -l are NOT terminations; denying them would break every
+// liveness probe in the fleet and turn this guard into the mirror-image failure
+// of the one it prevents. Job specs (%1) name only the invoking shell's own
+// children and stay available too.
+//
+// Signal 0 is stronger than the other two: it is exempt in EVERY grammar
+// position, including the loops and conditionals below that this parser does not
+// model, because `if kill -0 "$pid"` is how liveness is written in shell. The
+// alternative a refusal leaves is a ps/grep pattern match, and this fleet has
+// already recorded where that ends - a census counted four supervise daemons
+// where zero existed, matching two crewmates' briefs on argv and the inspecting
+// shell itself. A guard that pushes callers onto that road is a safety
+// regression wearing a safety guard's clothes. kill -l and job specs get no such
+// treatment: they are allowed only where the grammar is modelled.
+//
+// That exemption reaches the watcher-pid guard below too, and for the same
+// reason stated as a rule: the boundary here is drawn on WHAT A COMMAND DOES -
+// observe versus act - never on what text it happens to sit near. Refusing an
+// observation primitive because the bytes `fm-watch` appear elsewhere in the
+// command re-draws the boundary on proximity, which is the substring-versus-
+// position defect tracked as fm-guard-command-vs-data-position. Signal 0 cannot
+// terminate a watcher any more than it can terminate anything else, so this
+// concedes nothing. The broad-watcher guard exists so a PATTERN cannot reach a
+// sibling firstmate home's supervisor, and that reason is untouched: -TERM,
+// -KILL, -HUP, -9, a bare `kill <pid>`, and every pattern-kill form remain
+// absolutely denied against a watcher pid.
+const KILL_BY_PATTERN = new Set(["pkill", "killall"]);
+const KILL_BY_PID = new Set(["kill"]);
+
+function isJobSpec(value) {
+  return value.startsWith("%");
+}
+
+const NULL_SIGNALS = new Set(["0", "SIGNULL", "NULL"]);
+
+function isNullSignal(value) {
+  return value === "0" || NULL_SIGNALS.has(value.replace(/^SIG/, "").toUpperCase());
+}
+
+// WHY this returns a kind rather than a boolean: two guards need different
+// slices of it. Everything here terminates nothing, so all of it is exempt from
+// the by-pid termination rule; only the "signal-0" kind is exempt from the
+// watcher-pid guard, because that is the one whose harmlessness holds no matter
+// who the target turns out to be. One walk answers both, so the two guards
+// cannot drift apart.
+//
+//   "list"      -l/-L/--list/--table: names signals, touches no process.
+//   "signal-0"  an explicit null signal. Delivers nothing to any target.
+//   "no-target" nothing to signal.
+//   "job-spec"  names only the invoking shell's own children.
+//   ""          it can deliver a signal. A negative pid (a whole process group)
+//               lands here on purpose.
+function killNonTerminatingKind(args) {
+  let signalIsNull = false;
+  const targets = [];
+  for (let i = 0; i < args.length; i += 1) {
+    const value = args[i].value;
+    if (value === "-l" || value === "-L" || value.startsWith("--list") || value.startsWith("--table")) return "list";
+    if (value === "-0") {
+      signalIsNull = true;
+      continue;
+    }
+    if (value === "-s" || value === "--signal" || value === "-n") {
+      const signal = args[i + 1]?.value ?? "";
+      i += 1;
+      if (!isNullSignal(signal)) return "";
+      signalIsNull = true;
+      continue;
+    }
+    if (value.startsWith("--signal=") || value.startsWith("-s")) {
+      const signal = value.startsWith("--signal=") ? value.slice("--signal=".length) : value.slice(2);
+      if (!isNullSignal(signal)) return "";
+      signalIsNull = true;
+      continue;
+    }
+    if (value === "--") continue;
+    if (value.startsWith("-")) return "";
+    targets.push(value);
+  }
+  if (signalIsNull) return "signal-0";
+  if (targets.length === 0) return "no-target";
+  return targets.every(isJobSpec) ? "job-spec" : "";
+}
+
+function killIsProbeOrListOnly(args) {
+  return killNonTerminatingKind(args) !== "";
+}
+
+// A `kill` that delivers signal 0 and selects its target from words this layer
+// can see. Both halves matter: a target chosen by a substitution is still
+// pattern selection and stays denied as one.
+function killIsSignalZeroProbe(position) {
+  if (!position.command || basename(position.command.value) !== "kill") return false;
+  const args = position.words.slice(position.index + 1);
+  if (args.some((word) => word.subs.length > 0 || word.unquotedExpansion)) return false;
+  return killNonTerminatingKind(args) === "signal-0";
+}
+
+function killClassification(position) {
+  if (!position.command) return "";
+  const name = basename(position.command.value);
+  const args = position.words.slice(position.index + 1);
+  if (KILL_BY_PATTERN.has(name)) return "pattern";
+  // xargs feeds its command targets chosen by whatever produced the upstream
+  // text - the grep-pipeline shape - so the target is unverifiable here.
+  if (name === "xargs") {
+    for (const word of args) {
+      const inner = basename(word.value);
+      if (KILL_BY_PATTERN.has(inner) || KILL_BY_PID.has(inner)) return "pattern";
+    }
+    return "";
+  }
+  if (!KILL_BY_PID.has(name)) return "";
+  // A pid that arrives through a substitution or an unquoted expansion was
+  // selected by something this layer cannot see; treat it as pattern selection
+  // rather than as a verified pid.
+  if (args.some((word) => word.subs.length > 0 || word.unquotedExpansion)) return "pattern";
+  if (killIsProbeOrListOnly(args)) return "";
+  return "unverified";
+}
 
 function parseArguments(argv) {
   const result = { command: "", root: "", home: "" };
@@ -47,9 +187,97 @@ function rawMentionsProtected(command) {
   return /(?:^|[/\s'"`(])fm-watch(?:-(?:arm|checkpoint))?\.sh\b/.test(normalizeLineContinuations(command));
 }
 
+function rawMentionsPatternKill(command) {
+  return /\b(?:pkill|killall)\b/.test(normalizeLineContinuations(command));
+}
+
+// The sanctioned helper's own name ends in the bytes `kill`, so a raw scan for a
+// kill verb matches every mention of the one command this policy tells callers to
+// use. Dropping that exact token before the scan keeps the fallback fail-closed on
+// real kill verbs while leaving the mandated escape hatch reachable.
+//
+// Scope is deliberate: only the scans that look for a bare `kill` call this.
+// rawMentionsPatternKill does not, because `pkill` and `killall` never appear in
+// the helper's name, so it has no false positive to correct and stays the thing
+// that denies `fm-safe-killall`. The trailing boundary is therefore NOT what
+// stops that today - it is redundant with the unstripped pattern scan, and K22
+// falls only when both are removed. It is kept as a cheap guard on the future
+// edit that gives this exemption to the pattern scan too.
+function withoutSanctionedHelper(normalized) {
+  return normalized.replace(/fm-safe-kill(?![\w-])/g, "");
+}
+
+// A `kill` fragment ends where the next command could begin. `(` and a backtick
+// are in this set for a second reason: they are where a substitution starts, and
+// a substitution chooses words this raw scan cannot see.
+const KILL_FRAGMENT_BOUNDARY = /[;&|\n`()]/;
+
+// Is this whitespace-split argument list a signal-0 spec followed only by plain
+// targets? Any second option-shaped token disqualifies it: bash reads
+// `kill -0 -9 5` as signal 0 against process group 9, but that reading is not
+// something a raw text scan should be asked to make, so it stays denied.
+function killWordsAreSignalZeroProbe(words) {
+  if (words.length === 0) return false;
+  const first = words[0];
+  let index;
+  if (first === "-0") index = 1;
+  else if (first === "-s" || first === "--signal" || first === "-n") {
+    if (words.length < 2 || !isNullSignal(words[1])) return false;
+    index = 2;
+  } else if (first.startsWith("--signal=")) {
+    if (!isNullSignal(first.slice("--signal=".length))) return false;
+    index = 1;
+  } else if (first.startsWith("-s") && first.length > 2) {
+    if (!isNullSignal(first.slice(2))) return false;
+    index = 1;
+  } else return false;
+  return words.slice(index).every((word) => !word.startsWith("-"));
+}
+
+// Signal 0 delivers no signal, so a probe is exempt wherever it is written -
+// including the unmodelled grammar this scan exists for. See the KILL_BY_PID
+// note above for why refusing a probe is the more expensive failure.
+//
+// Only the VERB is dropped, never its arguments. A kill hiding inside a probe's
+// own substitution (`kill -0 $(kill -9 6)`) therefore still reaches the scan and
+// still fails closed, which stripping the whole invocation would have laundered.
+function withoutSignalZeroProbes(normalized) {
+  const verbs = /\bkill\b/g;
+  let out = "";
+  let cursor = 0;
+  let match;
+  while ((match = verbs.exec(normalized)) !== null) {
+    const argsStart = match.index + match[0].length;
+    const rest = normalized.slice(argsStart);
+    const boundary = KILL_FRAGMENT_BOUNDARY.exec(rest);
+    const fragment = boundary ? rest.slice(0, boundary.index) : rest;
+    const substituted = boundary && (boundary[0] === "`" || (boundary[0] === "(" && fragment.endsWith("$")));
+    if (substituted) continue;
+    if (!killWordsAreSignalZeroProbe(fragment.split(/\s+/).filter(Boolean))) continue;
+    out += normalized.slice(cursor, match.index);
+    cursor = argsStart;
+  }
+  return out + normalized.slice(cursor);
+}
+
+function rawMentionsAnyKill(command) {
+  return /\b(?:pkill|killall|kill)\b/.test(withoutSignalZeroProbes(withoutSanctionedHelper(normalizeLineContinuations(command))));
+}
+
+// This scan fires on the CO-OCCURRENCE of the bytes `fm-watch` with a kill verb,
+// which is proximity, not targeting: `for f in fm-safe-kill fm-watcher-lock; do
+// bash tests/$f.test.sh; kill -0 5; done` names two test files and probes an
+// unrelated pid. Taking the signal-0 exemption here is what keeps the boundary
+// on what the command DOES. The modelled watcher-pid denial is unaffected, and a
+// probe standing beside a real kill still leaves that kill's verb in the text.
+//
+// rawMentionsPatternKill still does not take the exemption: pkill and killall
+// select by matching text whatever signal they carry, and that is the class this
+// fleet's phantom census came from.
 function rawMentionsBroadKill(command) {
   const normalized = normalizeLineContinuations(command);
-  return /fm-watch/.test(normalized) && /\b(?:pkill|kill)\b/.test(normalized);
+  return /fm-watch/.test(normalized)
+    && /\b(?:pkill|kill)\b/.test(withoutSignalZeroProbes(withoutSanctionedHelper(normalized)));
 }
 
 function normalizeLineContinuations(source) {
@@ -728,16 +956,18 @@ function isWatcherPgrep(position, context) {
 
 function analyzeProgram(command, context, depth = 0) {
   if (depth > 12) {
-    return { error: "recursion limit", protectedFound: rawMentionsProtected(command), broadKill: rawMentionsBroadKill(command), pgrepWatcher: false, watcherPids: new Set() };
+    return { error: "recursion limit", protectedFound: rawMentionsProtected(command), broadKill: rawMentionsBroadKill(command), patternKill: rawMentionsPatternKill(command), unverifiedKill: rawMentionsAnyKill(command), pgrepWatcher: false, watcherPids: new Set() };
   }
   const lexed = new Lexer(command).tokenize();
   if (lexed.error) {
-    return { error: lexed.error, protectedFound: rawMentionsProtected(command), broadKill: rawMentionsBroadKill(command), pgrepWatcher: false, watcherPids: new Set() };
+    return { error: lexed.error, protectedFound: rawMentionsProtected(command), broadKill: rawMentionsBroadKill(command), patternKill: rawMentionsPatternKill(command), unverifiedKill: rawMentionsAnyKill(command), pgrepWatcher: false, watcherPids: new Set() };
   }
   const program = splitProgram(lexed.tokens);
   const nodeInfos = [];
   let nestedProtected = false;
   let broadKill = false;
+  let patternKill = false;
+  let unverifiedKill = false;
   let pgrepWatcher = false;
   let unsupported = false;
   let activeContext = {
@@ -763,6 +993,8 @@ function analyzeProgram(command, context, depth = 0) {
       const nested = analyzeProgram(payload, nodeContext, depth + 1);
       nodeNestedProtected ||= nested.protectedFound;
       broadKill ||= nested.broadKill;
+      patternKill ||= nested.patternKill;
+      unverifiedKill ||= nested.unverifiedKill;
       nodePgrepWatcher ||= nested.pgrepWatcher;
       if (nested.error && rawMentionsProtected(payload)) unsupported = true;
     }
@@ -771,6 +1003,8 @@ function analyzeProgram(command, context, depth = 0) {
         const nested = analyzeProgram(token.content, nodeContext, depth + 1);
         nodeNestedProtected ||= nested.protectedFound;
         broadKill ||= nested.broadKill;
+        patternKill ||= nested.patternKill;
+        unverifiedKill ||= nested.unverifiedKill;
         nodePgrepWatcher ||= nested.pgrepWatcher;
         if (nested.error && rawMentionsProtected(token.content)) unsupported = true;
       }
@@ -780,6 +1014,8 @@ function analyzeProgram(command, context, depth = 0) {
           substitutionResults.set(substitution, nested);
           nodeNestedProtected ||= nested.protectedFound;
           broadKill ||= nested.broadKill;
+          patternKill ||= nested.patternKill;
+          unverifiedKill ||= nested.unverifiedKill;
           nodePgrepWatcher ||= nested.pgrepWatcher;
           if (nested.error && rawMentionsProtected(substitution.content)) unsupported = true;
         }
@@ -804,6 +1040,8 @@ function analyzeProgram(command, context, depth = 0) {
       const nested = analyzeProgram(shellPayload.value, nodeContext, depth + 1);
       nodeNestedProtected ||= nested.protectedFound;
       broadKill ||= nested.broadKill;
+      patternKill ||= nested.patternKill;
+      unverifiedKill ||= nested.unverifiedKill;
       nodePgrepWatcher ||= nested.pgrepWatcher;
       if (nested.error && rawMentionsProtected(shellPayload.value)) unsupported = true;
     }
@@ -812,6 +1050,8 @@ function analyzeProgram(command, context, depth = 0) {
       const nested = analyzeProgram(payload, nodeContext, depth + 1);
       nodeNestedProtected ||= nested.protectedFound;
       broadKill ||= nested.broadKill;
+      patternKill ||= nested.patternKill;
+      unverifiedKill ||= nested.unverifiedKill;
       nodePgrepWatcher ||= nested.pgrepWatcher;
       if (nested.error && rawMentionsProtected(payload)) unsupported = true;
     }
@@ -821,8 +1061,11 @@ function analyzeProgram(command, context, depth = 0) {
     if (hasUnclassifiableProtectedExpansion(position.command, context.root)) unclassifiableProtected = true;
     const commandName = basename(executable);
     const args = position.words.slice(position.index + 1);
+    const killKind = killClassification(position);
+    if (killKind === "pattern") patternKill = true;
+    else if (killKind === "unverified") unverifiedKill = true;
     if (commandName === "pkill" && args.some((word) => /fm-watch/.test(word.value) || wordReferencesAny(word, nodeContext.watcherPatterns))) broadKill = true;
-    if (commandName === "kill" && (nodePgrepWatcher || args.some((word) => wordReferencesAny(word, nodeContext.watcherPids)))) broadKill = true;
+    if (commandName === "kill" && !killIsSignalZeroProbe(position) && (nodePgrepWatcher || args.some((word) => wordReferencesAny(word, nodeContext.watcherPids)))) broadKill = true;
     if (isWatcherPgrep(position, nodeContext)) pgrepWatcher = true;
     if (hasDynamicExecutionPayload(position, nodeContext) || wordReferencesAny(position.command, nodeContext.protectedVariables)) nodeNestedProtected = true;
     for (const word of position.words) {
@@ -848,10 +1091,15 @@ function analyzeProgram(command, context, depth = 0) {
   const protectedFound = directProtected || nestedProtected || unclassifiableProtected;
   if (unclassifiableProtected) unsupported = true;
   const broadKillFound = broadKill || (unsupported && rawMentionsBroadKill(command));
-  if (unsupported && (protectedFound || rawMentionsProtected(command) || broadKillFound)) {
-    return { error: "unsupported compound grammar", protectedFound: true, broadKill: broadKillFound, pgrepWatcher, watcherPids: activeContext.watcherPids, program, nodeInfos };
+  const patternKillFound = patternKill || (unsupported && rawMentionsPatternKill(command));
+  // Grammar this parser cannot classify is not evidence that a kill inside it is
+  // harmless. Fail closed on the kill, exactly as an unparseable protected
+  // watcher command already fails closed.
+  const unverifiedKillFound = unverifiedKill || (unsupported && rawMentionsAnyKill(command));
+  if (unsupported && (protectedFound || rawMentionsProtected(command) || broadKillFound || unverifiedKillFound)) {
+    return { error: "unsupported compound grammar", protectedFound: protectedFound || rawMentionsProtected(command), broadKill: broadKillFound, patternKill: patternKillFound, unverifiedKill: unverifiedKillFound, pgrepWatcher, watcherPids: activeContext.watcherPids, program, nodeInfos };
   }
-  return { error: "", protectedFound, directProtected, nestedProtected, broadKill: broadKillFound, pgrepWatcher, watcherPids: activeContext.watcherPids, program, nodeInfos };
+  return { error: "", protectedFound, directProtected, nestedProtected, broadKill: broadKillFound, patternKill: patternKillFound, unverifiedKill: unverifiedKillFound, pgrepWatcher, watcherPids: activeContext.watcherPids, program, nodeInfos };
 }
 
 function xModePathAllowed(value, home) {
@@ -903,6 +1151,8 @@ function decision(command, root, home) {
   const context = { root: path.normalize(root), home: path.normalize(home), protectedVariables: new Set(), watcherPatterns: new Set(), watcherPids: new Set() };
   const analysis = analyzeProgram(command, context);
   if (analysis.broadKill) return deny("broad-watcher-kill");
+  if (analysis.patternKill) return deny("pattern-kill");
+  if (analysis.unverifiedKill) return deny("unverified-kill");
   if (analysis.error && analysis.protectedFound) return deny("unclassifiable-protected-command");
   if (!analysis.protectedFound) return { decision: "allow" };
   if (analysis.nodeInfos?.some((info) => info.protectedKind === "watch")) return deny("watcher-direct");

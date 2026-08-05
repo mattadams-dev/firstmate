@@ -92,10 +92,17 @@ if grep -E '^(signal:|stale:|check:|heartbeat($|:))' "$OUT" >/dev/null 2>&1; the
   exit 0
 fi
 
-if grep -E '^watcher: already running' "$OUT" "$ERR" >/dev/null 2>&1; then
+# Three shapes mean the same thing for a checkpoint: it does not own this home's
+# watcher. A verified-live watcher peer holds the singleton, a non-watcher holder
+# such as the PR-check migration exclusion holds it, or the singleton could not
+# be decided at all and nothing started. All three are a failed checkpoint, never
+# a quiet success - but only the first is a running watcher, so the summary line
+# says what was actually established and leaves the watcher's own line, printed
+# just above, to name the holder.
+if grep -E '^watcher: (already running|.*not starting)' "$OUT" "$ERR" >/dev/null 2>&1; then
   [ ! -s "$OUT" ] || cat "$OUT"
   [ ! -s "$ERR" ] || cat "$ERR" >&2
-  echo "checkpoint: watcher is already running outside this foreground checkpoint" >&2
+  echo "checkpoint: this foreground checkpoint does not own this home's watcher cycle" >&2
   exit 1
 fi
 
