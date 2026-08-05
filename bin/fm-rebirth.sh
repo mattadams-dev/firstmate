@@ -225,6 +225,19 @@ case "$COMMAND" in
     PREV_SESSION=$(fm_rebirth_field "$STATE/.rebirth-handoff" predecessor_session)
     TRIES=$(fm_rebirth_field "$STATE/.rebirth-handoff" verify_attempts)
     case "$TRIES" in ''|*[!0-9]*) TRIES=0 ;; esac
+    # A handoff whose predecessor number is unreadable cannot support a
+    # comparison. Say that, rather than comparing against an empty string.
+    case "$PREV_TOKENS" in
+      ''|*[!0-9]*)
+        "$BRIDGE" note --project firstmate \
+          --title "session rebirth premise unverifiable: the predecessor's footprint was not recorded" \
+          --body "A rebirth handoff for $PREV_SESSION carried no readable predecessor reading, so there is no number for the successor to prove smaller." \
+          --quiet 2>/dev/null || true
+        rm -f "$STATE/.rebirth-handoff" 2>/dev/null || true
+        printf 'unverifiable: the handoff carries no readable predecessor reading\n'
+        exit 1
+        ;;
+    esac
     MAX_TRIES=${FM_REBIRTH_VERIFY_TRIES:-3}
     case "$MAX_TRIES" in ''|*[!0-9]*|0) MAX_TRIES=3 ;; esac
     if NOW_TOKENS=$(fm_rebirth_footprint_read "$TRANSCRIPT"); then

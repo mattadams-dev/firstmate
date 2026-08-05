@@ -293,6 +293,34 @@ test_threshold_override_is_honoured_and_junk_is_not() {
   pass "detection: the threshold honours a real override and refuses junk rather than obeying it"
 }
 
+# The reading runs at every turn end against the one file that grows without
+# bound, so the tail is tried first. The fallback is what keeps that an
+# optimisation rather than a correctness hole: a reading further back than the
+# window must still be found, not silently reported as unknown.
+test_a_reading_beyond_the_tail_window_is_still_found() {
+  local home far tokens i
+  home=$(new_home)
+  far=$home/far.jsonl
+  cp "$DEATH" "$far"
+  i=0
+  while [ "$i" -lt 400 ]; do
+    printf '{"type":"system","pad":"%s"}\n' \
+      'xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx' >> "$far"
+    i=$((i + 1))
+  done
+  # A window far smaller than the trailing padding: the tail alone yields nothing.
+  tokens=$(FM_REBIRTH_TAIL_BYTES=4096 fm_rebirth_footprint_read "$far") \
+    || fail "a reading further back than the tail window must still be found"
+  [ "$tokens" = "$DEATH_TOKENS" ] \
+    || fail "expected the whole-file fallback to return $DEATH_TOKENS, got '$tokens'"
+
+  # And the divergence is real: with a window that DOES cover the reading, the
+  # tail path returns it directly, so this case cannot go quietly vacuous.
+  tokens=$(FM_REBIRTH_TAIL_BYTES=1000000 fm_rebirth_footprint_read "$far")
+  [ "$tokens" = "$DEATH_TOKENS" ] || fail "the tail path must return the same reading, got '$tokens'"
+  pass "detection: a reading beyond the bounded tail window is found by the whole-file fallback"
+}
+
 # --- Part 2: timing. Quiescence, in both directions. ------------------------
 
 # GUARD B, the one that would ship looking correct. An open decision is exactly
@@ -571,6 +599,7 @@ test_reading_scans_past_trailing_non_message_lines
 test_sidechain_usage_never_reports_the_session
 test_zero_counters_read_unknown_not_zero
 test_threshold_override_is_honoured_and_junk_is_not
+test_a_reading_beyond_the_tail_window_is_still_found
 test_arm_refuses_with_an_open_decision
 test_arm_proceeds_once_the_decision_resolves
 test_a_later_terminal_line_does_not_clear_an_open_decision

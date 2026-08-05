@@ -92,13 +92,18 @@ fm_rebirth_arm_ttl() {
 # A sum of zero is refused rather than reported: every real turn bills something,
 # so a zero means the counters were absent or malformed, and "0 tokens" is a
 # confident reading of a thing that was never observed.
-fm_rebirth_footprint_read() {  # <transcript-path> -> tokens (0) | nothing (1)
-  local file=$1 total
-  [ -n "$file" ] && [ -f "$file" ] && [ -r "$file" ] || return 1
-  command -v jq >/dev/null 2>&1 || return 1
+# This runs at every turn end, and the file it reads is the thing that grows -
+# a session worth rebirthing has a transcript in the tens of megabytes. So the
+# tail is tried first, since the reading being looked for is by construction near
+# the end, and only a tail that yields nothing falls back to the whole file. The
+# window is bytes rather than lines because a single transcript line can be
+# enormous. A window that starts mid-line simply fails to parse and is skipped.
+FM_REBIRTH_TAIL_BYTES_DEFAULT=262144
+
+fm_rebirth_footprint_scan() {  # reads JSONL on stdin -> tokens | nothing
   # grep pre-filters cheaply; jq sees reverse file order, so the FIRST value it
-  # emits is the LAST valid reading in the file, and head -1 stops the scan there.
-  total=$(tac "$file" 2>/dev/null | grep '"usage"' 2>/dev/null | jq -r '
+  # emits is the LAST valid reading, and head -1 stops the scan there.
+  grep '"usage"' 2>/dev/null | jq -r '
       select(type == "object")
     | select(.isSidechain != true)
     | .message.usage
@@ -108,7 +113,21 @@ fm_rebirth_footprint_read() {  # <transcript-path> -> tokens (0) | nothing (1)
     | select(all(type == "number"))
     | add
     | select(. > 0)
-  ' 2>/dev/null | head -1)
+  ' 2>/dev/null | head -1
+}
+
+fm_rebirth_footprint_read() {  # <transcript-path> -> tokens (0) | nothing (1)
+  local file=$1 total window
+  [ -n "$file" ] && [ -f "$file" ] && [ -r "$file" ] || return 1
+  command -v jq >/dev/null 2>&1 || return 1
+  window=${FM_REBIRTH_TAIL_BYTES:-$FM_REBIRTH_TAIL_BYTES_DEFAULT}
+  case "$window" in
+    ''|*[!0-9]*|0) window=$FM_REBIRTH_TAIL_BYTES_DEFAULT ;;
+  esac
+  total=$(tail -c "$window" "$file" 2>/dev/null | tac 2>/dev/null | fm_rebirth_footprint_scan)
+  case "$total" in
+    ''|*[!0-9]*) total=$(tac "$file" 2>/dev/null | fm_rebirth_footprint_scan) ;;
+  esac
   case "$total" in
     ''|*[!0-9]*) return 1 ;;
   esac

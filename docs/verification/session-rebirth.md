@@ -11,6 +11,9 @@ Task-specific chronology, temporary paths, and delivery transcripts remain in pr
 The reading is the last non-sidechain line in a session transcript carrying a `message.usage` object, summed as `input_tokens + cache_read_input_tokens + cache_creation_input_tokens`.
 Claude Code writes transcripts to `~/.claude/projects/<slugged-cwd>/<session-id>.jsonl`.
 
+The reading is taken from a bounded tail of the file first, because it runs at every turn end against the one file that grows without bound, and the reading it wants is by construction near the end.
+A tail that yields nothing falls back to the whole file, so the bound stays an optimisation rather than a correctness hole; `FM_REBIRTH_TAIL_BYTES` sets the window.
+
 Command shape used to take a reading by hand:
 
 ```sh
@@ -52,6 +55,7 @@ Detection - a mutant that lets a session past the threshold without marking it r
 | The threshold is multiplied by ten so only an absurd reading qualifies | `test_death_reading_marks_rebirth_due` |
 | The due marker is never written even when the verdict is `due` | `test_death_reading_marks_rebirth_due` |
 | The sidechain filter is dropped, so a subagent's context reads as the session's | `test_sidechain_usage_never_reports_the_session` |
+| The whole-file fallback behind the bounded tail read is dropped | `test_a_reading_beyond_the_tail_window_is_still_found` |
 
 Timing - a mutant that reborns a session mid-decision or over a live composer:
 
