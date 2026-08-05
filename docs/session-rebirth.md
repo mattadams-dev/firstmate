@@ -32,8 +32,12 @@ It is recorded as unknown, which is what was observed.
 
 Two exclusions matter:
 
-- **Sidechain turns.** A subagent's usage object records the subagent's context, not the session's. Reading one would report a small number for a large session, which fails in the direction that loses work.
-- **A zero sum.** Every real turn bills something, so a total of zero means the counters were absent or malformed. Zero is under every threshold, so reporting it confidently would silently disarm the mechanism.
+- **Sidechain turns.**
+  A subagent's usage object records the subagent's context, not the session's.
+  Reading one would report a small number for a large session, which fails in the direction that loses work.
+- **A zero sum.**
+  Every real turn bills something, so a total of zero means the counters were absent or malformed.
+  Zero is under every threshold, so reporting it confidently would silently disarm the mechanism.
 
 ## The four parts
 
