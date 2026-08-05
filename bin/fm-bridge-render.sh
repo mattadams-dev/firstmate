@@ -1108,11 +1108,11 @@ h2 {
 .pointer { margin-top:.4rem; font-size:.82rem; overflow-wrap:anywhere; }
 .pointer .lbl { color:var(--tn-muted); margin-right:.35rem; }
 
-/* The answer options are deliberately NOT controls. Lavish excludes
-   `button,input,select,textarea,...` and everything inside them from its
-   annotation capture, so an option rendered as a <button> would be the one
-   element on an ask row the captain cannot annotate - on the surface whose
-   whole input path is annotation. Measured, both directions:
+/* The answer options are deliberately NOT controls. Lavish excludes native
+   controls, and everything inside them, from its annotation capture - so an
+   option rendered as a control would be the one element on an ask row the
+   captain cannot annotate, on the surface whose whole input path is
+   annotation. Measured, both directions:
    docs/verification/bridge-hosted-input.md. */
 .answers { margin-top:.6rem; display:flex; gap:.4rem; flex-wrap:wrap; align-items:center; }
 .answers .lbl { color:var(--tn-muted); font-size:.74rem; margin-right:.15rem; }
