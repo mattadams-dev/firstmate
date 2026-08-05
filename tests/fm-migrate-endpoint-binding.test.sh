@@ -353,9 +353,9 @@ partial_run_home() {
   printf '%s' "$h"
 }
 
-# fully_migrated_home <name>: provenance present and no unbound candidate left.
-# This is the casual-re-run case the one-shot guard exists to refuse.
-fully_migrated_home() {
+# already_migrated_home <name>: every candidate already carries its binding and
+# provenance, so a further run has nothing legitimate left to write.
+already_migrated_home() {
   local h; h=$(new_home "$1")
   workspaces "$h" firstmate wB
   tabs "$h" wB "wB:t19:label=fm-alpha"
@@ -366,30 +366,63 @@ fully_migrated_home() {
   printf '%s' "$h"
 }
 
-case_one_shot_refuses_second_apply() {
-  local h; h=$(fully_migrated_home migratedapply)
+# IDEMPOTENCE, the property that replaced the deleted one-shot guard.
+#
+# A repeated --apply must not corrupt or double-write what an earlier run wrote.
+# This is now the only thing protecting that, so it is asserted on the bytes:
+# the record is identical after the second run, and carries exactly one binding
+# and one provenance line rather than a second pair appended.
+case_repeated_apply_is_idempotent() {
+  local h; h=$(new_home repeatapply)
+  workspaces "$h" firstmate wB
+  tabs "$h" wB "wB:t19:label=fm-alpha"
+  panes "$h" wB "wB:p19@wB:t19"
+  herdr_meta "$h" alpha 1 wB wB:t19 wB:p19
+
+  run_migrate "$h" --apply >/dev/null
+  cp "$h/state/alpha.meta" "$h/alpha.after-first"
+
+  local out rc
+  out=$(run_migrate "$h" --apply)
+  rc=$?
+  [ "$rc" -eq 0 ] || fail "the second --apply failed: $out"
+
+  cmp -s "$h/alpha.after-first" "$h/state/alpha.meta" \
+    || fail "the second --apply changed a record the first run had migrated"
+
+  local bindings provenances
+  bindings=$(grep -c '^endpoint_task_id=' "$h/state/alpha.meta")
+  provenances=$(grep -c '^endpoint_task_id_provenance=' "$h/state/alpha.meta")
+  [ "$bindings" -eq 1 ] \
+    || fail "record carries $bindings endpoint_task_id lines after two runs, expected 1"
+  [ "$provenances" -eq 1 ] \
+    || fail "record carries $provenances provenance lines after two runs, expected 1"
+}
+
+# The mirror direction. Idempotence means SAFE TO REPEAT, not clever about
+# refusing: a second run must actually run. This is the regression test against
+# reintroducing one-shot behaviour under any other name.
+case_repeated_apply_is_not_refused() {
+  local h; h=$(already_migrated_home repeatnotrefused)
 
   local err rc
   err=$(FM_HOME="$h" FM_FAKE_HERDR_FIX="$h/fix" "$MIGRATE" --apply 2>&1 >/dev/null)
   rc=$?
-  [ "$rc" -ne 0 ] || fail "--apply was allowed against a fully migrated home"
-  case "$err" in *REFUSED*already*migrated*) ;;
-    *) fail "no refusal on stderr naming the home as already migrated: $err" ;; esac
+  [ "$rc" -eq 0 ] || fail "--apply was refused on an already-migrated home; one-shot behaviour is back: $err"
+  case "$err" in *REFUSED*) fail "--apply printed a refusal on an already-migrated home: $err" ;; esac
   cmp -s "$h/alpha.before" "$h/state/alpha.meta" \
-    || fail "--apply wrote a record despite refusing"
+    || fail "the repeated run modified an already-migrated record"
 }
 
-# The regression test for a guard that gated on prior work instead of remaining
-# work: an interrupted run left provenance behind, every later --apply refused,
-# and the records it never reached stayed stranded with only the forbidden
-# hand-write left as a remedy.
-case_one_shot_allows_resume_after_partial_run() {
+# An interrupted run simply resumes: records already written are skipped,
+# records never reached are repaired. No stranded state, no hand-write remedy.
+case_interrupted_run_resumes() {
   local h; h=$(partial_run_home resumepartial)
 
   local out rc
   out=$(run_migrate "$h" --apply)
   rc=$?
-  [ "$rc" -eq 0 ] || fail "--apply was refused after a partial run, stranding the unbound record: $out"
+  [ "$rc" -eq 0 ] || fail "--apply failed after a partial run, stranding the unbound record: $out"
   case "$out" in *"MIGRATED"$'\t'"beta"*) ;;
     *) fail "the record an interrupted run never reached did not migrate: $out" ;; esac
   assert_grep 'endpoint_task_id=beta' "$h/state/beta.meta" "resumed run did not write the binding"
@@ -397,23 +430,49 @@ case_one_shot_allows_resume_after_partial_run() {
     || fail "resumed run modified an already-migrated record"
 }
 
-# The guard blocks the hazard, not the looking: an investigator must still be
-# able to observe and report an already-migrated home.
-#
-# This case must use the fully migrated home, because that is the only state
-# where --apply is actually refused. On any home where the write is permitted
-# anyway, "observe is allowed" and "the write is refused" produce the same
-# reading, and the case would prove nothing about the guard.
-case_one_shot_allows_observe_on_migrated_home() {
-  local h; h=$(fully_migrated_home migratedobserve)
+# THE RECEIPT. An unrecorded run is the state this design exists to make
+# impossible, so both modes must leave one, and it must carry the outcome rather
+# than merely noting that something happened.
+case_receipt_written_for_apply_run() {
+  local h; h=$(new_home receiptapply)
+  workspaces "$h" firstmate wB
+  tabs "$h" wB "wB:t19:label=fm-alpha"
+  panes "$h" wB "wB:p19@wB:t19"
+  herdr_meta "$h" alpha 1 wB wB:t19 wB:p19
 
-  local err rc
-  err=$(FM_HOME="$h" FM_FAKE_HERDR_FIX="$h/fix" "$MIGRATE" 2>&1 >/dev/null)
-  rc=$?
-  [ "$rc" -eq 0 ] || fail "observe-only mode was refused on a fully migrated home: $err"
-  case "$err" in *REFUSED*) fail "observe-only mode printed a refusal: $err" ;; esac
-  cmp -s "$h/alpha.before" "$h/state/alpha.meta" \
-    || fail "observe-only mode modified a record"
+  run_migrate "$h" --apply >/dev/null
+
+  local r="$h/data/endpoint-binding-migration-receipts.log"
+  [ -f "$r" ] || fail "no receipt was written for an --apply run"
+  assert_grep 'mode=apply' "$r" "receipt does not record the mode"
+  assert_grep "home=$h" "$r" "receipt does not record which home ran"
+  assert_grep "MIGRATED"$'\t'"alpha" "$r" "receipt does not record the per-record outcome"
+  assert_grep 'run	end=' "$r" "receipt has no end line for a completed run"
+}
+
+case_receipt_written_for_observe_run() {
+  local h; h=$(already_migrated_home receiptobserve)
+
+  run_migrate "$h" >/dev/null
+
+  local r="$h/data/endpoint-binding-migration-receipts.log"
+  [ -f "$r" ] || fail "no receipt was written for an observe-only run"
+  assert_grep 'mode=observe' "$r" "receipt does not record observe mode"
+  assert_grep 'run	end=' "$r" "receipt has no end line for a completed observe run"
+}
+
+# Two runs must leave two receipts. A receipt that overwrote the previous one
+# would lose exactly the history the deleted guard used to infer.
+case_receipt_accumulates_across_runs() {
+  local h; h=$(already_migrated_home receiptaccum)
+
+  run_migrate "$h" >/dev/null
+  run_migrate "$h" >/dev/null
+
+  local r="$h/data/endpoint-binding-migration-receipts.log"
+  local starts
+  starts=$(grep -c '^run	start=' "$r")
+  [ "$starts" -eq 2 ] || fail "expected 2 recorded runs in the receipt, found $starts"
 }
 
 # Observe mode on a partially migrated home still reports the record an
