@@ -18,6 +18,11 @@
 # See docs/turnend-guard.md for the per-harness mechanics, validation evidence,
 # and fail-open tradeoffs.
 #
+# It also takes this session's own context-footprint reading here, because this
+# is the one place that already runs at every turn boundary. That reading never
+# changes what this guard does; bin/fm-rebirth-lib.sh owns it and
+# docs/session-rebirth.md owns everything it drives.
+#
 # Ships with TRACKED harness hook files at the repo root, so this file is
 # checked out into every worktree of this repo: the primary checkout, every
 # secondmate home (treehouse-leased or git-cloned), and any crewmate/scout task
