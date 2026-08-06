@@ -137,7 +137,7 @@ This is a procedure step on a wake that already happens, because the fleet alrea
 
 ## How a `main` run result is read
 
-This format is doctrine, and it binds every reading of a default branch's CI result: the hand reading that covers a runtime not carrying the rule, the read the rule itself requires, and any check ever built to replace either.
+This format is doctrine, and it binds every reading of a default branch's CI result, including any check ever built to perform one.
 Each clause names the mistake it prevents, because the failure mode here is not a missing reading but a reading that quietly reports an unknown as an answer.
 
 - **Five fields per run, plus the read-time of the reading itself.** Never prose.
