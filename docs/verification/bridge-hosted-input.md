@@ -6,6 +6,10 @@ Refresh them with the commands below after any `lavish-axi` upgrade.
 
 Measured 2026-08-05 against `lavish-axi` 0.1.43 and Chromium 150.0.7871.128 on Linux (WSL2), driving a real hosted session with `chrome-devtools-axi`.
 
+**Scope.** The vendor behaviours measured here still stand and the board is still built on them.
+The design consequences the v1 board drew from them do not all survive the v2 split into a board and a history page: v2 spends a control's annotatability where a click is the point.
+[`bridge-board-v2.md`](bridge-board-v2.md) is the authoritative record of what v2 renders, what stays annotatable, and what the live guard checks; where the two records differ about the board as it ships, that one is current.
+
 ## What was under test
 
 The board carried a bespoke ruling composer whose only egress affordances were `copy` and `clear`.
@@ -51,11 +55,11 @@ from its `mouseover`, `mouseup` and `click` capture handlers, by `closest()`, so
 The same list is what lets `link()`'s `data-lavish-action` anchors keep their native left-click.
 
 **Consequence the board depends on:** an answer option rendered as `<button>` is the one thing on an ask row the captain cannot annotate.
-With the composer gone, that would have left the ask rows as the only dead spots on the surface, so the board renders answer options as plain non-control elements.
+v1 read that as a prohibition and rendered answer options as plain non-control elements; v2 spends it deliberately, because an option the captain cannot click is an ask that leaves by terminal instead.
+What v2 keeps outside every control so a free-text ruling can still name its ask - the per-item anchor, the visible ref, the title - is recorded in [`bridge-board-v2.md`](bridge-board-v2.md), section 6.
 
 The same exclusion covers `[data-lavish-action]`, which the board puts on links so their left-click navigates.
-That makes the asks-index rows non-annotatable by design - they are navigation - and it is why a ruling is placed on the **card**, where the ref and the answer options live.
-Both refs render, the index one to jump with and the card one to annotate.
+That makes a link non-annotatable by design - it is navigation - and it is why a ruling is placed on the **card**, where the ref, the title and the answer options live.
 
 ## 2. A board rewrite destroys an in-progress annotation
 
@@ -118,7 +122,8 @@ State 3, that exact selector evaluated in the browser against the redrawn board:
 ```
 
 The reference holds because it is rooted at the per-item anchor `id="item-<id>"`, which the fold assigns from the ledger key and re-emits identically on every render, so sibling shifts above and around the ask cannot move it.
-What identifies the ruling therefore is the anchor plus the option's own text - and the option text carries the ask's visible ref (`O1: A: retire it`) for exactly this reason.
+What identifies the ruling therefore is the anchor plus the text the annotation was placed on - which is why v1 carried the ask's visible ref into the option text itself (`O1: A: retire it`).
+v2 places that burden on the card instead, because the option is now a control an annotation never sees: the ref and the title stay outside every control, and a clicked ruling carries its ref in the queued payload rather than in a selector ([`bridge-board-v2.md`](bridge-board-v2.md), sections 3 and 6).
 The payload's `uid` is a per-load counter and does **not** survive a redraw; nothing should be keyed to it.
 
 Bounding sub-case, same session: with the ask then **resolved** and the board redrawn, the board withdraws its answer options by design, so a selector that pointed at an *option* stops resolving while the ask anchor itself is still there:
@@ -186,8 +191,9 @@ Rendered content survives a redraw by construction - the redraw is what produces
 The title now names the board and states no count, because the affordance rule reaches browser chrome too: a surface may only claim what it can keep, and a title Lavish copies once may not carry a number that changes.
 `tests/fm-bridge.test.sh` pins both halves against a count change: the rendered count moves with the ledger, and the title is byte-identical across it.
 
-The count is therefore at the top of the page rather than following the viewport, and it links to the asks index so an ask stays one click away.
-Nothing on the board is out of flow at all, which is the property the two layout audits made non-negotiable.
+The count is therefore at the top of the page rather than following the viewport.
+v1 linked it to a separate asks index; v2 retired that index, because the ask cards themselves are now the first thing under the header and a link to what is already there buys nothing.
+Nothing on either page is out of flow at all, which is the property the two layout audits made non-negotiable.
 
 ## Upstream
 
@@ -199,48 +205,21 @@ Firstmate's own guard does not depend on that report: section 3 is why the tick 
 
 ## Running the live guard
 
-`tests/fm-bridge-lavish-annotation-live-e2e.test.sh` (opt-in: `FM_BRIDGE_LAVISH_LIVE_E2E=1`) re-checks the two vendor-owned facts above against the INSTALLED lavish-axi:
+`tests/fm-bridge-lavish-annotation-live-e2e.test.sh` (opt-in: `FM_BRIDGE_LAVISH_LIVE_E2E=1`) re-checks the vendor-owned facts against the INSTALLED lavish-axi.
+Its current coverage and how to run it are recorded in [`bridge-board-v2.md`](bridge-board-v2.md), section 8; what belongs here is the reason it can report a third outcome.
 
-1. that its annotation exclusion list is still the one the board is authored against, read out of the installed package - deterministic, and the part that catches an upstream change;
-2. that a real hosted session still opens an annotation card on a real ask row.
-
-The second half needs a browser that will actually render the page.
+Its browser half needs a browser that will actually render the page.
 Lavish holds an artifact behind a "waiting for fonts and final geometry" curtain until its layout check settles, and that check needs animation frames - which a browser does not give a tab that is not in front.
 In a headless browser with the tab backgrounded, the frame can stay blank indefinitely.
 
 The guard therefore reports **three** outcomes, not two: a card opened, a card did not open while the page was demonstrably ready, or the page was never in a state that could answer the question (exit 2, `COULD NOT OBSERVE`).
 That distinction is the point - the two failures look identical from the outside, and reporting a headless rendering problem as "the captain cannot answer an ask" would send the next reader hunting a defect in the board.
 
-Point it at a browser that renders in the foreground:
-
-```sh
-CHROME_DEVTOOLS_AXI_BROWSER_URL=http://127.0.0.1:9222 \
-  FM_BRIDGE_LAVISH_LIVE_E2E=1 bash tests/fm-bridge-lavish-annotation-live-e2e.test.sh
-```
+So point `CHROME_DEVTOOLS_AXI_BROWSER_URL` at a browser that renders in the foreground before running it.
 
 ## The guards, proven to fire
 
-Each mutation was applied to `bin/fm-bridge-render.sh` on its own, the suite run, and the renderer restored.
-"First failing guard" is what `tests/fm-bridge.test.sh` reported; the suite stops at the first failure, so a mutant reaching its own guard means nothing earlier caught it by accident.
+The mutation matrix and the live guard's own mutation check now live in [`bridge-board-v2.md`](bridge-board-v2.md), section 9, re-measured against the v2 board and its guards on 2026-08-05.
 
-| mutation | first failing guard |
-|---|---|
-| a sendable-looking composer returns to the board | `input path: see the reported element` |
-| answer options go back to being controls | `input path: see the reported element` |
-| the per-item anchors are stripped from the cards | `mode drift: an ask present in folded state is missing from the board` |
-| the visible ref is dropped from the ask cards | `annotation anchors: see the reported ask` |
-| the answer options stop naming their own ask | `annotation anchors: see the reported ask` |
-| the signpost is removed with the composer | `signpost: see the reported gap` |
-| the tick rewrites the board on an unchanged ledger | `tick: an unchanged ledger rewrote the board file` |
-| the writer stops comparing before it replaces | `write: a byte-identical render replaced the board file anyway` |
-
-The live guard was mutation-checked the same way, against the real vendor and a real browser rather than against the pinned list:
-
-| mutation | live guard verdict |
-|---|---|
-| none - the board as it ships | `all live Lavish annotation guards passed against lavish-axi 0.1.43` |
-| answer options rendered as `<button>` | `the board renders its answer option as a native control: uid=... button "O1: A: retire it"` |
-
-The ref mutant is the one worth keeping in mind: it passed the first version of the anchor guard, because the refs also appear in the asks index at the top of the page and a document-wide search found them there.
-An annotation is rooted where it was placed and never sees the index, so the guard now searches the ask's own card or row.
-A guard that reads the whole page answers a question nobody asked.
+The v1 results that stood here have been dropped rather than marked, because they were verdicts about dead code: two of their rows described rules v2 inverted, so the mutation each recorded as a failure is the shipped state now.
+Section 9 records what was observed on the current renderer, including the two invariants the sweep found with no guard behind them and the guards that now cover them in both directions.

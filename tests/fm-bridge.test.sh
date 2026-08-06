@@ -66,6 +66,20 @@ new_home() {  # -> a fresh isolated FM_HOME
 
 ledger_of() { printf '%s/data/bridge/ledger.jsonl' "$1"; }
 
+# THE TWO PAGES, AND WHICH ONE A GUARD BELONGS ON.
+#
+# v2 split one page into two: the BOARD is the captain's action surface - open
+# asks, the co-captain line, lanes, admission, and nothing else - and HISTORY
+# holds everything the board excludes: resolved and landed items, closed
+# criticals, events, tallies, the glossary, unrecognized records.
+#
+# A guard about something the captain acts on belongs on the board; a guard
+# about something they consult belongs on history. Putting a history assertion
+# on the board would pin exactly the length the split exists to remove, so the
+# choice is not cosmetic - it is the rule being enforced.
+board_of() { FM_HOME=$1 "$RENDER" --html; }
+history_of() { FM_HOME=$1 "$RENDER" --history; }
+
 # Whether the board file was WRITTEN, which is the question the hosted page
 # answers to - Lavish reloads on the write, not on a diff. Portable across the
 # two stat dialects rather than assuming GNU.
@@ -167,11 +181,14 @@ pass "unknown state and severity are preserved verbatim and flagged, never defau
 unzoned=$(state_query "$HOME3" 'd["zones"]["unzoned"]')
 [ "$unzoned" = "['future-kind']" ] \
   || fail "unrecognized values: an unknown kind was filed somewhere convenient instead of shown ($unzoned)"
-case "$(FM_HOME=$HOME3 "$RENDER" --html)" in
+# Shown, on the page that holds everything the captain consults rather than
+# acts on. Absent from BOTH would be the silent masking this guard exists for;
+# a strange record is not an ask, so it does not belong above the decisions.
+case "$(history_of "$HOME3")" in
   *"Unrecognized records"*) : ;;
-  *) fail "unrecognized values: the board hid an unknown-kind record" ;;
+  *) fail "unrecognized values: an unknown-kind record is on neither page" ;;
 esac
-pass "an unknown kind is shown on the board rather than filed into a known zone"
+pass "an unknown kind is shown rather than filed into a known zone"
 
 # An unrecognized state must not be counted as though it were understood.
 unrec=$(state_query "$HOME3" 'd["summary"]["unrecognized"]')
@@ -230,22 +247,26 @@ sys.exit(0)
 PY
 pass "every folded ask reaches the board with an anchor and a title"
 
-# A task-kind ask renders as a table ROW, not a card, so it needs its own guard:
-# the asks index links to it, and an index entry that lands nowhere - or lands
-# somewhere with no way to answer - is worse than one that was never listed.
+# A PR waiting on a merge decision is an ask like any other, and v2 gives it
+# the SAME card as every other ask rather than a row in a different zone with
+# its own affordances. That is what makes this guard cheap to keep: there is
+# one card shape, so an ask that cannot be answered where it lands is a defect
+# in one place rather than in whichever zone happened to render it.
 python3 - "$TMP_ROOT/mode-board.html" <<'ROWCHECK' \
-  || fail "mode drift: a task-kind ask is listed but not answerable where it lands"
-import sys
+  || fail "mode drift: a task-kind ask is shown but not answerable where it lands"
+import re, sys
 html = open(sys.argv[1]).read()
 if 'id="item-t-pr"' not in html:
-    sys.exit("the asks index links to #item-t-pr but the fleet strip has no such anchor")
-row = html.split('id="item-t-pr"', 1)[1].split("</tr>", 1)[0]
+    sys.exit("the board has no anchor for the PR ask t-pr")
+card = html.split('id="item-t-pr"', 1)[1].split('<div class="ask" id=', 1)[0]
 for form in ("merge it", "hold"):
-    if form not in row:
-        sys.exit("the PR row offers no way to answer it: %r missing" % form)
+    if form not in card:
+        sys.exit("the PR card offers no way to answer it: %r missing" % form)
+if not re.search(r'<button class="ansbtn"', card):
+    sys.exit("the PR card lists its answers but offers no way to queue one")
 sys.exit(0)
 ROWCHECK
-pass "a PR waiting on a merge decision is anchored and answerable in the fleet strip"
+pass "a PR waiting on a merge decision gets the same answerable card as any ask"
 
 # --- 5. an ask looks like an ask --------------------------------------------
 
@@ -269,20 +290,22 @@ pass "the writer records disposition explicitly in the raw stream"
 asks=$(state_query "$HOME4" 'len(d["asks"])')
 [ "$asks" = 3 ] || fail "asks: expected 3 open asks, got $asks"
 boardhtml=$(cat "$TMP_ROOT/mode-board.html")
-# THE COUNT IS RENDERED CONTENT, in normal flow with the other tallies. That is
-# the only surface on a hosted board a redraw is guaranteed to refresh: the tab
-# title is propagated into the hosting page once, at load (section 29), and
-# unlike anything that travels with the viewport a tally cannot come to cover a
-# row.
+# THE COUNT IS RENDERED CONTENT, in normal flow, on the header's one counts
+# line. That is the only surface on a hosted board a redraw is guaranteed to
+# refresh: the tab title is propagated into the hosting page once, at load
+# (section 29), and unlike anything that travels with the viewport a line of
+# text cannot come to cover a row.
 case "$boardhtml" in
-  *'<b>3</b>waiting on you'*) : ;;
+  *'<b class="you">3</b> waiting on you'*) : ;;
   *) fail "asks: the board's own header does not carry the open-ask count" ;;
 esac
-# It still reaches the index in one click, which is the one thing a bare number
-# would have lost.
+# v2 retired the separate asks index: the cards ARE the list, first on the
+# page, so there is nothing left for the count to jump to. What replaced that
+# affordance is stricter, and section 31 measures it - the first decision is
+# fully visible without scrolling at all.
 case "$boardhtml" in
-  *'class="tally ask" href="#waiting"'*) : ;;
-  *) fail "asks: the count does not jump to the asks index" ;;
+  *'id="waiting"'*) fail "asks: the retired asks index is back, and it duplicates the cards below it" ;;
+  *) : ;;
 esac
 pass "the open-ask count is rendered in the board's own header, in normal flow"
 
@@ -302,6 +325,73 @@ pass "resolve refuses without a pointer to the outcome"
 FM_HOME=$HOME4 "$BRIDGE" ask --project orca --title "no answer form" >/dev/null 2>&1 \
   && fail "asks: an ask was accepted with no answer form"
 pass "an ask is refused without an answer form"
+
+# THE ZONE LABEL MUST STATE THE SORT THE CODE USES. Its predecessor said
+# "oldest first" over a severity-first ordering, so a reader who trusted it took
+# the top row for the longest-waiting ask when a 5h critical was sitting above a
+# 27h routine item. A false claim about its own ordering, on the surface whose
+# whole job is collecting rulings, is worth a guard: the ordering is deliberate,
+# the label was the defect, and nothing but a test keeps the two together.
+python3 - "$TMP_ROOT/mode-board.html" "$TMP_ROOT/mode-state.json" <<'SORTLABEL' \
+  || fail "sort label: see the report"
+import json, re, sys
+html = open(sys.argv[1]).read()
+doc = json.load(open(sys.argv[2]))
+note = re.search(r'<h2>Your decisions<span class="note">(.*?)</span></h2>', html, re.S)
+if note is None:
+    sys.exit("the decisions zone carries no label at all")
+label = note.group(1)
+
+# What the fold actually does, read off the queue rather than off the renderer.
+ranked = [(doc["items"][k]["severity"], -(doc["items"][k]["age_seconds"] or 0))
+          for k in doc["asks"]]
+if ranked != sorted(ranked, key=lambda pair: ({"critical":0,"high":1,"normal":2,"low":3}
+                                              .get(pair[0], 4), pair[1])):
+    sys.exit("the ask queue is not ordered by severity then age, so this guard "
+             "is checking the label against the wrong claim")
+if "severity first" not in label:
+    sys.exit("the label does not say the queue is ordered by severity: %r" % label)
+if re.search(r"\boldest first\b", label):
+    sys.exit("the label claims oldest-first over a severity-first sort, which is "
+             "the exact false claim this guard exists for: %r" % label)
+sys.exit(0)
+SORTLABEL
+pass "the decisions zone label states the ordering the fold actually uses"
+
+# LAW 3: AN OPEN CRITICAL IS AN ASK CARD WITH A CRITICAL CHIP, SORTED FIRST -
+# not a pinned zone of its own, and a resolved one does not render at all. And
+# ONE chip, not two: a critical's severity defaults to critical, so kind and
+# severity say the same word, and two identical chips side by side invite the
+# reader to infer a distinction the record never made.
+python3 - "$TMP_ROOT/mode-board.html" "$TMP_ROOT/mode-state.json" <<'CRITICAL' \
+  || fail "criticals: see the report"
+import json, re, sys
+html = open(sys.argv[1]).read()
+doc = json.load(open(sys.argv[2]))
+
+if "Pinned criticals" in html:
+    sys.exit("the retired pinned-criticals zone is back; a critical is an ask "
+             "card sorted first, not a section of its own")
+order = re.findall(r'<div class="ask[^"]*" id="item-([^"]+)"', html)
+if not order:
+    sys.exit("the board rendered no ask cards, so this guard proves nothing")
+criticals = [k for k in order if doc["items"][k]["kind"] == "critical"]
+if not criticals:
+    sys.exit("no open critical in the fixture, so this guard proves nothing")
+if order[0] not in criticals:
+    sys.exit("an open critical is not sorted first: order is %s" % order)
+
+card = re.split(r'<div class="ask" id=|</section>',
+                html.split('id="item-%s"' % criticals[0], 1)[1], maxsplit=1)[0]
+chips = re.findall(r'<span class="chip [^"]*">([^<]+)</span>', card)
+if "critical" not in chips:
+    sys.exit("the critical card carries no critical chip: %s" % chips)
+if chips.count("critical") > 1:
+    sys.exit("the critical card carries the same chip twice (%s), which reads "
+             "as two facts where the record made one" % chips)
+sys.exit(0)
+CRITICAL
+pass "an open critical is one ask card, chipped once and sorted first"
 
 # --- 6. an ask that has been waiting says so --------------------------------
 #
@@ -500,16 +590,22 @@ pass "an unchanged ledger leaves the board file untouched, not rewritten with a 
 # a "checked" time nothing advances would be an instrument reporting a liveness
 # it never observed - the exact failure the restamp existed to avoid, arrived at
 # from the other side.
-grep -q 'content as of <span class="clock">2026-07-31T12:00:00Z' "$BOARD" \
-  || fail "tick: the board does not say when its content is from"
+grep -q 'fold <span class="mono">2026-07-31T12:00:00Z' "$BOARD" \
+  || fail "tick: the board does not say which fold it was drawn from"
 grep -q 'checked <span class="clock"' "$BOARD" \
   && fail "tick: the board still claims a checked time nothing advances"
-pass "the board dates its content and claims no supervision liveness of its own"
+# The same time, in the one place the freshness poll can string-match it out of
+# a fetched copy. The poll compares this against the copy on screen, so a page
+# that renders a fold time it does not also publish here could never tell the
+# captain it had gone stale.
+grep -q '<meta name="fm-folded-at" content="2026-07-31T12:00:00Z">' "$BOARD" \
+  || fail "tick: the board does not publish its fold time where the freshness poll reads it"
+pass "the board dates its content, publishes it for the poll, and claims no supervision liveness"
 
 FM_HOME=$HOME11 "$BRIDGE" note -q --project orca --title "a new fact" >/dev/null
 FM_BRIDGE_NOW=2026-07-31T12:06:00Z FM_HOME=$HOME11 "$RENDER" --tick \
   || fail "tick: re-render after a ledger change failed"
-grep -q 'content as of <span class="clock">2026-07-31T12:06:00Z' "$BOARD" \
+grep -q 'fold <span class="mono">2026-07-31T12:06:00Z' "$BOARD" \
   || fail "tick: a changed ledger did not advance the content clock"
 grep -q 'a new fact' "$BOARD" || fail "tick: a changed ledger did not pick up the new record"
 pass "a changed ledger re-renders the body and re-dates the content"
@@ -527,22 +623,54 @@ FM_BRIDGE_NOW=2026-07-31T12:07:00Z FM_HOME=$HOME11 "$RENDER" --tick \
 pass "touching the ledger without changing it does not rewrite the board"
 
 # The backstop under the tick's own skip: whatever asks for a write, a render
-# that comes out byte-identical to the board already on disk must not replace
-# it. An explicit --write at a fixed clock is that case, and it is the only
-# rewrite path the tick's signature does not already stand in front of.
-before_mtime=$(board_mtime "$BOARD")
+# that comes out byte-identical to the page already on disk must not replace it.
+#
+# It is measured on HISTORY rather than the board, and the reason is the v2
+# split. History is a pure function of the fold, so two renders of one fold are
+# the same bytes and the guard has something to prove. The board is not: it also
+# draws live readings - memory headroom, provider quota - which move between any
+# two calls, so a board rendered twice legitimately differs and `cmp` would be
+# comparing a clock to itself.
+#
+# What protects the hosted board from those readings is the assertion below it:
+# a moving gauge never earns a render at all, because the tick asks the LEDGER
+# whether anything changed and skips before it draws.
+HISTORY=$(FM_HOME=$HOME11 "$RENDER" --history-path)
+[ -f "$HISTORY" ] || fail "write: the tick rendered no history page beside the board"
+before_mtime=$(board_mtime "$HISTORY")
 sleep 1
 FM_BRIDGE_NOW=2026-07-31T12:09:00Z FM_HOME=$HOME11 "$RENDER" --write >/dev/null \
   || fail "write: explicit write failed"
-first_write=$(board_mtime "$BOARD")
+first_write=$(board_mtime "$HISTORY")
 [ "$first_write" != "$before_mtime" ] \
-  || fail "write: an explicit write at a new clock did not rewrite the board, so this guard proves nothing"
+  || fail "write: an explicit write at a new clock did not rewrite the page, so this guard proves nothing"
 sleep 1
 FM_BRIDGE_NOW=2026-07-31T12:09:00Z FM_HOME=$HOME11 "$RENDER" --write >/dev/null \
   || fail "write: repeat write failed"
-[ "$(board_mtime "$BOARD")" = "$first_write" ] \
-  || fail "write: a byte-identical render replaced the board file anyway, which reloads the hosted page for nothing"
-pass "a byte-identical render never replaces the board file"
+[ "$(board_mtime "$HISTORY")" = "$first_write" ] \
+  || fail "write: a byte-identical render replaced the page anyway, which reloads the hosted copy for nothing"
+pass "a byte-identical render never replaces the page file"
+
+# THE PROPERTY THE LIVE READINGS COULD HAVE COST. Memory headroom and quota
+# move constantly, and a board redrawn every time one of them twitched would
+# reload the hosted page out from under whatever ruling the captain was
+# annotating - several times a minute, for a number nobody was waiting on.
+#
+# They cannot, because the tick's question is about the LEDGER: unchanged
+# content, no render, whatever the gauges say. Ten ticks in a row over a quiet
+# ledger must leave both files exactly as they were.
+before_board=$(board_mtime "$BOARD")
+before_history=$(board_mtime "$HISTORY")
+sleep 1
+for round in 1 2 3 4 5 6 7 8 9 10; do
+  FM_BRIDGE_NOW=2026-07-31T12:1$((round % 10)):00Z FM_HOME=$HOME11 "$RENDER" --tick \
+    || fail "tick: a quiet-ledger tick failed on round $round"
+done
+[ "$(board_mtime "$BOARD")" = "$before_board" ] \
+  || fail "tick: a live reading moved and the board was rewritten for it, reloading the hosted page for nothing"
+[ "$(board_mtime "$HISTORY")" = "$before_history" ] \
+  || fail "tick: the history page was rewritten over a quiet ledger"
+pass "moving live readings never earn a render: a quiet ledger leaves both pages alone"
 
 # The board is generated. A hand edit is not a place to put facts, and the next
 # tick says so by overwriting it.
@@ -630,8 +758,8 @@ grep -q 'render FAILED (3 in a row)' "$TICKLOG" \
   || fail "tick: the failures are not in the log, so the episode cannot be reconstructed"
 
 # Evidence of health, not the passage of time, is what clears an alarm.
-FM_HOME=$HOME11B "$RENDER" --tick >/dev/null 2>&1 \
-  || fail "tick: the render did not recover once the board path was writable again"
+recovery_out=$(FM_HOME=$HOME11B "$RENDER" --tick 2>&1) \
+  || fail "tick: the render did not recover once the board path was writable again: $recovery_out"
 [ -f "$FAILURES" ] && fail "tick: a successful render left the failure count standing"
 grep -q 'render RECOVERED after 3 consecutive failures' "$TICKLOG" \
   || fail "tick: the reset was not logged, so the alarm history stops being reconstructable"
@@ -738,8 +866,8 @@ while [ "$i" -le 18 ]; do
     --ts "2026-07-31T10:$(printf '%02d' "$i"):00Z" >/dev/null
   i=$((i + 1))
 done
-capped=$(FM_HOME=$HOME12 "$RENDER" --html)
-shown=$(printf '%s' "$capped" | grep -c '<li><span class="when">' || true)
+capped=$(history_of "$HOME12")
+shown=$(printf '%s' "$capped" | grep -c 'class="hitem"' || true)
 [ "$shown" = 12 ] || fail "caps: expected 12 events shown, got $shown"
 case "$capped" in
   *"older events. They are not lost"*) : ;;
@@ -751,11 +879,13 @@ case "$capped" in
 esac
 pass "capped zones show an overflow pointer to the full record, never silent truncation"
 
-# Boards carry their check commands.
+# The check commands live with the material they check. They moved to history
+# with the capped zones: a footer of commands is something a reader consults,
+# and every line of it on the board is length above the next decision.
 for probe in "fm-bridge-render.sh --state" "fm-bridge.sh lint" "tail -n 40"; do
   case "$capped" in
     *"$probe"*) : ;;
-    *) fail "checks: the board does not carry '$probe'" ;;
+    *) fail "checks: the page does not carry '$probe'" ;;
   esac
 done
 pass "the board carries the commands that check it against its own source"
@@ -800,7 +930,7 @@ FM_HOME=$HOME14 "$BRIDGE" ask -q --id g1 --project orca --title "an orca ask" \
   --answer "A" >/dev/null
 collided=$(state_query "$HOME14" '[g["collision"] for g in d["glossary"]]')
 [ "$collided" = "[True]" ] || fail "glossary: a cross-project term collision was not detected"
-gloss=$(FM_HOME=$HOME14 "$RENDER" --html)
+gloss=$(history_of "$HOME14")
 case "$gloss" in
   *"Terms that mean different things by project"*) : ;;
   *) fail "glossary: collisions are not defined up front" ;;
@@ -810,6 +940,31 @@ case "$gloss" in
   *) fail "glossary: the definition is not repeated locally in the project section" ;;
 esac
 pass "a colliding term is defined up front and repeated in its project section"
+
+# AND REPEATED WHERE THE RULING IS ACTUALLY MADE. The reason for the rule is
+# that a reader arriving at a decision must never scroll back to find out which
+# meaning of a word is in play - and on the board they cannot scroll back at
+# all, because the definitions list is on the other page. It rides in the
+# card's context dropdown, which costs the board no height while closed.
+board_of "$HOME14" > "$TMP_ROOT/gloss-board.html"
+python3 - "$TMP_ROOT/gloss-board.html" <<'LOCAL' || fail "glossary: see the reported card"
+import re, sys
+html = open(sys.argv[1]).read()
+if 'id="item-g1"' not in html:
+    sys.exit("the orca ask is not on the board, so this guard proves nothing")
+card = re.split(r'<div class="ask" id=|</section>',
+                html.split('id="item-g1"', 1)[1], maxsplit=1)[0]
+if 'class="local-terms"' not in card:
+    sys.exit("the ask card does not repeat the colliding term, so the captain "
+             "must leave the board to find out which meaning is in play")
+if "the workspace layout file" not in card:
+    sys.exit("the card repeats a term but not THIS project's meaning of it")
+if "the shell test contract" in card:
+    sys.exit("the card carries another project's meaning of the term, which is "
+             "the collision rather than the definition")
+sys.exit(0)
+LOCAL
+pass "a colliding term is repeated on the ask card itself, in this project's meaning"
 
 # --- 15. routing: an item addressed elsewhere never costs captain attention --
 #
@@ -841,9 +996,9 @@ owner=$(state_query "$HOME15" 'd["items"]["for-co"]["owner"]')
 pass "routing sets the owner to the reader the item was addressed to"
 
 # The captain-facing surface must not count it ANYWHERE.
-routed=$(FM_HOME=$HOME15 "$RENDER" --html)
+routed=$(board_of "$HOME15")
 case "$routed" in
-  *'<b>1</b>waiting on you'*) : ;;
+  *'<b class="you">1</b> waiting on you'*) : ;;
   *) fail "routing: the header count counts co-captain items as captain asks" ;;
 esac
 tally=$(state_query "$HOME15" 'd["summary"]["needs-captain"]')
@@ -875,7 +1030,7 @@ pass "routing refuses an unknown reader"
 
 # With every ask routed away, the board says so plainly rather than looking
 # like a board that failed to load.
-allclear=$(FM_HOME=$HOME15 "$RENDER" --html)
+allclear=$(board_of "$HOME15")
 case "$allclear" in
   *"Nothing is waiting on you"*) : ;;
   *) fail "routing: with all asks routed away the board does not report a clear queue" ;;
@@ -949,22 +1104,29 @@ sys.exit(0)
 LINKCHECK
 pass "every link carries Lavish's pass-through, opens safely, and reads as its own URL"
 
-# --- 16b. the board takes no input, and everything on it can be annotated ---
+# --- 16b. the two input paths, and the one that must never be blocked -------
 #
-# The board's input path is Lavish's annotation layer and its conversation
-# panel. Nothing else. It used to carry a composer of its own - a textarea with
-# copy and clear and no send - which could not reach anybody and was wiped by
-# the next redraw, so a captain who typed a ruling into it believed they had
-# answered and the fleet never heard it.
+# v1 had one input path: annotate a row, send from the conversation panel. It
+# was authored by forbidding every native control, because Lavish skips a
+# control and everything inside it when deciding what can be annotated - so a
+# control was a dead spot on a row the captain had to rule on.
 #
-# That makes two properties guard-class, and they fail in opposite directions:
-#   1. the board must offer NO input affordance of its own, and
-#   2. everything the captain must annotate must actually BE annotatable.
-# Lavish skips native controls and everything inside them when deciding what can
-# be annotated, so the same list settles both: a control on this board is either
-# an input path it does not have, or a dead spot on a row the captain must rule
-# on. Measured, both directions, against real hosting:
-# docs/verification/bridge-hosted-input.md.
+# v2 adds a second path deliberately. Twice in one day a ruling travelled by
+# terminal instead of this board, once because the answer forms could not be
+# selected; answers are now controls the captain clicks, and a per-card Queue
+# button sends the choice. That trades those options' annotatability away on
+# purpose, so the guard is no longer "no controls" - it is:
+#
+#   1. controls exist ONLY where a click is the point - the answers, the Queue
+#      button, the context disclosure, the stale bar's reload,
+#   2. the board still has no free-text input of its own, so the composer that
+#      could not send stays retired, and
+#   3. what a free-text ruling needs in order to identify an ask - the per-item
+#      anchor, the visible ref, the title - stays OUTSIDE every control, so
+#      annotating the card still works for anything the buttons cannot say.
+#
+# Measured against real hosting: docs/verification/bridge-hosted-input.md and
+# docs/verification/bridge-board-v2.md.
 
 python3 - "$TMP_ROOT/links.html" <<'INPUTCHECK' \
   || fail "input path: see the reported element"
@@ -974,18 +1136,27 @@ html = open(sys.argv[1]).read()
 # and a rule or a record that merely mentions a tag name is not one.
 markup = re.sub(r"<(style|script)\b[^>]*>.*?</\1>", "", html, flags=re.S | re.I)
 
-# Lavish's own exclusion list, from its artifact SDK. Anything matching it - or
-# nested inside something matching it - is invisible to annotation.
-NATIVE = ("button", "input", "select", "textarea", "option", "optgroup",
-          "label", "summary")
-
-for tag in NATIVE:
-    for found in re.finditer(r"<%s\b[^>]*>" % tag, markup, re.I):
-        sys.exit("the board renders a native control, which is either an input "
-                 "it cannot send or a spot the captain cannot annotate: %s"
-                 % found.group(0))
+# A FREE-TEXT INPUT IS STILL FORBIDDEN, at any count. The composer's defect was
+# never its styling: it was a box that accepted a ruling it could not deliver,
+# on a page rewritten underneath it.
+for tag in ("input", "textarea", "select", "optgroup", "label"):
+    found = re.search(r"<%s\b[^>]*>" % tag, markup, re.I)
+    if found:
+        sys.exit("the board renders %s, which is either an input it cannot send "
+                 "or a spot the captain cannot annotate: %s"
+                 % (tag, found.group(0)))
 if re.search(r'contenteditable=["\']?(?!false)', markup, re.I):
     sys.exit("the board renders a contenteditable element")
+
+# The controls that ARE allowed, each identified by the class that says what it
+# is for. A button with no recognised role is an affordance nobody accounted
+# for, on a surface where an affordance that cannot deliver is the whole defect.
+ALLOWED = ('class="ansbtn"', 'class="qbtn"', 'id="fm-stale-reload"')
+for found in re.finditer(r"<button\b[^>]*>", markup, re.I):
+    if not any(mark in found.group(0) for mark in ALLOWED):
+        sys.exit("the board renders a button with no accounted-for role, so "
+                 "something on it promises an action nobody has checked: %s"
+                 % found.group(0))
 
 # The composer specifically, by every name it went under.
 for dead in ("queue-text", "queue-copy", "queue-clear", "queued rulings",
@@ -994,13 +1165,11 @@ for dead in ("queue-text", "queue-copy", "queue-clear", "queued rulings",
         sys.exit("the retired ruling composer is still on the board: %r" % dead)
 sys.exit(0)
 INPUTCHECK
-pass "the board renders no control of its own: nothing to type into, nothing that cannot be annotated"
+pass "the board has no free-text input of its own, and every control it renders has a stated role"
 
-# The other half, and the reason the first half is safe: the ask rows still
-# carry what an annotation needs to identify. An annotation arrives as the
-# anchor it was rooted at plus the text it was placed on, so stripping either
-# the per-item anchors or the visible refs would trade one broken input path
-# for another - silently, since the board would still look right.
+# The half that fails silently: a card whose identifying text has drifted inside
+# a control still LOOKS right, and a free-text ruling annotated on it arrives
+# saying nothing about which ask it meant.
 python3 - "$TMP_ROOT/links.html" "$TMP_ROOT/links-state.json" <<'ANCHORCHECK' \
   || fail "annotation anchors: see the reported ask"
 import json, re, sys
@@ -1009,65 +1178,191 @@ doc = json.load(open(sys.argv[2]))
 asks = doc["asks"]
 if not asks:
     sys.exit("no asks in the fixture, so this guard proves nothing")
+if '<button class="ansbtn"' not in html:
+    sys.exit("no answer controls rendered, so this guard proves nothing")
 
-options = re.findall(r'<span class="ans">([^<]*)</span>', html)
-if not options:
-    sys.exit("no answer options rendered, so this guard proves nothing")
-
-def where_it_lands(key):
-    """The ask's OWN card or row, not the whole page.
-
-    An annotation is rooted where it was placed, so what identifies it has to be
-    there. Checking the document would pass a board whose refs live only in the
-    index at the top - which is exactly what an annotation on the card never
-    sees.
-    """
+def card_of(key):
+    """The ask's OWN card, not the whole page. An annotation is rooted where it
+    was placed, so what identifies it has to be there - checking the document
+    would pass a board whose refs live only in a header the card never sees."""
     anchor = 'id="item-%s"' % key
     if anchor not in html:
         return None
     rest = html.split(anchor, 1)[1]
-    return re.split(r'id="item-|</section>|</table>', rest, maxsplit=1)[0]
+    return re.split(r'<div class="ask" id=|</section>', rest, maxsplit=1)[0]
+
+def outside_controls(fragment):
+    """The fragment with every native control, and its contents, removed - which
+    is exactly what Lavish's annotation layer can still see."""
+    return re.sub(r"<(button|summary|select|textarea)\b.*?</\1>", " ",
+                  fragment, flags=re.S | re.I)
 
 for key in asks:
     item = doc["items"][key]
-    landing = where_it_lands(key)
-    if landing is None:
+    card = card_of(key)
+    if card is None:
         sys.exit("ask %s has no per-item anchor, so an annotation on it cannot "
                  "say which ask it meant" % key)
+    annotatable = outside_controls(card)
     label = item["ref"] or item["id"]
-    if item["answers"]:
-        for answer in item["answers"]:
-            wanted = "%s: %s" % (label, answer)
-            if wanted not in landing:
-                sys.exit("ask %s renders an answer that does not name its own "
-                         "ask where the annotation lands: expected %r"
-                         % (key, wanted))
-    if item["ref"] and ('<span class="ref">%s</span>' % item["ref"]) not in landing:
-        sys.exit("ask %s renders no visible ref, so an annotation on it arrives "
-                 "unquotable" % key)
+    if ('<span class="ref">%s</span>' % label) not in annotatable:
+        sys.exit("ask %s renders no visible ref outside its controls, so a "
+                 "free-text ruling on it arrives unquotable" % key)
+    title = item["title"] or item["id"]
+    if title and title not in annotatable:
+        sys.exit("ask %s renders no annotatable title, so there is nothing left "
+                 "on the card to place a free-text ruling on" % key)
+    # And the machine-readable half the Queue button sends, which is what makes
+    # a clicked ruling name its ask without the captain retyping it - and what
+    # makes a second answer to the same ask REPLACE the first rather than queue
+    # beside it.
+    if ('data-ask-ref="%s"' % label) not in card:
+        sys.exit("ask %s carries no queue key, so a queued ruling could not name "
+                 "the ask it answers, or replace its own earlier answer" % key)
 sys.exit(0)
 ANCHORCHECK
-pass "every ask keeps its per-item anchor, its visible ref, and answers that name their own ask"
+pass "every ask keeps its anchor, an annotatable ref and title, and a queue key that names it"
 
-# And the board says where the input actually is, rather than leaving the
-# captain to infer it from the absence of a box.
+# And the board states BOTH paths, and states plainly what neither promises.
 python3 - "$TMP_ROOT/links.html" <<'SIGNPOSTCHECK' \
   || fail "signpost: see the reported gap"
 import sys
-html = open(sys.argv[1]).read()
-if "annotate" not in html.lower():
-    sys.exit("the board never names annotation as the way to rule")
-if "conversation panel" not in html.lower():
-    sys.exit("the board never names where an annotated ruling is sent from")
-if "no input path at all" not in html.lower():
+html = open(sys.argv[1]).read().lower()
+if "queue" not in html:
+    sys.exit("the board never names queueing as the way a clicked answer is sent")
+if "annotate" not in html:
+    sys.exit("the board never names annotation as the way to rule in your own words")
+if "conversation panel" not in html:
+    sys.exit("the board never names where a queued or annotated ruling is sent from")
+if "no input path at all" not in html:
     sys.exit("the board does not say what it is when opened as a plain file, "
              "which is the one case where there is no input path")
-if "not saved anywhere" not in html.lower():
+if "not saved anywhere" not in html:
     sys.exit("the board does not warn that an unqueued annotation is lost on "
              "the next redraw, which is measured behaviour")
 sys.exit(0)
 SIGNPOSTCHECK
-pass "the board states its input path, and states plainly what it does not promise"
+pass "the board states both input paths, and states plainly what it does not promise"
+
+# THE FAILURE THIS SURFACE MUST NOT HAVE: an option that turns green over a
+# ruling that never left the page. Success, failure and "there is no API here"
+# are three outcomes, and collapsing any of them into the reassuring one is the
+# missing-alarm failure wearing a tick.
+python3 - "$TMP_ROOT/links.html" <<'HONESTY' || fail "queueing: see the reported path"
+import re, sys
+html = open(sys.argv[1]).read()
+script = re.findall(r"<script>(.*?)</script>", html, re.S)
+if not script:
+    sys.exit("the board carries no interaction script, so a clicked answer "
+             "cannot be queued at all")
+body = "\n".join(script)
+if "queuePrompt" not in body:
+    sys.exit("the board never calls the queue API, so a clicked answer goes nowhere")
+if "queueKey" not in body:
+    sys.exit("the board queues without a key, so changing your mind would send "
+             "two answers to one ask")
+if "typeof api" not in body:
+    sys.exit("the board calls the queue API without checking it exists, so a "
+             "copy hosted without it would throw instead of saying so")
+# Every place the queued class is applied has to be downstream of an observed
+# verdict. A single unguarded one is the green tick over a dropped ruling.
+for found in re.finditer(r'classList\.add\("queued"\)', body):
+    if 'verdict === "queued"' not in body[:found.start()][-900:]:
+        sys.exit("an answer is marked queued without checking that the queue "
+                 "call actually succeeded")
+for phrase in ("nothing was queued", "nothing was sent"):
+    if phrase not in body:
+        sys.exit("the board has no wording for a queue attempt that did not "
+                 "land, so a failure would look like a success: %r" % phrase)
+sys.exit(0)
+HONESTY
+pass "an answer reads as queued only when the queue call was observed to succeed"
+
+# --- 16c. recommender attribution, and the disagreement it must not hide ----
+#
+# An answer form may end with a `[rec: ...]` marker naming who recommends it.
+# The captain is being asked precisely BECAUSE two readings exist, so a fold
+# that picked a winner - or that kept only the first marker, or dropped the
+# unfamiliar one - would delete the reason the question reached the board. That
+# is the same silent-masking failure as guard 2, wearing a recommender's name.
+#
+# Pinned here: every marker survives the fold verbatim, more than one per ask
+# survives together, the marker leaves the option's own text so the captain
+# reads a choice rather than a footnote, and nothing on the card pre-picks a
+# recommended option.
+
+HOMEREC=$(new_home)
+FM_HOME=$HOMEREC "$BRIDGE" ask -q --id rec-split --project orca \
+  --title "two readings, and the captain is the tiebreak" \
+  --answer "A: serialize behind the holder write [rec: fm]" \
+  --answer "B: let the loser retry with backoff [rec: worker]" \
+  --answer "C: leave it" >/dev/null
+FM_HOME=$HOMEREC "$BRIDGE" ask -q --id rec-agree --project orca \
+  --title "one reading, agreed" \
+  --answer "A: keep it on the watcher poll [rec: worker+fm]" \
+  --answer "B: give it its own timer" >/dev/null
+FM_HOME=$HOMEREC "$BRIDGE" ask -q --id rec-strange --project orca \
+  --title "a recommender the fold has never heard of" \
+  --answer "A: do the thing (rec: secondmate)" \
+  --answer "B: do not" >/dev/null
+FM_HOME=$HOMEREC "$RENDER" --html > "$TMP_ROOT/rec.html"
+FM_HOME=$HOMEREC "$RENDER" --state > "$TMP_ROOT/rec-state.json"
+
+python3 - "$TMP_ROOT/rec.html" "$TMP_ROOT/rec-state.json" <<'RECCHECK' \
+  || fail "recommender: see the reported option"
+import json, re, sys
+html = open(sys.argv[1]).read()
+doc = json.load(open(sys.argv[2]))
+items = doc["items"]
+
+def recs(key):
+    return [(f["label"], f["rec"], f["body"], f["text"])
+            for f in items[key]["answer_forms"]]
+
+# 1. THE DISAGREEMENT SURVIVES. Two options, two different recommenders, both
+#    kept - no winner, no first-one-wins, no collapse to a single field.
+split = dict((label, rec) for label, rec, _, _ in recs("rec-split"))
+if split != {"A": "fm", "B": "worker", "C": ""}:
+    sys.exit("a split recommendation did not survive the fold intact: %r" % split)
+
+# 2. A JOINT RECOMMENDATION IS ONE TOKEN, not two halves the fold invented.
+agree = dict((label, rec) for label, rec, _, _ in recs("rec-agree"))
+if agree.get("A") != "worker+fm":
+    sys.exit("a joint recommendation was not preserved verbatim: %r" % agree)
+
+# 3. AN UNFAMILIAR RECOMMENDER IS PRESERVED, NOT DEFAULTED AND NOT DROPPED -
+#    this fold never maps an unrecognized value into a known bucket.
+strange = dict((label, rec) for label, rec, _, _ in recs("rec-strange"))
+if strange.get("A") != "secondmate":
+    sys.exit("an unfamiliar recommender was not preserved verbatim: %r" % strange)
+
+# 4. THE MARKER LEAVES THE OPTION'S OWN TEXT. The captain clicks a choice; the
+#    attribution is a chip beside it, never part of what the choice says.
+for key in ("rec-split", "rec-agree", "rec-strange"):
+    for label, rec, body, text in recs(key):
+        if "rec:" in body.lower() or "rec:" in text.lower():
+            sys.exit("ask %s option %s still carries its recommender marker in "
+                     "the option text: %r" % (key, label, text))
+
+# 5. THE BOARD SHOWS BOTH. A card where only one side of a disagreement is
+#    visible is the collapse happening in CSS instead of in the fold.
+card = html.split('id="item-rec-split"', 1)
+if len(card) != 2:
+    sys.exit("the split-recommendation ask never reached the board")
+card = re.split(r'<div class="ask" id=|</section>', card[1], maxsplit=1)[0]
+chips = re.findall(r'<span class="rectag">([^<]*)</span>', card)
+if chips != ["rec: fm", "rec: worker"]:
+    sys.exit("the board does not show both recommenders on the one card: %r" % chips)
+
+# 6. NOTHING PRE-PICKS A RECOMMENDED OPTION. A recommendation is information;
+#    a pre-selected option is a ruling the captain did not make.
+for found in re.finditer(r'<button class="([^"]*ansbtn[^"]*)"', card):
+    if "selected" in found.group(1) or "queued" in found.group(1):
+        sys.exit("the board pre-picks a recommended option, which queues a "
+                 "ruling nobody made: %s" % found.group(1))
+sys.exit(0)
+RECCHECK
+pass "every recommender survives the fold verbatim, and a disagreement reaches the card as both"
 
 # --- 17. ledger text cannot break out of the embedded state document -------
 #
@@ -1383,15 +1678,26 @@ sys.exit(0)
 RAIL
 pass "nothing on the board is out of flow, and no gutter is reserved for chrome that is gone"
 
-# The job the retired gutter counter did is still done by a count in the header
-# that reaches the asks index in one click - the one thing a bare number would
-# have lost, and the reason a count that does not follow the viewport is still
-# enough.
+# The job the retired gutter counter did is done by the header's counts line,
+# and the job the asks index did is done by the cards themselves being first on
+# the page. A count that does not follow the viewport is enough because there
+# is no longer anywhere to travel to.
 case "$(cat "$TMP_ROOT/links.html")" in
-  *'class="tally ask" href="#waiting"'*) : ;;
-  *) fail "layout: the header count no longer reaches the asks index" ;;
+  *'class="countline"'*) : ;;
+  *) fail "layout: the header no longer carries the counts line" ;;
 esac
-pass "the count reaches the index from the header, with no travelling chrome"
+pass "the counts line sits in the header, with no travelling chrome"
+
+# The stale bar is the one element added since, and it is the exact shape the
+# audits caught: a bar that announces something about the page. It is in normal
+# flow like everything else - the parse above would have failed otherwise - and
+# this pins that it exists at all, so a later hand at it starts from the rule
+# rather than rediscovering it.
+case "$(cat "$TMP_ROOT/links.html")" in
+  *'class="stalebar" id="fm-stale" hidden'*) : ;;
+  *) fail "layout: the freshness bar is missing, or no longer starts hidden" ;;
+esac
+pass "the freshness bar starts hidden and lives in normal flow like everything else"
 
 # --- 22. two axes: who owes it, and how it ended ---------------------------
 #
@@ -1457,24 +1763,31 @@ pass "state and outcome are recorded and reported as two independent facts"
 
 # MERGED WORK NEVER READS AS THROWN AWAY. This is the case the whole design
 # exists to make unrepresentable.
-FM_HOME=$HOME22 "$RENDER" --html > "$TMP_ROOT/axes.html"
+history_of "$HOME22" > "$TMP_ROOT/axes.html"
 python3 - "$TMP_ROOT/axes.html" <<'PY' || fail "axes: see the reported row"
 import re, sys
 html = open(sys.argv[1]).read()
-merged = re.search(r'<tr id="item-t-merged">.*?</tr>', html, re.S)
+
+def row(key):
+    anchor = '<div class="hitem" id="item-%s">' % key
+    if anchor not in html:
+        return None
+    rest = html.split(anchor, 1)[1]
+    return re.split(r'<div class="hitem"|<p class="grouplabel"|</section>', rest, maxsplit=1)[0]
+
+merged = row("t-merged")
 if merged is None:
-    sys.exit("the merged task has no row on the fleet strip")
-merged = merged.group(0)
+    sys.exit("the merged task appears on neither page")
 if "discarded" in merged:
     sys.exit("merged work reads as discarded: %s" % merged)
 for fragment in ("landed", "resolved"):
     if fragment not in merged:
         sys.exit("the merged row does not say %r, so a reader must guess: %s"
                  % (fragment, merged))
-gone = re.search(r'<tr id="item-t-gone">.*?</tr>', html, re.S).group(0)
+gone = row("t-gone")
 if "discarded" not in gone or "needs-captain" not in gone:
     sys.exit("the discarded row hides one of its two axes: %s" % gone)
-murky = re.search(r'<tr id="item-t-murky">.*?</tr>', html, re.S).group(0)
+murky = row("t-murky")
 if "unknown" not in murky:
     sys.exit("a cleanup that could not tell does not say so on the row: %s" % murky)
 sys.exit(0)
@@ -1558,19 +1871,19 @@ pass "an item nobody owes is not an ask even while the work is still live"
 FM_HOME=$HOME23 "$RENDER" --html > "$TMP_ROOT/discard-ask.html"
 askboard=$(cat "$TMP_ROOT/discard-ask.html")
 case "$askboard" in
-  *'<b>1</b>waiting on you'*) : ;;
+  *'<b class="you">1</b> waiting on you'*) : ;;
   *) fail "asks: the header count still counts work that ended" ;;
 esac
 # An override's provenance carries the accent; an ordinary note does not, so a
 # routine event never reads as a problem on a board where orange means one thing.
 FM_HOME=$HOME23 "$BRIDGE" note -q --id ev-plain --project orca \
   --title "a routine landed change" --note "picked up the pin bump too" >/dev/null
-FM_HOME=$HOME23 "$RENDER" --html > "$TMP_ROOT/accent.html"
+history_of "$HOME23" > "$TMP_ROOT/accent.html"
 python3 - "$TMP_ROOT/accent.html" <<'ACCENT' || fail "accent: see the reported note"
 import re, sys
 html = open(sys.argv[1]).read()
 seen_plain = False
-for match in re.finditer(r'<div class="why([^"]*)">([^<]*)</div>', html):
+for match in re.finditer(r'<span class="why([^"]*)">([^<]*)</span>', html):
     accented = "override" in match.group(1)
     provenance = "checks skipped" in match.group(2)
     if accented and not provenance:
@@ -1583,24 +1896,29 @@ if not seen_plain:
 sys.exit(0)
 ACCENT
 pass "only override provenance carries the alarm accent; an ordinary note reads as ordinary"
-python3 - "$TMP_ROOT/discard-ask.html" <<'PY' || fail "asks: see the reported row"
+python3 - "$TMP_ROOT/accent.html" "$TMP_ROOT/discard-ask.html" <<'PY' \
+  || fail "asks: see the reported row"
 import re, sys
-html = open(sys.argv[1]).read()
-row = re.search(r'<tr id="item-task-pr">.*?</tr>', html, re.S)
-if row is None:
-    sys.exit("the task vanished from the board instead of staying visible")
-row = row.group(0)
+history = open(sys.argv[1]).read()
+board = open(sys.argv[2]).read()
+
+anchor = '<div class="hitem" id="item-task-pr">'
+if anchor not in history:
+    sys.exit("the task vanished from both pages instead of staying visible")
+row = re.split(r'<div class="hitem"|<p class="grouplabel"|</section>',
+               history.split(anchor, 1)[1], maxsplit=1)[0]
 if "discarded" not in row:
     sys.exit("the row does not show how the work ended: %s" % row)
 if "needs-captain" not in row:
     sys.exit("the row hides the disposition it had earned: %s" % row)
 if "branch was a dead end" not in row:
     sys.exit("the row does not carry the reason it was discarded: %s" % row)
-if "button class=\"ans\"" in row:
+if 'class="ansbtn"' in row:
     sys.exit("the row still offers a ruling on work that ended: %s" % row)
-index = re.search(r'<section id="waiting">.*?</section>', html, re.S).group(0)
-if "item-task-pr" in index:
-    sys.exit("work that ended is still listed in the asks index")
+# And it is nowhere on the ACTION surface. Work that ended is not a decision,
+# so it must not cost a line above the ones that are.
+if "item-task-pr" in board:
+    sys.exit("work that ended is still on the board the captain acts from")
 sys.exit(0)
 PY
 pass "a row that ended stays visible with both axes and its reason, and offers no ruling"
@@ -1682,7 +2000,7 @@ while [ "$i" -le 9 ]; do
     --state fm-handling --outcome discarded --ts "2026-07-31T10:0$i:00Z" >/dev/null
   i=$((i + 1))
 done
-capped=$(FM_HOME=$HOME25 "$RENDER" --html)
+capped=$(history_of "$HOME25")
 shown=$(printf '%s' "$capped" | grep -c 'class="chip discarded"' || true)
 [ "$shown" = 6 ] || fail "closed cap: expected 6 discarded rows shown, got $shown"
 case "$capped" in
@@ -1858,9 +2176,11 @@ if doc["summary"]["needs-captain"] != 4:
 ' || fail "tallies: see the reported count"
 pass "both axes count every item, and the ask count stands apart from them"
 
-FM_HOME=$HOME27 "$RENDER" --html > "$TMP_ROOT/tallies.html"
+history_of "$HOME27" > "$TMP_ROOT/tallies.html"
 tallyboard=$(cat "$TMP_ROOT/tallies.html")
-case "$tallyboard" in
+# The ask count stays on the BOARD, where it is acted on; the two axis tallies
+# are on history, where they are consulted.
+case "$(board_of "$HOME27")" in
   *"waiting on you"*) : ;;
   *) fail "tallies: the board does not label the ask count" ;;
 esac
@@ -1885,7 +2205,7 @@ FM_HOME=$HOME28 "$BRIDGE" ask -q --id d-fine --project orca --title "still open"
   --answer A >/dev/null
 
 FM_HOME=$HOME28 "$BRIDGE" lint > "$TMP_ROOT/pointer-lint.txt"
-FM_HOME=$HOME28 "$RENDER" --html > "$TMP_ROOT/pointer-board.html"
+history_of "$HOME28" > "$TMP_ROOT/pointer-board.html"
 python3 - "$TMP_ROOT/pointer-lint.txt" "$TMP_ROOT/pointer-board.html" <<'POINTER' || fail "pointer: see the report"
 import sys
 lint = open(sys.argv[1]).read()
@@ -1945,7 +2265,7 @@ def rendered_count(html, which):
     if body < 0:
         sys.exit("the %s board has no body at all" % which)
     seen = [(match.start(), match.group(1))
-            for match in re.finditer(r"<b>(\d+)</b>waiting on you", html)]
+            for match in re.finditer(r'<b class="you">(\d+)</b> waiting on you', html)]
     if not seen:
         sys.exit("the %s board renders no open-ask count at all, so the count "
                  "has nowhere left to live that survives a redraw" % which)
@@ -2013,5 +2333,430 @@ if not re.search(r"re-propagat", record):
 sys.exit(0)
 TABDOC
 pass "the documentation states the title is propagated at load, and promises no freshness past it"
+
+# --- 29b. between the two pages there is no gap -----------------------------
+#
+# The v2 split is the exact shape of a losing move: one page renders a subset,
+# the other renders "the rest", and "the rest" gets written as a LIST of closed
+# zones rather than as the complement. Anything that is in neither list then
+# appears on neither page - and unlike a fold that drops a line, nothing counts
+# it, so the surface looks complete while an item has silently left it.
+#
+# The fixture is the shape that actually falls through: a decision marked
+# resolved on the state axis that nothing has yet observed to end on the outcome
+# axis. It is not an ask, so the board excludes it; it is not closed, so a
+# closed-zone list excludes it too.
+#
+# AND THE OTHER DIRECTION, WHICH THIS GUARD ONCE MISSED. An event routed to a
+# reader is on that reader's queue and therefore an ask card on the board, while
+# still sitting in the events zone history renders. The first version of this
+# fixture had no routed event, so the guard reported pass over a live double
+# render; both routings are fixtured here now, because a partition guard whose
+# fixture never contains the overlapping case proves only that the fold has one.
+
+HOME29B=$(new_home)
+FM_HOME=$HOME29B "$BRIDGE" ask -q --id gap-ask --project orca \
+  --title "a live ask, so the board has something too" --answer "A: yes" >/dev/null
+FM_HOME=$HOME29B "$BRIDGE" append -q id=gap-resolved kind=decision project=orca \
+  state=resolved title="resolved on one axis, unended on the other" >/dev/null
+FM_HOME=$HOME29B "$BRIDGE" append -q id=gap-fm kind=decision project=orca \
+  state=fm-handling title="firstmate has it, so it is not an ask" >/dev/null
+FM_HOME=$HOME29B "$BRIDGE" append -q id=gap-crit kind=critical project=fleet \
+  state=fm-handling title="an open critical firstmate is already handling" >/dev/null
+FM_HOME=$HOME29B "$BRIDGE" task -q --id gap-task --project orca --phase validating >/dev/null
+FM_HOME=$HOME29B "$BRIDGE" ask -q --id gap-co --project machine \
+  --title "routed away" --answer "A: yes" --to cocaptain >/dev/null
+# An event on each reader's queue: kind=event puts it in the events zone, the
+# routing puts it on a queue, and only one of the two pages may render it.
+FM_HOME=$HOME29B "$BRIDGE" note -q --id gap-ev-cap --project orca \
+  --title "an event routed to the captain, so it is an ask too" --to captain >/dev/null
+FM_HOME=$HOME29B "$BRIDGE" note -q --id gap-ev-co --project machine \
+  --title "an event routed to the co-captain" --to cocaptain >/dev/null
+# And an unrouted one, so the events section is never empty and the guard cannot
+# pass by filtering the whole zone away.
+FM_HOME=$HOME29B "$BRIDGE" note -q --id gap-ev-plain --project orca \
+  --title "an event nobody owes, which belongs to history alone" >/dev/null
+
+FM_HOME=$HOME29B "$RENDER" --state > "$TMP_ROOT/gap-state.json"
+board_of "$HOME29B" > "$TMP_ROOT/gap-board.html"
+history_of "$HOME29B" > "$TMP_ROOT/gap-history.html"
+
+python3 - "$TMP_ROOT/gap-state.json" "$TMP_ROOT/gap-board.html" \
+         "$TMP_ROOT/gap-history.html" <<'GAP' || fail "pages: see the reported item"
+import json, sys
+doc = json.load(open(sys.argv[1]))
+board = open(sys.argv[2]).read()
+history = open(sys.argv[3]).read()
+
+BOARD_KINDS = ("critical", "decision", "event", "task")
+missing, doubled = [], []
+for key, item in doc["items"].items():
+    if item["kind"] not in BOARD_KINDS:
+        continue                      # substrate renders on neither page, by contract
+    anchor = 'id="item-%s"' % key
+    on_board, on_history = anchor in board, anchor in history
+    if not on_board and not on_history:
+        missing.append((key, item["state"], item["outcome"]))
+    if on_board and on_history:
+        doubled.append(key)
+
+if missing:
+    sys.exit("these items are on NEITHER page, so the record holds them and no "
+             "surface shows them: %s" % missing)
+# The split is a partition, not an overlap: an item triaged twice is the cost
+# the asks index was removed to avoid.
+if doubled:
+    sys.exit("these items render on BOTH pages, so the captain triages them "
+             "twice: %s" % doubled)
+
+# And the fixture has to have contained the awkward case, or it proved nothing.
+gap = doc["items"]["gap-resolved"]
+if gap["state"] != "resolved" or gap["ended"]:
+    sys.exit("the fixture item is no longer resolved-but-unended (%s/%s), so "
+             "this guard no longer covers the case it was built for"
+             % (gap["state"], gap["outcome"]))
+if "item-gap-ask" not in board:
+    sys.exit("the live ask is not on the board, so the fixture proves nothing")
+# The overlapping case has to be in the fixture too, or the partition test above
+# is only re-proving that the fold's zones happen not to intersect today.
+for key, queue in (("gap-ev-cap", "asks"), ("gap-ev-co", "cocaptain_asks")):
+    routed = doc["items"][key]
+    if routed["kind"] != "event" or key not in doc[queue]:
+        sys.exit("the fixture no longer holds an event on the %s queue (%s is "
+                 "%r), so this guard no longer covers an item that two sections "
+                 "both want" % (queue, key, routed["kind"]))
+    if key not in doc["zones"]["events"]:
+        sys.exit("%s is no longer in the events zone, so the two sections no "
+                 "longer overlap and this guard covers nothing" % key)
+if "item-gap-ev-plain" not in history:
+    sys.exit("the unrouted event is not on history, so the events section could "
+             "have passed this guard by rendering nothing at all")
+sys.exit(0)
+GAP
+pass "every board-kind item lands on exactly one of the two pages"
+
+# --- 29c. the board renders on the supervision loop, so it stays cheap ------
+#
+# bin/fm-watch.sh runs the tick from its own poll, so every second the render
+# spends is a second the watcher is not watching. The live gauges made that
+# concrete: the host probe alone cost 0.5s and took a render from 0.2s to 1.4s,
+# which was enough to push a one-second poll past a three-second guard in
+# tests/fm-watch-triage.test.sh - a captain-facing number bought with the
+# fleet's supervision responsiveness.
+#
+# The two probes that spawn a process are therefore cached in state/, and the
+# guard is about the SHAPE rather than a wall-clock number: a second render must
+# not re-run them. Timing an assertion would be flaky on a loaded machine and
+# would pin the machine rather than the design.
+#
+# THE PROBE HAS TO ANSWER FOR THE GUARD TO MEASURE ANYTHING. Both probes are
+# optional tools: quota-axi is installed on a captain's machine and absent from
+# a CI runner, powershell.exe exists only under WSL. A probe with no reading has
+# nothing to cache - correctly, since a cache entry is a reading - so on a
+# machine with neither tool no cache file appeared and this section measured the
+# machine rather than the design: it failed outright on CI, and the two
+# assertions below it, which only run once a cache is on disk, covered nothing
+# wherever the tool was missing. A stub on PATH makes the probe answer the same
+# way everywhere, so all three assertions run on every machine.
+
+STUB29C="$TMP_ROOT/stub-bin-29c"
+mkdir -p "$STUB29C"
+cat >"$STUB29C/quota-axi" <<'STUB'
+#!/usr/bin/env bash
+printf '%s\n' '{"providers":[{"provider":"stub-provider","status":"ok","windows":[{"label":"5h","percentRemaining":42,"pace":{"status":"steady"}}]}]}'
+STUB
+chmod +x "$STUB29C/quota-axi"
+PATH29C_SAVED=$PATH
+PATH="$STUB29C:$PATH"
+export PATH
+
+HOME29C=$(new_home)
+FM_HOME=$HOME29C "$BRIDGE" ask -q --id cheap --project orca \
+  --title "something to render" --answer "A: yes" >/dev/null
+
+board_of "$HOME29C" >/dev/null
+quota_cache="$HOME29C/state/.bridge-probe-quota"
+[ -f "$quota_cache" ] \
+  || fail "no probe reading was cached at all, so every render on the watcher's poll pays for a fresh subprocess"
+pass "the subprocess-backed gauges cache their readings beside the board"
+
+# The cached reading is REUSED, not re-taken. A sentinel value proves it: if the
+# second render re-probed, the sentinel would be gone.
+python3 - "$quota_cache" <<'SENTINEL' || fail "the cached reading could not be rewritten, so nothing below it was proven"
+import json, sys
+try:
+    record = json.load(open(sys.argv[1]))
+except (OSError, ValueError) as exc:
+    sys.exit("the probe cache is not a readable record: %s" % exc)
+record["value"] = {"providers": [{"name": "sentinel-provider",
+                                  "remaining_percent": 77, "pace": "", "status": ""}]}
+json.dump(record, open(sys.argv[1], "w"))
+SENTINEL
+case "$(board_of "$HOME29C")" in
+  *sentinel-provider*) : ;;
+  *) fail "the second render ignored the cached reading and probed again, so every render on the watcher's poll pays the subprocess cost" ;;
+esac
+pass "a second render reuses the cached reading instead of spawning the probe again"
+
+# AND A REUSED READING SAYS SO. A cached number presented as a live one is the
+# capacity lesson with a shorter half-life, so the gauge carries its age as soon
+# as the reading is not from this fold.
+python3 - "$quota_cache" <<'AGE' || fail "the cached reading could not be aged, so nothing below it was proven"
+import json, sys
+try:
+    record = json.load(open(sys.argv[1]))
+except (OSError, ValueError) as exc:
+    sys.exit("the probe cache is not a readable record: %s" % exc)
+record["at"] = int(record["at"]) - 120
+json.dump(record, open(sys.argv[1], "w"))
+AGE
+case "$(board_of "$HOME29C")" in
+  *"read 2m ago"*) : ;;
+  *) fail "a two-minute-old cached reading renders with no age, so it reads as current" ;;
+esac
+pass "a reused reading carries how old it is, so it never reads as taken just now"
+
+# The stub belongs to this section alone: every guard after it reads whatever
+# the machine actually has.
+PATH=$PATH29C_SAVED
+export PATH
+
+# --- 30. the renderer leaves nothing behind --------------------------------
+#
+# The fold is staged to a temp file so every mode runs the SAME bytes, and an
+# EXIT trap removes it. That trap read a variable the process could never have
+# set: its callers staged through `prog=$(program_path)`, and a command
+# substitution is a subshell, so the assignment died with it. The parent's
+# variable stayed empty, which cost twice over - the memo was never seen, so
+# every call staged a fresh ~90KB copy, and the trap found nothing to remove.
+# One home accumulated 6,972 files and 600 MiB across two days of supervision
+# ticks, growing every tick, and nothing on any surface said so.
+#
+# It is fixtured by DIRECTORY rather than by counting a pattern: a private
+# TMPDIR makes every file this renderer stages attributable, so a future
+# temporary under a different name is caught by the same assertion. And the
+# tick is run repeatedly, because the failure that matters is not one stray
+# file - it is per-invocation growth on a script the supervision cycle runs
+# every few minutes, forever.
+
+HOME30=$(new_home)
+FM_HOME=$HOME30 "$BRIDGE" ask -q --id leak-ask --project orca \
+  --title "does the renderer clean up after itself" --answer "A: it must" >/dev/null
+FM_HOME=$HOME30 "$BRIDGE" note -q --id leak-note --project orca \
+  --title "a second record so the fold has something to do" >/dev/null
+
+leak_tmp="$TMP_ROOT/tmpdir-30"
+
+# <label> <command...> - runs one renderer invocation with a private, EMPTY
+# TMPDIR and reports every file left in it afterwards.
+assert_leaves_nothing() {
+  local label=$1 left
+  shift
+  rm -rf "$leak_tmp"
+  mkdir -p "$leak_tmp"
+  TMPDIR="$leak_tmp" FM_HOME=$HOME30 "$@" >/dev/null 2>&1
+  left=$(find "$leak_tmp" -mindepth 1 | wc -l | tr -d '[:space:]')
+  [ "$left" = "0" ] || fail "$label left $left file(s) behind in its temp dir: $(find "$leak_tmp" -mindepth 1 -printf '%f ' 2>/dev/null)"
+}
+
+assert_leaves_nothing "--state" "$RENDER" --state
+assert_leaves_nothing "--state --id" "$RENDER" --state --id leak-ask
+assert_leaves_nothing "--lifecycle" "$RENDER" --lifecycle leak-ask
+assert_leaves_nothing "--html" "$RENDER" --html
+assert_leaves_nothing "--write" "$RENDER" --write
+pass "every renderer mode removes the fold program it staged"
+
+# Per-invocation growth is the actual defect. Five ticks over a ledger that
+# keeps changing, so every one of them genuinely renders.
+rm -rf "$leak_tmp"
+mkdir -p "$leak_tmp"
+for round in 1 2 3 4 5; do
+  FM_HOME=$HOME30 "$BRIDGE" note -q --id "leak-tick-$round" --project orca \
+    --title "tick $round changes the ledger so the tick cannot skip" >/dev/null
+  TMPDIR="$leak_tmp" FM_HOME=$HOME30 "$RENDER" --tick >/dev/null 2>&1
+done
+left=$(find "$leak_tmp" -mindepth 1 | wc -l | tr -d '[:space:]')
+[ "$left" = "0" ] \
+  || fail "five supervision ticks left $left temp file(s) behind - this is the growth that reached 600 MiB, not a stray file"
+pass "repeated supervision ticks leave no temp file behind at all"
+
+# --- 31. lane health is the watcher's verdict, reported as the watcher filed it
+#
+# Health is READ, never recomputed here. bin/fm-watch.sh files `.stale-since-<key>`
+# and `.wedge-escalations-<key>` markers and the board reads them, because two
+# readers of one fact drift. So the only question a guard can ask is whether the
+# board reports what the watcher actually said - including under the Orca key,
+# which fm_backend_target_of_meta resolves from `terminal` rather than `window`.
+# Reading `window` alone would look every Orca lane up under a key that matches
+# no marker, and a missed marker is indistinguishable from an absent one.
+#
+# THE POSITIVE DIRECTION IS A SECTION OF ITS OWN, and that is the point of it. A
+# renderer that answered `unknown` for every lane would satisfy any guard that
+# only asserts unknown is reachable - the false-alarm twin of the green-dot
+# failure section 32 exists to prevent. Splitting them means an unconditional
+# alarm fails HERE and an unconditional green fails THERE, and neither mutation
+# can be absorbed by the guard aimed at the other one.
+#
+# Both sections read the RENDERED board. A guard that grepped the renderer for
+# its unknown rule would pass a script that carried the line and ignored it.
+
+# The fixed clock in epoch seconds, so a fixture file's age is a number this
+# suite chose rather than whatever the wall clock said when it ran.
+FOLD_EPOCH=$(python3 -c "
+import calendar, time
+print(calendar.timegm(time.strptime('$FM_BRIDGE_NOW', '%Y-%m-%dT%H:%M:%SZ')))
+")
+
+# <file> <epoch> - stamp a fixture file at a chosen instant on that clock.
+stamp_at() {
+  python3 -c "
+import os, sys
+when = int(sys.argv[2])
+os.utime(sys.argv[1], (when, when))
+" "$1" "$2"
+}
+
+# <home> -> one `<lane> <health>` line per lane the board rendered.
+lane_health() {
+  board_of "$1" | python3 -c '
+import re, sys
+board = sys.stdin.read()
+for lane, health in re.findall(
+        r"<div class=\"lane\"><span class=\"nm\">(.*?)</span>.*?<span class=\"hd ([a-z]+)\"",
+        board, re.S):
+    print("%s %s" % (lane, health))
+'
+}
+
+# <health lines> <lane> <health> <what the wrong reading would mean>
+expect_health() {
+  printf '%s\n' "$1" | grep -Fqx "$2 $3" \
+    || fail "lane health: $4 - the board rendered [$(printf '%s' "$1" | tr '\n' '/')]"
+}
+
+HOME31=$(new_home)
+FM_HOME=$HOME31 "$BRIDGE" ask -q --id lane-ask --project orca \
+  --title "an open ask, so the board has a reason to be drawn" --answer "A: yes" >/dev/null
+STATE31="$HOME31/state"
+fm_write_meta "$STATE31/moving.meta" "project=orca" "window=firstmate:3" "backend=tmux"
+fm_write_meta "$STATE31/flagged.meta" "project=orca" "window=firstmate:4" "backend=tmux"
+fm_write_meta "$STATE31/orcalane.meta" "project=orca" "terminal=orca-term-1" "backend=orca"
+# The watcher's own verdicts, under the keys the watcher writes them under: the
+# window with its separators flattened, and the terminal for an Orca lane.
+: > "$STATE31/.stale-since-firstmate_4"
+: > "$STATE31/.wedge-escalations-orca-term-1"
+: > "$STATE31/.last-watcher-beat"
+stamp_at "$STATE31/.last-watcher-beat" "$((FOLD_EPOCH - 60))"
+
+health31=$(lane_health "$HOME31")
+expect_health "$health31" moving ok \
+  "a supervised lane with a resolving key and nothing filed against it did not read ok"
+pass "a supervised lane with nothing filed against it reads ok"
+expect_health "$health31" flagged warn \
+  "a lane the watcher filed a stale marker against did not read warn"
+pass "a warning the watcher filed is the health the board reports"
+expect_health "$health31" orcalane warn \
+  "an Orca lane's marker was not found, so the board reported a health it never read"
+pass "an Orca lane's marker is read under the terminal key the watcher files it under"
+
+# --- 32. lane health may never fall through to green ------------------------
+#
+# `if not live or key is None: health = "unknown"` has two arms and neither had
+# a guard behind it: a mutation sweep deleted each on its own and the whole suite
+# stayed green (docs/verification/bridge-board-v2.md, section 9b). A guard that
+# cannot fail is indistinguishable from a guard that passes, and this one reports
+# fleet health on the captain's only decision surface - a green dot over a lane
+# supervision has flagged as wedged, or over a lane whose markers nobody is
+# maintaining, is the missing-alarm failure this board exists to prevent.
+#
+# Each arm is fixtured on its own. A meta that names no backend target covers
+# `key is None`; a lapsed beacon and an absent one cover `not live`. A lane whose
+# key does resolve sits beside the keyless one throughout, so this guard cannot
+# be satisfied by a board that answers unknown to everything - that renderer
+# fails section 31 above, which is the other half of the same pair.
+
+HOME32=$(new_home)
+FM_HOME=$HOME32 "$BRIDGE" ask -q --id beat-ask --project orca \
+  --title "an open ask, so the board has a reason to be drawn" --answer "A: yes" >/dev/null
+STATE32="$HOME32/state"
+fm_write_meta "$STATE32/keyed.meta" "project=orca" "window=firstmate:9" "backend=tmux"
+# The shape that resolves to no key at all: a meta naming no backend target, so
+# every marker lookup misses and the watcher's verdict was never read.
+fm_write_meta "$STATE32/keyless.meta" "project=orca" "backend=tmux"
+: > "$STATE32/.last-watcher-beat"
+stamp_at "$STATE32/.last-watcher-beat" "$((FOLD_EPOCH - 60))"
+
+health32=$(lane_health "$HOME32")
+expect_health "$health32" keyless unknown \
+  "a lane whose meta names no backend target read green, so a verdict nobody took became good news"
+expect_health "$health32" keyed ok \
+  "the resolving lane beside it stopped reading ok, so this guard would be satisfied by a board that says unknown to everything"
+pass "a lane whose watcher key resolves to nothing reads unknown, and the lane beside it still reads ok"
+
+# `not live`, first shape: a beacon older than the renderer's max age means
+# nobody is maintaining the markers, so the absence of a warning stopped being
+# good news and every dot loses the green it was inheriting.
+stamp_at "$STATE32/.last-watcher-beat" "$((FOLD_EPOCH - 3600))"
+health32=$(lane_health "$HOME32")
+expect_health "$health32" keyed unknown \
+  "a lapsed supervision beacon left a lane green, inheriting a verdict nobody is standing behind"
+case "$(board_of "$HOME32")" in
+  *"Lane health is unread: supervision has not checked in for"*) : ;;
+  *) fail "lane health: every dot went unknown with nothing on the page saying which reading could not be taken" ;;
+esac
+pass "a lapsed supervision beacon turns every lane unknown, and the board names the reading it could not take"
+
+# `not live`, second shape: no beacon at all. Absent and lapsed are the same
+# verdict here - nothing is maintaining the markers either way.
+rm -f "$STATE32/.last-watcher-beat"
+health32=$(lane_health "$HOME32")
+expect_health "$health32" keyed unknown \
+  "with no supervision beacon at all a lane still read green"
+pass "no supervision beacon at all reads unknown too, never as the absence of bad news"
+
+# --- 33. both pages carry the freshness bar, because both run the poll ------
+#
+# The freshness poll is emitted by the shared script, so BOTH pages turn their
+# dot orange when they detect a newer fold. A page that changed the dot without
+# the bar beside it would signal a state it could neither explain nor let the
+# reader act on - the signal is the point, so the bar is what has to be shared.
+#
+# Section 21 above checks the board's bar and reads the board fixture only, so
+# the history page's copy could be deleted with the suite still green (recorded
+# in docs/verification/bridge-board-v2.md, section 9b). This asserts the property
+# on both pages at once rather than duplicating a board-shaped assertion, and it
+# is stated as the conditional it really is: a page that runs the poll must carry
+# the bar. The over-strict direction - a bar that starts visible on a page that
+# is current - fails section 21 first, which is where that assertion has lived
+# since the layout audits.
+
+HOME33=$(new_home)
+FM_HOME=$HOME33 "$BRIDGE" ask -q --id bar-ask --project orca \
+  --title "an open ask, so the board is not empty" --answer "A: yes" >/dev/null
+FM_HOME=$HOME33 "$BRIDGE" note -q --id bar-note --project orca \
+  --title "an event, so history is not empty either" >/dev/null
+board_of "$HOME33" > "$TMP_ROOT/bar-board.html"
+history_of "$HOME33" > "$TMP_ROOT/bar-history.html"
+
+python3 - "$TMP_ROOT/bar-board.html" "$TMP_ROOT/bar-history.html" <<'BAR' || fail "freshness: see the reported page"
+import sys
+
+for name, path in (("board", sys.argv[1]), ("history", sys.argv[2])):
+    page = open(path).read()
+    polls = 'name="fm-folded-at"' in page and 'id="fm-fresh-dot"' in page
+    if not polls:
+        sys.exit("the %s page no longer states the fold it was drawn from and no "
+                 "longer carries a freshness dot, so nothing on it is about "
+                 "freshness any more" % name)
+    if 'id="fm-stale"' not in page or 'id="fm-stale-reload"' not in page:
+        sys.exit("the %s page runs the freshness poll and carries no bar, so it "
+                 "can turn its dot orange with nothing beside it to explain the "
+                 "state or let the reader act on it" % name)
+    if 'class="stalebar" id="fm-stale" hidden' not in page:
+        sys.exit("the %s page's freshness bar does not start hidden, so a page "
+                 "that is current announces that it is stale" % name)
+sys.exit(0)
+BAR
+pass "both pages carry the freshness bar the poll turns on, and both start it hidden"
 
 echo "all bridge ledger and fold tests passed"
