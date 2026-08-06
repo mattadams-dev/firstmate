@@ -59,21 +59,26 @@ Three separate gaps, and only the first is the obvious one.
 A conflict that no test, lint rule, or repo invariant covers is never detected at all.
 A green `main` run means nothing in the suite disagreed, not that `main` is correct.
 
-**3. Nothing surfaces a red `main` to a human.**
+**3. Nothing in the tooling surfaces a red `main` to a human.**
 This is the load-bearing gap, and it is a mechanism fact rather than an opinion: no script under `bin/` and no skill queries the GitHub Actions runs API at all.
 The only merge-related poll, `bin/fm-pr-poll.sh`, emits exactly one `merged` line for a merged pull request and stays silent otherwise; the task then tears down.
-After a merge completes, nothing in this fleet looks at that project's CI again.
+So once a merge completed, nothing in this fleet looked at that project's CI again, and that is the condition the surfacing rule below exists to replace.
 
 ## Who actually notices, and how long that takes
 
-The exposure window is **unbounded**, and the first reader is likely to be the wrong person holding the wrong explanation.
+Left to the tooling, the exposure window was **unbounded**, and the first reader was likely to be the wrong person holding the wrong explanation.
 
 - **A human opens GitHub.** No bound on when.
 - **The next lane discovers it, and misattributes it.** Task worktrees branch from the current default branch, so a pull request opened after a bad merge inherits the breakage and its own CI goes red. The lane sees a red on its own pull request and reasonably reads it as its own fault. That costs a human decision, and it can send a worker chasing a defect it did not cause.
 
 This compounds with the known order-sensitive flake in the portable serial lane.
-A reader of a red check must now separate three possibilities rather than two: their own change, the flake, or a `main` that was already broken before they started.
+A reader of a red check must separate three possibilities rather than two: their own change, the flake, or a `main` that was already broken before they started.
 Nothing in the red itself tells them which.
+
+That unbounded window is what the surfacing rule below closes, and the bound is a property of the rule rather than a description of any particular moment.
+Wherever a runtime carries that rule and follows it, a red `main` is read within one review interval, because every review reads every cloned project's default branch.
+The distinction matters on this branch: the rule ships in this document, and a document that has landed is not yet a rule the runtime is carrying, so the bound holds from the point the rule is in effect and not before.
+Until then an interim hand-reading rule covers the window: every merge made on the standing word ends with one manual read of `main`'s run to a concluded result, recorded in that merge's ledger line.
 
 ## Revert procedure
 
