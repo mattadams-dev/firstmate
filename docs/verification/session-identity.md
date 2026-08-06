@@ -50,6 +50,11 @@ shell pid 138017  parent 3568128 (claude ...)
 Claude Code also keeps one directory per session under `~/.claude/session-env/`, named by the session id (484 present at probe time).
 That directory is a Claude Code internal and is not read by firstmate; it is recorded here only as independent confirmation that the session id is the durable per-session identifier.
 
+Because the variable is injected into every child, it is also inherited by processes that are not that session.
+Firstmate launches Codex, Kimi, and the other harnesses from inside a Claude tool call, so a non-Claude primary sees a `CLAUDE_CODE_SESSION_ID` naming a session in a different home entirely.
+`bin/fm-lock.sh` therefore trusts the environment source only when the harness it resolved is genuinely Claude Code, and records no session id otherwise.
+That is a provenance question about a variable, not an ownership decision, and an unresolvable answer records nothing and lands on the unchanged legacy basis.
+
 Two consequences follow, and both are load-bearing:
 
 - `bin/fm-lock.sh` runs as an ordinary tool call, so it reads the session id from `CLAUDE_CODE_SESSION_ID` in its own environment.
@@ -98,6 +103,7 @@ Weakening - the identity check admits something it must refuse:
 | W4 | `bin/fm-lock.sh` | acquire over a live holder naming another session | `test_lock_refuses_a_different_live_session` |
 | W5 | `bin/fm-claude-stop-autoarm.sh` | the identity refusal exits 0 without writing its epoch | `test_identity_refusal_is_recorded` |
 | W6 | `bin/fm-turnend-guard.sh` | drop `refused` from the verified failure episode | `test_recorded_refusal_reaches_the_bounded_escape` |
+| W7 | `bin/fm-lock.sh` | trust an inherited `CLAUDE_CODE_SESSION_ID` on any harness | `test_lock_ignores_an_inherited_session_id_on_another_harness` |
 
 Over-refusal - the identity check refuses something it must admit:
 

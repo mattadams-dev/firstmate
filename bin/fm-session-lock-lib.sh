@@ -156,6 +156,24 @@ EOF
   printf '%s\n' "$outermost"
 }
 
+# True when pid $1 is a verified harness AND that harness is Claude Code.
+#
+# This exists to decide the PROVENANCE of CLAUDE_CODE_SESSION_ID, never
+# ownership. Claude Code injects that variable into every child it spawns, and
+# firstmate launches other harnesses from inside a Claude tool call, so a Kimi or
+# Codex primary can inherit the launching CLAUDE session's id and record it as
+# its own. That record would be wrong, and a wrong-but-currently-unread record is
+# how a defect waits for a consumer. Gate the variable on the acquiring harness
+# actually being Claude, and an unresolvable answer simply records no session,
+# which lands on the unchanged legacy basis rather than on a guess.
+fm_harness_pid_is_claude() {  # <pid>
+  local pid=$1 comm args
+  comm=$(ps -o comm= -p "$pid" 2>/dev/null) || return 1
+  args=$(ps -o args= -p "$pid" 2>/dev/null)
+  fm_harness_process_matches "$comm" "$args" || return 1
+  [ "$FM_HARNESS_IS_CLAUDE" -eq 1 ]
+}
+
 # True if $1 is a live process that looks like a verified harness.
 fm_harness_pid_alive() {
   local pid=$1 comm args
