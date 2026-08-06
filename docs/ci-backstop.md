@@ -80,6 +80,10 @@ Wherever a runtime carries that rule and follows it, a red `main` is read within
 The condition is evaluable rather than temporal, so a reader can test whether it applies to them: check whether the runtime doing the reading carries an `AGENTS.md` that already contains the unconditional default-branch read.
 A document that has landed is not yet a rule a runtime is carrying, so merging this file does not by itself put the bound in effect for a runtime that started before it.
 
+The interval is one review, not one watcher heartbeat, and those differ by mode.
+`bin/fm-watch.sh` wakes firstmate on every heartbeat only in away mode; in always-on mode a no-change heartbeat is absorbed unless the cheap fleet-scan finds an unsurfaced captain-relevant status, and a red default branch produces no such status ([`architecture.md`](architecture.md) owns that wake classification).
+So an attached fleet whose crew statuses are all already surfaced can run a long stretch with no heartbeat review at all, and the bound is only as tight as the review cadence that mode actually produces.
+
 ## Revert procedure
 
 Every task pull request lands as a squash - `bin/fm-pr-merge.sh` defaults to `--squash` - so one bad merge is exactly one commit on `main`, and the revert is tractable.
