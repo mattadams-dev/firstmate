@@ -59,9 +59,16 @@ back at the cap the sweep prints the counts it did determine and, beside them, a
 second coverage line declaring coverage unknown and naming the cap:
 
 ```
-FORK_FRESHNESS_COVERAGE: owner=acme repos=200 forks=12 swept=12 behind=0 unknown=0 ignored=0
+FORK_FRESHNESS_COVERAGE: owner=acme repos=200 forks=12 swept=12 behind=0 undischarged=0 unknown=0 ignored=0
 FORK_FRESHNESS_COVERAGE: status=unknown reason=the repository list for acme returned 200 entries, the whole --limit 200 cap, so any fork past it was never read
 ```
+
+The fields are three different questions and none of them stands in for another.
+`unknown=` counts readings that could not be **taken**. `behind=` counts forks
+the forge reported behind. `undischarged=` counts how many of those ended with no
+sync task the backlog confirms open - work this sweep owed and did not deliver,
+on a forge reading that succeeded. That last count is what withholds the
+completion stamp; see [When it runs](#when-it-runs).
 
 That is unknown coverage, not a clean sweep: the exit code carries it, the
 completion stamp is withheld, and the sweep stays due. `FM_FORK_SWEEP_LIST_LIMIT`
@@ -226,6 +233,13 @@ task the backlog no longer has does not: there is no previous body to archive,
 so that copy is simply lost. The reading and the stderr line say the archive
 failed either way rather than promising a record that may not exist.
 
+When the reopen itself lands but that body refresh does not, the task is open and
+owed but still describes the **previous** episode's reading. That is a stale
+instruction, not a missing task, so it is reported as its own step: `NOTE_MANUAL:`
+on stderr naming the reading the body should have carried, and `note` in the
+`MANUAL=` set on the reading. Refresh the body by hand so nobody picks the task
+up and works to a superseded number.
+
 The sweep does not launch the worker by default. The sync pushes a merge commit
 straight to a default branch, which is not something this fleet does without a
 person saying go; the task waits, tracked, until someone does. A home that wants
@@ -270,12 +284,30 @@ cannot be bypassed:
   mutating sweep. It is bounded by `FM_FORK_SWEEP_BOOTSTRAP_TIMEOUT` (default 45
   seconds), and a timeout is reported as unknown coverage rather than silence.
 
-The cadence stamps live at `state/.fork-freshness-last` (last fully determined
-sweep) and `state/.fork-freshness-attempt` (last attempt). The completion stamp
-is written only when coverage was fully determined, so an outage cannot buy a
-week of silence: an incomplete sweep stays due, held back
-only by a short retry floor (`FM_FORK_SWEEP_RETRY_MINUTES`, default 60) so a
-persistently broken credential reports once an hour rather than once a session.
+The cadence stamps live at `state/.fork-freshness-last` (last complete sweep) and
+`state/.fork-freshness-attempt` (last attempt). The completion stamp asserts two
+things, and both have to hold:
+
+- **coverage was fully determined** - every candidate produced a reading, and the
+  enumeration was not truncated;
+- **everything this sweep owed was discharged** - every fork read as behind ended
+  with a sync task the backlog confirms open (`undischarged=0`).
+
+So neither an outage nor a failed materialisation can buy a week of silence: an
+incomplete sweep stays due, held back only by a short retry floor
+(`FM_FORK_SWEEP_RETRY_MINUTES`, default 60) so a persistently broken credential
+reports once an hour rather than once a session.
+
+The second half is the one that is easy to lose. A sweep that reads a fork behind
+and then cannot make its task exist - no `tasks-axi` to ask, a post-state it
+could not read back, a remediation the backlog confirms did not take, or
+instructions it could not write - exits 3 like any other behind sweep, having
+tracked nothing. Stamping that as complete would go quiet for a full cadence over
+a fork nobody is carrying, which is a false success, and this fleet ranks a false
+success below a false failure because nothing prompts a look at it. A behind fork
+whose task **is** confirmed open is a different case entirely: that sweep is
+complete, it stamps, and the next one runs on the normal cadence, because the
+open task is what carries the work forward.
 
 ## Local configuration
 

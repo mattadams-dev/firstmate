@@ -550,7 +550,7 @@ test_private_and_uncloned_forks_are_covered() {
   assert_contains "$out" "acme/hidden status=" "a private fork was not swept"
   assert_contains "$out" "acme/orphan status=behind behind=28" \
     "a fork with no local clone was not swept - the exact silent omission this replaces"
-  assert_contains "$out" "repos=4 forks=3 swept=3 behind=1 unknown=0 ignored=0" \
+  assert_contains "$out" "repos=4 forks=3 swept=3 behind=1 undischarged=0 unknown=0 ignored=0" \
     "the coverage line does not account for every candidate"
   pass "fm-fork-freshness: private forks and forks with no local clone are covered"
 }
@@ -1305,6 +1305,35 @@ test_backlog_failure_is_reported_not_swallowed() {
   pass "fm-fork-freshness: a backlog write that fails is reported, not swallowed"
 }
 
+test_a_stale_task_body_is_reported_not_just_marked() {
+  local dir out stderr rc=0
+  dir=$(new_case)
+  one_fork "$dir" behind 0 21
+  run_sweep "$dir" sweep --owner acme >/dev/null || true
+  close_task "$dir" fm-sync-acme-widget
+  compare_fixture "$dir" upstream/widget main acme main behind 0 30 >/dev/null
+
+  # The reopen lands but the body refresh does not, so the task is genuinely
+  # open and owed while still describing the episode that closed. Every other
+  # step that needs a hand says so on stderr by construction; a marker whose
+  # meaning appears nowhere is one an operator cannot act on.
+  out=$(FM_TEST_TASKS_UPDATE_RC=1 run_sweep "$dir" sweep --owner acme) || rc=$?
+  stderr=$(cat "$dir/stderr.log")
+
+  expect_code 3 "$rc" "the fork is behind whatever its task body says"
+  assert_task_state "$dir" fm-sync-acme-widget queued \
+    "this case is only meaningful while the reopen itself succeeded"
+  assert_contains "$out" "action=task fm-sync-acme-widget queued" \
+    "an open task whose body is merely stale is still queued work"
+  assert_contains "$out" "MANUAL=note" \
+    "the reading dropped the marker for a body that still holds the previous reading"
+  assert_contains "$stderr" "NOTE_MANUAL:" \
+    "a stale task body was marked on the reading with no operator line to act on"
+  assert_contains "$stderr" "behind 30" \
+    "the operator line dropped the reading the body should have been refreshed to"
+  pass "fm-fork-freshness: a task body left holding the previous episode is reported, not just marked"
+}
+
 # --- cadence ----------------------------------------------------------------
 
 test_if_due_is_silent_inside_the_interval() {
@@ -1350,6 +1379,110 @@ test_incomplete_sweep_does_not_bank_a_week_of_silence() {
   [ "$last" != "$now" ] ||
     fail "a sweep that determined nothing recorded itself as complete, buying a week of silence"
   pass "fm-fork-freshness: an incomplete sweep stays due instead of banking silence"
+}
+
+test_a_behind_fork_nothing_tracks_does_not_bank_a_week_of_silence() {
+  local dir out now last rc=0
+  dir=$(new_case)
+  one_fork "$dir" behind 0 3
+  now=1800000000
+  printf '%s\n' "$((now - 8 * 86400))" > "$dir/home/state/.fork-freshness-last"
+
+  # The other half of the stamp's meaning, and the silent one. Coverage here is
+  # fully determined - the forge answered, the fork is behind - but there is no
+  # task system to make the sync exist in, so the sweep creates nothing and this
+  # fork ends the run with nothing carrying it. Stamping that as a completed
+  # sweep would go quiet for the whole cadence over an untracked behind fork,
+  # which is a false success and therefore worse than the failure it hides.
+  rm -f "$dir/bin/tasks-axi"
+  out=$(FM_FORK_FRESHNESS_NOW=$now run_sweep "$dir" sweep --if-due --owner acme) || rc=$?
+
+  expect_code 3 "$rc" "the fork is behind whatever the backlog could say"
+  assert_contains "$out" "undischarged=1" \
+    "the coverage line did not account for a behind fork the sweep left untracked"
+  assert_task_state "$dir" fm-sync-acme-widget - \
+    "this case is only meaningful while no task was created"
+  last=$(cat "$dir/home/state/.fork-freshness-last")
+  [ "$last" != "$now" ] ||
+    fail "a sweep that left a behind fork untracked recorded itself as complete, buying a week of silence"
+
+  # And it comes back behind the retry floor rather than the weekly cadence:
+  # the next due check, once the floor has passed, takes the reading again.
+  out=$(FM_FORK_FRESHNESS_NOW=$((now + 3601)) run_sweep "$dir" sweep --if-due --owner acme) ||
+    true
+  assert_contains "$out" "status=behind" \
+    "the sweep went quiet for the week instead of staying due behind its retry floor"
+  pass "fm-fork-freshness: a behind fork nothing tracks leaves the sweep due"
+}
+
+test_an_unconfirmable_task_does_not_bank_a_week_of_silence() {
+  local dir now last rc=0
+  dir=$(new_case)
+  one_fork "$dir" behind 0 21
+  now=1800000000
+  printf '%s\n' "$((now - 8 * 86400))" > "$dir/home/state/.fork-freshness-last"
+
+  # The post-attempt case: the sweep tried, and then could not read back whether
+  # it worked. It refuses to call that reading queued, so it may not turn around
+  # and bank it as a completed sweep either - the stamp would be asserting
+  # exactly the success the reading declined to assert.
+  FM_TEST_TASKS_SHOW_FAIL_FROM=2 FM_FORK_FRESHNESS_NOW=$now \
+    run_sweep "$dir" sweep --if-due --owner acme >/dev/null || rc=$?
+
+  expect_code 3 "$rc" "the fork is behind however its task ended"
+  last=$(cat "$dir/home/state/.fork-freshness-last")
+  [ "$last" != "$now" ] ||
+    fail "a sweep that could not confirm its own task recorded itself as complete"
+  pass "fm-fork-freshness: a task that could not be confirmed leaves the sweep due"
+}
+
+test_a_task_confirmed_not_open_does_not_bank_a_week_of_silence() {
+  local dir out now last rc=0
+  dir=$(new_case)
+  one_fork "$dir" behind 0 3
+  now=1800000000
+  printf '%s\n' "$((now - 8 * 86400))" > "$dir/home/state/.fork-freshness-last"
+
+  # The third way a behind fork ends untracked: the post-state WAS read and it
+  # says the task is not there. That is a determinate failure to discharge, and
+  # it withholds the stamp for the same reason the two unreadable cases do.
+  out=$(FM_TEST_TASKS_RC=1 FM_FORK_FRESHNESS_NOW=$now \
+    run_sweep "$dir" sweep --if-due --owner acme) || rc=$?
+
+  expect_code 3 "$rc" "the fork is behind however its task ended"
+  assert_contains "$out" "NOT queued" \
+    "this case is only meaningful while the reading refuses to say queued"
+  assert_contains "$out" "undischarged=1" \
+    "a confirmed-not-open task left the coverage line reading like a discharged sweep"
+  last=$(cat "$dir/home/state/.fork-freshness-last")
+  [ "$last" != "$now" ] ||
+    fail "a sweep whose task was confirmed absent recorded itself as complete"
+  pass "fm-fork-freshness: a task confirmed not open leaves the sweep due"
+}
+
+test_a_behind_fork_with_its_task_open_banks_a_complete_sweep() {
+  local dir out now rc=0
+  dir=$(new_case)
+  one_fork "$dir" behind 0 3
+  now=1800000000
+  printf '%s\n' "$((now - 8 * 86400))" > "$dir/home/state/.fork-freshness-last"
+
+  # The anti-cry-wolf direction of the same rule, and the reason the stamp is
+  # keyed on discharge rather than on `behind > 0`: a fork that is behind with a
+  # confirmed-open task carrying it IS a complete sweep. Withholding the stamp
+  # here would make the sweep re-run every hour for as long as any fork is
+  # behind, which is a different way of stopping the instrument distinguishing
+  # anything.
+  out=$(FM_FORK_FRESHNESS_NOW=$now run_sweep "$dir" sweep --if-due --owner acme) || rc=$?
+
+  expect_code 3 "$rc" "a fork behind its upstream must not exit clean"
+  assert_contains "$out" "undischarged=0" \
+    "a behind fork whose task was created and confirmed open was counted as undischarged"
+  assert_task_state "$dir" fm-sync-acme-widget queued \
+    "this case is only meaningful while the task really is open"
+  assert_grep "$now" "$dir/home/state/.fork-freshness-last" \
+    "a behind fork whose sync task is open and tracked is a complete sweep and must stamp"
+  pass "fm-fork-freshness: a behind fork whose task is confirmed open stamps a complete sweep"
 }
 
 # --- the single-repository reading used before a fork PR ---------------------
@@ -1590,9 +1723,14 @@ test_sync_brief_never_carries_a_remote_credential
 test_wake_failure_is_reported_not_swallowed
 test_bridge_failure_is_reported_not_swallowed
 test_backlog_failure_is_reported_not_swallowed
+test_a_stale_task_body_is_reported_not_just_marked
 test_if_due_is_silent_inside_the_interval
 test_if_due_runs_once_the_interval_elapsed
 test_incomplete_sweep_does_not_bank_a_week_of_silence
+test_a_behind_fork_nothing_tracks_does_not_bank_a_week_of_silence
+test_an_unconfirmable_task_does_not_bank_a_week_of_silence
+test_a_task_confirmed_not_open_does_not_bank_a_week_of_silence
+test_a_behind_fork_with_its_task_open_banks_a_complete_sweep
 test_check_is_silent_for_a_repository_that_is_not_a_fork
 test_check_reports_a_fork_that_is_behind
 test_check_cannot_read_reads_unknown

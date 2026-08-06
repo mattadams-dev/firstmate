@@ -83,6 +83,13 @@ as taken: the third review round below narrowed when that line may be printed
 (only over a task the backlog still reports open) and made it name its evidence,
 so a run repeated today prints `already queued (the backlog reports it queued)`.
 
+The coverage line above is likewise recorded as taken rather than retrofitted:
+the fifth round below added an `undischarged=` field between `behind=` and
+`unknown=`, so a run repeated today carries one more field than the capture
+shows. The field is not back-filled here, because the tree that produced this
+capture never took that measurement - it printed `queued` without confirming the
+post-state at all, which is the round-3 finding.
+
 ## Mutation evidence
 
 Each mutant was applied to `bin/fm-fork-freshness.sh`, then every test in
@@ -101,9 +108,9 @@ function names.
 
 The unmutated suite breaks nothing, per-test and as a whole. The run above was
 taken at 28 tests, before the id-collision regression and the review rounds below
-were added; the suite now runs 54 tests and reports 54 ok, 0 not ok
+were added; the suite now runs 59 tests and reports 59 ok, 0 not ok
 (`bash tests/fm-fork-freshness.test.sh | grep -c '^ok -'` against the count of
-invocations in the file's trailing block - both 54, which is the point: a suite
+invocations in the file's trailing block - both 59, which is the point: a suite
 that halts early would show fewer ok lines than invocations).
 
 What the table establishes:
@@ -155,30 +162,46 @@ bound the PR-ready path waits for it with the merge watch already armed.
 
 ## Second review round: the materialisation window and the unobserved artifacts
 
-The next round found the guard problem the bounded kills above made reachable:
-`data/<id>/brief.md` is both the task's instructions and its idempotency guard,
-and it used to be the FIRST artifact written, so a run cut short between it and
-the backlog, wake and Bridge steps left a permanent guard over a task nobody had
-been told about. The three notifications were also the quiet kind: only the
-backlog step reported its own failure, so `queued` could assert four artifacts
-while one of them was never observed.
+**Superseded in part by the fourth round below.** This round found the guard
+problem the bounded kills above made reachable: `data/<id>/brief.md` was both the
+task's instructions and its idempotency guard, and it was the FIRST artifact
+written, so a run cut short between it and the backlog, wake and Bridge steps
+left a permanent guard over a task nobody had been told about. This round's
+answer was to move the brief LAST. The fourth round removed the guard instead -
+the brief guards nothing now, it is placed FIRST, and the task is the last
+artifact - so the ordering row below is superseded and the paragraph after the
+table has been rewritten against the test as it now stands.
+
+The other half of this round stands unchanged: the three notifications were the
+quiet kind, only the backlog step reported its own failure, so `queued` could
+assert four artifacts while one of them was never observed.
 
 Same method: revert one fix in a scratch copy, run the whole suite there, record
 the line that halted it.
 
 | Reverted fix | Captured failure |
 | --- | --- |
-| brief rendered beside itself and moved into place last | `not ok - an interrupted materialisation left the guard behind, and no later sweep will finish the task` |
+| brief rendered beside itself and moved into place last | superseded by the fourth round: the "last" half no longer exists to revert (the task is last now, the brief first). The atomic-move half survives and is held by `test_interrupted_materialisation_never_strands_the_task` |
 | wake append reporting its own failure | `not ok - a wake entry that could not be appended must say so rather than pass silently (missing: 'WAKE_MANUAL:')` |
 | Bridge ask reporting its own failure | `not ok - a Bridge ask that could not be raised must say so rather than pass silently (missing: 'BRIDGE_MANUAL:')` |
 
-`test_interrupted_materialisation_leaves_no_guard` drives the interruption
-through the executable interface rather than describing it: the fake backlog
-client signals the shells that invoked it, which stops the materialisation
-between its first artifact and its last whichever way the shell laid the call
-out. The test then asserts three things about the wreckage - no guard, no wake,
-no half-written brief left behind - and that the next sweep redoes the whole
-task rather than reporting `already queued` over it.
+`test_interrupted_materialisation_never_strands_the_task` still drives the
+interruption through the executable interface rather than describing it: the fake
+backlog client signals the shells that invoked it, so the run stops AT the
+backlog write. What that test asserts is now close to the inverse of what this
+round's version asserted, and deliberately so. The backlog write is the commit
+point, and it comes last, so a run killed at it has by construction already
+placed the brief, the wake and the Bridge row: the test asserts the brief IS
+standing, the wake IS standing, and that the next sweep reports `already queued`
+over the task the dead run created rather than raising a second one. The only
+thing it still asserts absent is a half-written `.brief.*` temporary, which is
+the one job the atomic move kept.
+
+Its counterpart `test_interruption_before_the_task_lands_is_completed_by_the_next_sweep`
+holds the other side of that window: a run killed BEFORE the backlog write leaves
+the same brief and wake standing, and neither may suppress anything, because only
+the task system answers whether the work is still owed. Between them the pair
+pins what replaced the guard - a standing brief is evidence of nothing.
 
 The two notification tests force a real failure rather than a simulated one: an
 unwritable wake sequence file, and a run whose `bin/fm-bridge.sh` is absent. Both
@@ -277,6 +300,61 @@ primitive is matched to the answer - `add` creates, `reopen` reopens - and the
 post-state is read back rather than inferred, so `queued` is reachable only from
 a confirmed reading. The task is created last, because whatever the sweep gates
 on must be its final artifact.
+
+## Fifth round: the silent half of the same conflation
+
+Date: 2026-08-05.
+
+Review found the fourth round had closed the loud half and left the quiet one.
+The sweep now refuses to print `queued` over a task it cannot confirm - and then
+wrote its completion stamp anyway, so a fork read as behind with nothing tracking
+it bought up to a full `fork-sweep-interval-days` of silence. Same conflation one
+step out: **"the sweep completed" was being read as "the work is tracked"**.
+
+The stamp's meaning is now stated in both halves and both are checked: coverage
+fully determined AND everything owed discharged. A behind fork whose sync task is
+not confirmed open at the end of its reading is counted in `UNDISCHARGED_COUNT`,
+which withholds the stamp and leaves the sweep due behind
+`FM_FORK_SWEEP_RETRY_MINUTES`. All five ways that can happen route through one
+boundary rather than five checks: `ensure_sync_task` returns zero exactly when
+the sync is discharged, and non-zero on liveness-unreadable, post-state
+unreadable, post-state confirmed not open, and instructions that could not be
+written or placed.
+
+The count is kept OUT of `unknown=`, which counts readings that could not be
+taken. The forge reading succeeds in every one of these cases; it is the work
+owed on the back of it that was not delivered. Folding the two would make the
+coverage line assert something it never observed, which is the error class this
+instrument has now been caught by four times. It is reported as its own
+`undischarged=` field instead, so the line says exactly what it measured.
+
+The exit-code contract is unchanged - 0/3/4/5 mean what they meant - because the
+stamp is a narrower claim than the exit code, not the same one. Exit 3 with
+`undischarged=0` is a complete sweep and stamps; exit 3 with `undischarged=1` is
+not and does not.
+
+Four cases hold it, covering both directions rather than only the alarm side:
+
+| Case | Test |
+| --- | --- |
+| liveness unreadable before the attempt (no `tasks-axi`), and still due behind the retry floor afterwards | `test_a_behind_fork_nothing_tracks_does_not_bank_a_week_of_silence` |
+| post-state unreadable after the attempt | `test_an_unconfirmable_task_does_not_bank_a_week_of_silence` |
+| post-state read and confirmed not open | `test_a_task_confirmed_not_open_does_not_bank_a_week_of_silence` |
+| **anti-cry-wolf**: behind with a confirmed-open task still stamps | `test_a_behind_fork_with_its_task_open_banks_a_complete_sweep` |
+
+The fourth row is the half that is easy to lose. Withholding the stamp whenever a
+fork is behind would make the sweep re-run every hour for as long as any fork is
+behind, which stops the stamp distinguishing anything - the same failure shape as
+the always-on cap check in the first round's table. Each of the first three
+asserts the stamp file itself, not only the exit code, because the exit code is 3
+in all four.
+
+This round also gave `MANUAL=note` the loud stderr line every other marker has by
+construction (`NOTE_MANUAL:`, held by
+`test_a_stale_task_body_is_reported_not_just_marked`). It is the one marker that
+does NOT withhold the stamp: a reopen that landed while its body refresh did not
+leaves the task genuinely open and owed, only describing the previous episode's
+reading, so the work is tracked and it is the instruction that is stale.
 
 ## What the installed task CLI actually does
 

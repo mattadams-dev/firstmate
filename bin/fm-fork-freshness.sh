@@ -32,7 +32,7 @@
 # Output is one line per swept fork plus one coverage line:
 #   FORK_FRESHNESS: <owner/repo> status=<in-sync|behind|ahead|diverged> behind=<n> ahead=<n> upstream=<owner/repo> compare=<fork-branch>...<upstream-branch> action=<...>
 #   FORK_FRESHNESS: <owner/repo> status=unknown reason=<text>
-#   FORK_FRESHNESS_COVERAGE: owner=<login> repos=<n> forks=<n> swept=<n> behind=<n> unknown=<n> ignored=<n>
+#   FORK_FRESHNESS_COVERAGE: owner=<login> repos=<n> forks=<n> swept=<n> behind=<n> undischarged=<n> unknown=<n> ignored=<n>
 #   FORK_FRESHNESS_COVERAGE: status=unknown reason=<text>
 # The two coverage lines are independent: a sweep whose repository list came back
 # at the enumeration cap prints the counts it did determine AND an unknown
@@ -46,6 +46,14 @@
 # Exit codes: 0 every reading taken and no fork behind; 3 at least one fork
 # behind; 4 at least one unknown; 5 both. Callers that must not fail on a
 # freshness result invoke this with `|| true` and relay the lines.
+#
+# The completion stamp is a narrower claim than the exit code, and undischarged=
+# is what separates them: it means coverage was fully determined AND every fork
+# read as behind ended with a sync task the task system confirms open. A behind
+# fork nobody is now tracking is counted there and withholds the stamp, so the
+# sweep stays due behind FM_FORK_SWEEP_RETRY_MINUTES rather than banking a full
+# cadence of silence over work that was never queued. Exit 3 alone does not:
+# a behind fork whose task IS confirmed open is a complete sweep.
 #
 # behind > 0 materialises a durable sync task, idempotently, under the
 # deterministic id fm-sync-<owner>-<repo>: data/<id>/brief.md carrying the proven
@@ -84,8 +92,8 @@
 # forge reading rather than on the bookkeeping, so a backlog step that failed can
 # never also silence the alarm that this fork is behind. Any step that did not
 # happen prints TASK_MANUAL:, TASK_UNCONFIRMED:, TASK_UNKNOWN:, ARCHIVE_MANUAL:,
-# WAKE_MANUAL: or BRIDGE_MANUAL: on stderr (stdout is the reading) and marks the
-# reading with MANUAL=<step>[+<step>].
+# NOTE_MANUAL:, WAKE_MANUAL: or BRIDGE_MANUAL: on stderr (stdout is the reading)
+# and marks the reading with MANUAL=<step>[+<step>].
 # Re-running never creates a second task for the same fork. --dispatch
 # additionally launches the worker through bin/fm-spawn.sh when this home has a
 # clone of that fork and FM_FORK_SYNC_HARNESS or config/fork-sync-harness names
@@ -510,6 +518,23 @@ archive_brief() {
   printf '%s\n' "$name"
 }
 
+# manual_marker <set>: the accumulated "+step" set as the reading's suffix, or
+# nothing when every step landed. One formatter, so every exit from
+# ensure_sync_task carries the marker set in the same shape - including the two
+# brief-failure exits, which reach it with a step already recorded.
+manual_marker() {
+  [ -z "$1" ] || printf ' MANUAL=%s' "${1#+}"
+}
+
+# queued_reading <id> <manual> <archived> [<why the worker was not launched>]:
+# the dispatch tail's one reading shape. Five copies differing only in an
+# optional parenthetical is five places a later edit can update four of.
+queued_reading() {
+  local note=${4:-}
+  [ -z "$note" ] || note=" ($note)"
+  printf 'task %s queued%s%s%s\n' "$1" "$note" "$2" "$3"
+}
+
 # brief_failed <slug> <id> <written|placed>: the sweep could not put usable
 # instructions on disk, so it stops before creating the task rather than
 # queueing work nobody can execute. The fork's behind reading still goes out on
@@ -560,6 +585,17 @@ brief_failed() {
 # not of the bookkeeping, so a backlog step that failed can never also silence
 # the alarm that this fork is behind. Each artifact that did not happen is named
 # on stderr and marked MANUAL=<step>[+<step>] on the reading itself.
+#
+# WHAT THE RETURN VALUE MEANS
+#
+# Zero exactly when this fork's sync is DISCHARGED - a task the task system
+# confirms open now carries it, whether this call made it, an earlier sweep did,
+# or a worker is already holding it. Non-zero on every other way out: liveness
+# unreadable before the attempt, post-state unreadable after it, post-state
+# confirmed not open, and instructions that could not be written or placed. The
+# caller counts those, because a behind fork with nothing tracking it is work
+# this sweep owed and did not deliver, and a sweep that stamps itself complete
+# there buys a full cadence of silence over it.
 ensure_sync_task() {
   local slug=$1 up=$2 fork_branch=$3 up_branch=$4 behind=$5 ahead=$6 status=$7
   local id brief taken harness clone manual="" name archived=""
@@ -585,7 +621,7 @@ ensure_sync_task() {
         "$slug" "$id" "${standing#unknown }" >&2
       printf 'task %s not queued: whether it is already open could not be read (%s)\n' \
         "$id" "${standing#unknown }"
-      return 0
+      return 1
       ;;
     absent) need=create ;;
     *) need=reopen ;;
@@ -622,7 +658,8 @@ ensure_sync_task() {
       "$behind" "$ahead" "$status" "$taken"; then
     brief_tmp_cleanup
     brief_failed "$slug" "$id" written
-    printf 'task %s NOT queued: instructions could not be written%s\n' "$id" "$archived"
+    printf 'task %s NOT queued: instructions could not be written%s%s\n' \
+      "$id" "$(manual_marker "$manual")" "$archived"
     return 1
   fi
   # The move is checked by its result, not only by its status: mv onto an
@@ -631,7 +668,8 @@ ensure_sync_task() {
   if ! mv -f "$BRIEF_TMP" "$brief" 2>/dev/null || [ ! -f "$brief" ]; then
     brief_tmp_cleanup
     brief_failed "$slug" "$id" placed
-    printf 'task %s NOT queued: instructions could not be placed%s\n' "$id" "$archived"
+    printf 'task %s NOT queued: instructions could not be placed%s%s\n' \
+      "$id" "$(manual_marker "$manual")" "$archived"
     return 1
   fi
   BRIEF_TMP=
@@ -659,7 +697,11 @@ ensure_sync_task() {
     create) backlog_create "$id" "$title" "$note" || rc=$? ;;
     reopen) backlog_reopen "$id" "$note" || rc=$? ;;
   esac
-  [ "$rc" != 2 ] || manual="$manual+note"
+  if [ "$rc" = 2 ]; then
+    printf 'NOTE_MANUAL: %s reopened sync task %s, but its body still holds the previous episode reading (behind %s, %s) rather than this one; refresh it by hand so a worker does not act on a stale reading\n' \
+      "$slug" "$id" "$behind" "$status" >&2
+    manual="$manual+note"
+  fi
 
   # Never inferred from $rc: confirmed.
   confirmed=$(task_liveness "$id")
@@ -668,7 +710,7 @@ ensure_sync_task() {
   # marker is added once and the whole set formatted once, whichever way this
   # reading ends.
   case "$confirmed" in 'open '*) ;; *) manual="$manual+backlog" ;; esac
-  [ -z "$manual" ] || manual=" MANUAL=${manual#+}"
+  manual=$(manual_marker "$manual")
 
   case "$confirmed" in
     'open '*) ;;
@@ -677,7 +719,7 @@ ensure_sync_task() {
         "$slug" "$need" "$id" "${confirmed#unknown }" >&2
       printf 'task %s queue-state unknown after %s (%s)%s%s\n' \
         "$id" "$need" "${confirmed#unknown }" "$manual" "$archived"
-      return 0
+      return 1
       ;;
     *)
       printf 'TASK_MANUAL: %s is behind but sync task %s did not %s - %s; queue it by hand\n' \
@@ -688,23 +730,24 @@ ensure_sync_task() {
       ;;
   esac
 
-  harness=$(dispatch_harness)
   if [ "$DISPATCH" != 1 ]; then
-    printf 'task %s queued%s%s\n' "$id" "$manual" "$archived"
+    queued_reading "$id" "$manual" "$archived"
     return 0
   fi
   if ! clone=$(clone_dir_for "$slug"); then
-    printf 'task %s queued (no local copy of %s in this home)%s%s\n' "$id" "${slug##*/}" "$manual" "$archived"
+    queued_reading "$id" "$manual" "$archived" \
+      "no local copy of ${slug##*/} in this home"
     return 0
   fi
+  harness=$(dispatch_harness)
   if [ -z "$harness" ]; then
-    printf 'task %s queued (no fork-sync-harness configured)%s%s\n' "$id" "$manual" "$archived"
+    queued_reading "$id" "$manual" "$archived" "no fork-sync-harness configured"
     return 0
   fi
   if "$SCRIPT_DIR/fm-spawn.sh" "$id" "$clone" --harness "$harness" >/dev/null 2>&1; then
     printf 'task %s dispatched%s%s\n' "$id" "$manual" "$archived"
   else
-    printf 'task %s queued (worker could not be launched)%s%s\n' "$id" "$manual" "$archived"
+    queued_reading "$id" "$manual" "$archived" "worker could not be launched"
   fi
 }
 
@@ -751,6 +794,13 @@ retire_sync_task() {
 BEHIND_COUNT=0
 UNKNOWN_COUNT=0
 SWEPT_COUNT=0
+# Forks read as behind whose sync task is not confirmed open at the end of the
+# reading. Deliberately NOT folded into UNKNOWN_COUNT: unknown= means a reading
+# could not be TAKEN, and the forge reading here succeeded - it is the work owed
+# on the back of that reading that was not discharged. Overloading the field
+# would make the coverage line claim something it never observed, which is the
+# exact error class this instrument keeps being caught by.
+UNDISCHARGED_COUNT=0
 
 emit_unknown() {
   printf 'FORK_FRESHNESS: %s status=unknown reason=%s\n' "$1" "$(clean_reason "$2")"
@@ -805,8 +855,13 @@ read_fork() {
     # The function composes its own failure line, naming the cause and carrying
     # the MANUAL= marker; only an empty capture falls back to the bare literal,
     # because overwriting a composed reason costs the operator both.
+    #
+    # Non-zero means this fork is behind with no confirmed-open task carrying
+    # it, whichever way that happened, so it is counted here rather than only
+    # printed: that count is what withholds the completion stamp.
     if ! action=$(ensure_sync_task "$slug" "$up" "$fork_branch" "$up_branch" \
       "$behind" "$ahead" "$status"); then
+      UNDISCHARGED_COUNT=$((UNDISCHARGED_COUNT + 1))
       [ -n "$action" ] || action="task NOT created"
     fi
   elif ! action=$(retire_sync_task "$slug"); then
@@ -1026,8 +1081,9 @@ cmd_sweep() {
     read_fork "$slug" "$(printf '%s' "$facts" | cut -f2)" "$(printf '%s' "$facts" | cut -f3)"
   done <<< "$extra_rows"
 
-  printf 'FORK_FRESHNESS_COVERAGE: owner=%s repos=%s forks=%s swept=%s behind=%s unknown=%s ignored=%s\n' \
-    "$owner" "$repos" "$forks" "$SWEPT_COUNT" "$BEHIND_COUNT" "$UNKNOWN_COUNT" "$ignored"
+  printf 'FORK_FRESHNESS_COVERAGE: owner=%s repos=%s forks=%s swept=%s behind=%s undischarged=%s unknown=%s ignored=%s\n' \
+    "$owner" "$repos" "$forks" "$SWEPT_COUNT" "$BEHIND_COUNT" "$UNDISCHARGED_COUNT" \
+    "$UNKNOWN_COUNT" "$ignored"
 
   # A full enumeration is indistinguishable from a truncated one except by its
   # size, so the size is checked: hitting the cap means repositories exist that
@@ -1127,11 +1183,23 @@ set +e
 cmd_sweep
 CODE=$?
 set -e
-# The completion stamp means "coverage was fully determined", so an outage does
-# not buy a week of silence: an incomplete sweep stays due, behind the retry
-# floor. A sweep that found a fork behind is still complete - the task it
-# created is the thing that carries that forward.
+# The completion stamp means "coverage was fully determined AND everything this
+# sweep owed was discharged", so neither an outage nor a failed materialisation
+# buys a week of silence: either way the sweep stays due, behind the retry floor.
+#
+# Both halves are load-bearing and neither implies the other. A sweep that found
+# a fork behind and left an open task carrying it IS complete - the task is what
+# carries that forward, so exit 3 alone stamps. A sweep that found a fork behind
+# and could not make a task exist has discharged nothing, and stamping there
+# would be the false success this instrument keeps being caught by: it prints
+# TASK_UNKNOWN/TASK_UNCONFIRMED/TASK_MANUAL, exits 3, and then goes quiet for a
+# week over a fork nobody is tracking. UNDISCHARGED_COUNT is that case, counted
+# separately from unknown because the forge reading itself succeeded.
 case "$CODE" in
-  0|3) now_epoch > "$STATE/.fork-freshness-last" ;;
+  0|3)
+    if [ "$UNDISCHARGED_COUNT" -eq 0 ]; then
+      now_epoch > "$STATE/.fork-freshness-last"
+    fi
+    ;;
 esac
 exit "$CODE"
