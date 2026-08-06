@@ -222,4 +222,4 @@ So point `CHROME_DEVTOOLS_AXI_BROWSER_URL` at a browser that renders in the fore
 The mutation matrix and the live guard's own mutation check now live in [`bridge-board-v2.md`](bridge-board-v2.md), section 9, re-measured against the v2 board and its guards on 2026-08-05.
 
 The v1 results that stood here have been dropped rather than marked, because they were verdicts about dead code: two of their rows described rules v2 inverted, so the mutation each recorded as a failure is the shipped state now.
-Section 9 records what was observed on the current renderer, including two invariants that turned out to have no guard behind them at all.
+Section 9 records what was observed on the current renderer, including the two invariants the sweep found with no guard behind them and the guards that now cover them in both directions.

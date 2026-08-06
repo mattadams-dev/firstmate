@@ -265,7 +265,8 @@ Nothing is carried forward from the v1 sweep.
 Each mutation was applied to `bin/fm-bridge-render.sh` on its own, `bash tests/fm-bridge.test.sh` was run, and the FIRST failing guard was recorded as the suite reported it.
 The renderer was restored from git before and after every mutation, so no mutant could survive into the branch or contaminate the next one.
 The suite stops at the first failure, so a mutant reaching its own guard is what proves nothing earlier caught it by accident.
-Baseline before and after the sweep: 100 assertions, all passing, and `git status` clean.
+Baseline before and after the 9a sweep: 100 assertions, all passing, and `git status` clean.
+The guards added in 9b below take that baseline to 107.
 
 ### 9a. The portable matrix
 
@@ -305,29 +306,53 @@ The dropped-ref mutant passed the FIRST version of the anchor guard, because the
 An annotation is rooted where it was placed and never sees an index, so the guard now searches the ask's own card or row.
 A guard that reads the whole page answers a question nobody asked.
 
-### 9b. Two invariants with no guard behind them
+### 9b. The two invariants the sweep found unguarded, and the guards that now cover them
 
-These three mutations SURVIVED: the full suite passed with each of them applied.
-This is an observed negative result, not a reading that could not be taken - no guard failed to answer, there is no guard.
-They cover two invariants, each stated in the renderer's own comments and in this record, and neither is enforced by anything.
+Three mutations SURVIVED the sweep in 9a: the full suite passed with each of them applied.
 
-| mutation | result |
+| mutation | result at the time of the sweep |
 | --- | --- |
 | lane health falls through to green when the watcher key does not resolve | SURVIVED - 100 assertions passed |
 | a lapsed supervision beacon no longer forces lane health to unknown | SURVIVED - 100 assertions passed |
 | the freshness bar is removed from the history page | SURVIVED - 100 assertions passed |
 
-The first two are the two arms of one rule, and neither is guarded, so the whole rule is unguarded rather than half of it.
+That was an observed negative result, not a reading that could not be taken - no guard failed to answer, there was no guard.
+The first two are the two arms of one rule, so the whole rule was unguarded rather than half of it.
 `if not live or key is None: health = "unknown"` is the line, and each arm was deleted on its own.
 An unresolved key matches no marker, so the watcher's verdict was never read; a lapsed beacon means nobody is maintaining the markers, so the absence of a warning stopped being good news.
-A green dot over a lane supervision has flagged as wedged is precisely the state both arms exist to prevent, and either deletion restores that green with the suite still green too.
-`docs/bridge.md` states the beacon half of this rule as a property of the board; nothing enforces it.
-
+A green dot over a lane supervision has flagged as wedged is precisely the state both arms exist to prevent, and either deletion restored that green with the suite still green too.
 The third is the rule section 5 above ends on: both pages carry the bar because both run the poll, and a page that changes its freshness dot without the bar signals a state it can neither explain nor let the reader act on.
-`tests/fm-bridge.test.sh` checks the bar on the board only; the history page's copy can be deleted and the suite stays green.
 
-Closing either gap is a test change and therefore not this change's to make.
-They are recorded here so the next hand starts from the measurement rather than from the assumption that a documented invariant is a guarded one.
+**Both gaps are closed in this change**, because a guard that cannot fail is indistinguishable from a guard that passes, and this one reports fleet health on the captain's only decision surface.
+Filing it forward would have knowingly shipped a health indicator that provably could not go red.
+`tests/fm-bridge.test.sh` gained sections 31, 32 and 33, and the suite is now 107 assertions.
+Every guard drives the renderer through a fixture `FM_HOME` - a `.meta` file, a beacon file, watcher marker files - and asserts on the RENDERED page.
+None of them reads the renderer's source, because a guard that grepped `bin/fm-bridge-render.sh` for a line of Python would pass a renderer that carried the line and ignored it.
+
+**Both directions were observed for each guard, on 2026-08-05, by the same method as 9a.**
+The mutation that breaks the protection must fail that guard's OWN test, and the mutation that makes the guard over-strict must fail a DIFFERENT one - otherwise the guard is satisfiable by a renderer that reports the alarm state unconditionally, which is the false-alarm twin of the defect being fixed.
+Nothing here is a COULD NOT OBSERVE: every mutation below reached a failing assertion and the first failure is quoted as the suite printed it.
+
+| mutation | direction | first failing guard |
+| --- | --- | --- |
+| the `key is None` arm is deleted from the lane-health rule | breaks the protection | 32 - `not ok - lane health: a lane whose meta names no backend target read green, so a verdict nobody took became good news - the board rendered [keyed ok/keyless ok]` |
+| the `not live` arm is deleted from the lane-health rule | breaks the protection | 32 - `not ok - lane health: a lapsed supervision beacon left a lane green, inheriting a verdict nobody is standing behind - the board rendered [keyed ok/keyless unknown]` |
+| the marker key is derived from `window` alone, missing every Orca lane | breaks the protection | 31 - `not ok - lane health: an Orca lane's marker was not found, so the board reported a health it never read - the board rendered [flagged warn/moving ok/orcalane unknown]` |
+| lane health reports `unknown` unconditionally | over-strict | 31 - `not ok - lane health: a supervised lane with a resolving key and nothing filed against it did not read ok - the board rendered [flagged unknown/moving unknown/orcalane unknown]` |
+| the freshness bar is removed from the history page | breaks the protection | 33 - `the history page runs the freshness poll and carries no bar, so it can turn its dot orange with nothing beside it to explain the state or let the reader act on it` |
+| the freshness bar no longer starts hidden | over-strict | 21 - `not ok - layout: the freshness bar is missing, or no longer starts hidden` |
+
+**Why lane health is two sections rather than one.**
+The positive direction lives in 31 and the unknown arms live in 32, and that split is what makes the over-strict row above land on a different test than the two arm deletions.
+A single section asserting only that `unknown` is reachable would be passed by a board that says `unknown` to every lane, which is a health indicator that cannot go green - the same instrument failure in the other direction.
+Section 32 keeps a lane whose key does resolve beside the keyless one for the same reason, so a blanket-unknown board fails there too rather than sliding through on the assertion it was aimed at.
+
+**What each fixture is, so the next hand can tell a broken guard from a broken renderer.**
+Section 31 renders a fresh beacon with three lanes: one tmux lane with no marker against it, one tmux lane with `.stale-since-firstmate_4` filed against it, and one Orca lane whose meta names `terminal=` and whose `.wedge-escalations-orca-term-1` marker must still be found.
+Section 32 renders a lane whose meta names no backend target at all beside one whose key resolves, first under a fresh beacon, then under a beacon aged past `WATCHER_BEACON_MAX_AGE`, then with no beacon file at all.
+Section 33 renders both pages and asserts the conditional the invariant actually states: a page that carries the fold-time meta and the freshness dot must carry the bar and its reload button, and must start it hidden.
+
+The renderer was restored from git before and after every mutation, and `git status` showed only `tests/fm-bridge.test.sh` modified when the sweep finished - no mutant survived into the branch.
 
 ### 9c. The live guard
 

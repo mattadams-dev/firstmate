@@ -2559,4 +2559,183 @@ left=$(find "$leak_tmp" -mindepth 1 | wc -l | tr -d '[:space:]')
   || fail "five supervision ticks left $left temp file(s) behind - this is the growth that reached 600 MiB, not a stray file"
 pass "repeated supervision ticks leave no temp file behind at all"
 
+# --- 31. lane health is the watcher's verdict, reported as the watcher filed it
+#
+# Health is READ, never recomputed here. bin/fm-watch.sh files `.stale-since-<key>`
+# and `.wedge-escalations-<key>` markers and the board reads them, because two
+# readers of one fact drift. So the only question a guard can ask is whether the
+# board reports what the watcher actually said - including under the Orca key,
+# which fm_backend_target_of_meta resolves from `terminal` rather than `window`.
+# Reading `window` alone would look every Orca lane up under a key that matches
+# no marker, and a missed marker is indistinguishable from an absent one.
+#
+# THE POSITIVE DIRECTION IS A SECTION OF ITS OWN, and that is the point of it. A
+# renderer that answered `unknown` for every lane would satisfy any guard that
+# only asserts unknown is reachable - the false-alarm twin of the green-dot
+# failure section 32 exists to prevent. Splitting them means an unconditional
+# alarm fails HERE and an unconditional green fails THERE, and neither mutation
+# can be absorbed by the guard aimed at the other one.
+#
+# Both sections read the RENDERED board. A guard that grepped the renderer for
+# its unknown rule would pass a script that carried the line and ignored it.
+
+# The fixed clock in epoch seconds, so a fixture file's age is a number this
+# suite chose rather than whatever the wall clock said when it ran.
+FOLD_EPOCH=$(python3 -c "
+import calendar, time
+print(calendar.timegm(time.strptime('$FM_BRIDGE_NOW', '%Y-%m-%dT%H:%M:%SZ')))
+")
+
+# <file> <epoch> - stamp a fixture file at a chosen instant on that clock.
+stamp_at() {
+  python3 -c "
+import os, sys
+when = int(sys.argv[2])
+os.utime(sys.argv[1], (when, when))
+" "$1" "$2"
+}
+
+# <home> -> one `<lane> <health>` line per lane the board rendered.
+lane_health() {
+  board_of "$1" | python3 -c '
+import re, sys
+board = sys.stdin.read()
+for lane, health in re.findall(
+        r"<div class=\"lane\"><span class=\"nm\">(.*?)</span>.*?<span class=\"hd ([a-z]+)\"",
+        board, re.S):
+    print("%s %s" % (lane, health))
+'
+}
+
+# <health lines> <lane> <health> <what the wrong reading would mean>
+expect_health() {
+  printf '%s\n' "$1" | grep -Fqx "$2 $3" \
+    || fail "lane health: $4 - the board rendered [$(printf '%s' "$1" | tr '\n' '/')]"
+}
+
+HOME31=$(new_home)
+FM_HOME=$HOME31 "$BRIDGE" ask -q --id lane-ask --project orca \
+  --title "an open ask, so the board has a reason to be drawn" --answer "A: yes" >/dev/null
+STATE31="$HOME31/state"
+fm_write_meta "$STATE31/moving.meta" "project=orca" "window=firstmate:3" "backend=tmux"
+fm_write_meta "$STATE31/flagged.meta" "project=orca" "window=firstmate:4" "backend=tmux"
+fm_write_meta "$STATE31/orcalane.meta" "project=orca" "terminal=orca-term-1" "backend=orca"
+# The watcher's own verdicts, under the keys the watcher writes them under: the
+# window with its separators flattened, and the terminal for an Orca lane.
+: > "$STATE31/.stale-since-firstmate_4"
+: > "$STATE31/.wedge-escalations-orca-term-1"
+: > "$STATE31/.last-watcher-beat"
+stamp_at "$STATE31/.last-watcher-beat" "$((FOLD_EPOCH - 60))"
+
+health31=$(lane_health "$HOME31")
+expect_health "$health31" moving ok \
+  "a supervised lane with a resolving key and nothing filed against it did not read ok"
+pass "a supervised lane with nothing filed against it reads ok"
+expect_health "$health31" flagged warn \
+  "a lane the watcher filed a stale marker against did not read warn"
+pass "a warning the watcher filed is the health the board reports"
+expect_health "$health31" orcalane warn \
+  "an Orca lane's marker was not found, so the board reported a health it never read"
+pass "an Orca lane's marker is read under the terminal key the watcher files it under"
+
+# --- 32. lane health may never fall through to green ------------------------
+#
+# `if not live or key is None: health = "unknown"` has two arms and neither had
+# a guard behind it: a mutation sweep deleted each on its own and the whole suite
+# stayed green (docs/verification/bridge-board-v2.md, section 9b). A guard that
+# cannot fail is indistinguishable from a guard that passes, and this one reports
+# fleet health on the captain's only decision surface - a green dot over a lane
+# supervision has flagged as wedged, or over a lane whose markers nobody is
+# maintaining, is the missing-alarm failure this board exists to prevent.
+#
+# Each arm is fixtured on its own. A meta that names no backend target covers
+# `key is None`; a lapsed beacon and an absent one cover `not live`. A lane whose
+# key does resolve sits beside the keyless one throughout, so this guard cannot
+# be satisfied by a board that answers unknown to everything - that renderer
+# fails section 31 above, which is the other half of the same pair.
+
+HOME32=$(new_home)
+FM_HOME=$HOME32 "$BRIDGE" ask -q --id beat-ask --project orca \
+  --title "an open ask, so the board has a reason to be drawn" --answer "A: yes" >/dev/null
+STATE32="$HOME32/state"
+fm_write_meta "$STATE32/keyed.meta" "project=orca" "window=firstmate:9" "backend=tmux"
+# The shape that resolves to no key at all: a meta naming no backend target, so
+# every marker lookup misses and the watcher's verdict was never read.
+fm_write_meta "$STATE32/keyless.meta" "project=orca" "backend=tmux"
+: > "$STATE32/.last-watcher-beat"
+stamp_at "$STATE32/.last-watcher-beat" "$((FOLD_EPOCH - 60))"
+
+health32=$(lane_health "$HOME32")
+expect_health "$health32" keyless unknown \
+  "a lane whose meta names no backend target read green, so a verdict nobody took became good news"
+expect_health "$health32" keyed ok \
+  "the resolving lane beside it stopped reading ok, so this guard would be satisfied by a board that says unknown to everything"
+pass "a lane whose watcher key resolves to nothing reads unknown, and the lane beside it still reads ok"
+
+# `not live`, first shape: a beacon older than the renderer's max age means
+# nobody is maintaining the markers, so the absence of a warning stopped being
+# good news and every dot loses the green it was inheriting.
+stamp_at "$STATE32/.last-watcher-beat" "$((FOLD_EPOCH - 3600))"
+health32=$(lane_health "$HOME32")
+expect_health "$health32" keyed unknown \
+  "a lapsed supervision beacon left a lane green, inheriting a verdict nobody is standing behind"
+case "$(board_of "$HOME32")" in
+  *"Lane health is unread: supervision has not checked in for"*) : ;;
+  *) fail "lane health: every dot went unknown with nothing on the page saying which reading could not be taken" ;;
+esac
+pass "a lapsed supervision beacon turns every lane unknown, and the board names the reading it could not take"
+
+# `not live`, second shape: no beacon at all. Absent and lapsed are the same
+# verdict here - nothing is maintaining the markers either way.
+rm -f "$STATE32/.last-watcher-beat"
+health32=$(lane_health "$HOME32")
+expect_health "$health32" keyed unknown \
+  "with no supervision beacon at all a lane still read green"
+pass "no supervision beacon at all reads unknown too, never as the absence of bad news"
+
+# --- 33. both pages carry the freshness bar, because both run the poll ------
+#
+# The freshness poll is emitted by the shared script, so BOTH pages turn their
+# dot orange when they detect a newer fold. A page that changed the dot without
+# the bar beside it would signal a state it could neither explain nor let the
+# reader act on - the signal is the point, so the bar is what has to be shared.
+#
+# Section 21 above checks the board's bar and reads the board fixture only, so
+# the history page's copy could be deleted with the suite still green (recorded
+# in docs/verification/bridge-board-v2.md, section 9b). This asserts the property
+# on both pages at once rather than duplicating a board-shaped assertion, and it
+# is stated as the conditional it really is: a page that runs the poll must carry
+# the bar. The over-strict direction - a bar that starts visible on a page that
+# is current - fails section 21 first, which is where that assertion has lived
+# since the layout audits.
+
+HOME33=$(new_home)
+FM_HOME=$HOME33 "$BRIDGE" ask -q --id bar-ask --project orca \
+  --title "an open ask, so the board is not empty" --answer "A: yes" >/dev/null
+FM_HOME=$HOME33 "$BRIDGE" note -q --id bar-note --project orca \
+  --title "an event, so history is not empty either" >/dev/null
+board_of "$HOME33" > "$TMP_ROOT/bar-board.html"
+history_of "$HOME33" > "$TMP_ROOT/bar-history.html"
+
+python3 - "$TMP_ROOT/bar-board.html" "$TMP_ROOT/bar-history.html" <<'BAR' || fail "freshness: see the reported page"
+import sys
+
+for name, path in (("board", sys.argv[1]), ("history", sys.argv[2])):
+    page = open(path).read()
+    polls = 'name="fm-folded-at"' in page and 'id="fm-fresh-dot"' in page
+    if not polls:
+        sys.exit("the %s page no longer states the fold it was drawn from and no "
+                 "longer carries a freshness dot, so nothing on it is about "
+                 "freshness any more" % name)
+    if 'id="fm-stale"' not in page or 'id="fm-stale-reload"' not in page:
+        sys.exit("the %s page runs the freshness poll and carries no bar, so it "
+                 "can turn its dot orange with nothing beside it to explain the "
+                 "state or let the reader act on it" % name)
+    if 'class="stalebar" id="fm-stale" hidden' not in page:
+        sys.exit("the %s page's freshness bar does not start hidden, so a page "
+                 "that is current announces that it is stale" % name)
+sys.exit(0)
+BAR
+pass "both pages carry the freshness bar the poll turns on, and both start it hidden"
+
 echo "all bridge ledger and fold tests passed"
