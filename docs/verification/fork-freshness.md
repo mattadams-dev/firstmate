@@ -716,9 +716,10 @@ task:
 [exit 0]
 ```
 
-This retires the `held)` arm the sweep used to carry in its state classifier and
-the `queued|in_flight|held|done` fake recorded above: the states are exactly
-`queued`, `in_flight`, and `done`. The old arm was unreachable, so the outcome it
+This retires the `held)` arm the sweep used to carry in its state classifier, and
+corrects the third-round record above, which had described the suite's fake as
+answering `queued|in_flight|held|done`: the states are exactly `queued`,
+`in_flight`, and `done`. The old arm was unreachable, so the outcome it
 produced was right only by accident - a held task reaches `queued|in_flight` and
 is correctly read as open, which is what it is.
 

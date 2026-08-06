@@ -180,7 +180,7 @@ Every reading resolves the task question to one of four answers:
 
 | Answer | Evidence | What the sweep does |
 | --- | --- | --- |
-| open | a worker holds `state/<id>.meta`, or the backlog reports the task queued or in flight | short-circuits: `action=task <id> already queued (<evidence>)` |
+| open | a worker holds `state/<id>.meta`, or the backlog reports the task queued or in flight | short-circuits: `action=task <id> already under way` on the worker record, `action=task <id> already queued (<evidence>)` on the backlog answer |
 | closed | the backlog reports the task done | **reopens** it for a fresh episode |
 | absent | the backlog has no such task | creates it |
 | unknown | the task system could not be asked (no `tasks-axi`, an unreadable backlog, a state it does not recognise) | creates nothing, files nothing away, and says which two worlds it could not tell apart |
@@ -205,8 +205,13 @@ what was actually found:
 | Post-state | Reading |
 | --- | --- |
 | confirmed open | `action=task <id> queued <pre-state>` |
-| confirmed still closed or absent | `action=task <id> NOT queued: <state now> after <create\|reopen> <pre-state>`, plus `TASK_MANUAL:` on stderr |
-| could not be read | `action=task <id> queue-state unknown after <create\|reopen> <pre-state>`, plus `TASK_UNCONFIRMED:` on stderr |
+| confirmed still closed or absent | `action=task <id> NOT queued: <state now> after <create\|reopen> MANUAL=...backlog <pre-state>`, plus `TASK_MANUAL:` on stderr |
+| could not be read | `action=task <id> queue-state unknown after <create\|reopen> (<reason>) MANUAL=...backlog <pre-state>`, plus `TASK_UNCONFIRMED:` on stderr |
+
+Both of the lower rows carry `backlog` in the `MANUAL=` set, beside whatever
+notification steps that run already recorded: the set names every step still
+needing a hand, and a remediation that did not leave a confirmed-open task makes
+the backlog one of them.
 
 `<pre-state>` is the labelled `FOUND=<absent\|closed>` above, followed by
 `SUPERSEDED=<file>` when a brief was filed away. The middle row is why it is
@@ -332,11 +337,13 @@ cannot be bypassed:
 - **Before any fork pull request**: `bin/fm-pr-check.sh` takes a single-repository
   reading for the PR's own repository. That script is the only writer of the
   `pr=` line that `bin/fm-pr-merge.sh` requires, so no merge through the
-  sanctioned path can skip the reading. It is silent when the repository is
-  determinately not a fork, so ordinary non-fork PRs stay quiet. It is bounded by
-  `FM_FORK_SWEEP_PR_TIMEOUT` (default 45 seconds), so an unreachable forge costs
-  an unknown reading rather than a hung task, and it can never fail arming the
-  merge watch.
+  sanctioned path can skip the reading. The reading is taken on GitHub pull
+  requests, which is the whole forge this sweep can read: a GitLab merge request
+  goes through the same script and records no freshness reading at all. It is
+  silent when the repository is determinately not a fork, so ordinary non-fork
+  PRs stay quiet. It is bounded by `FM_FORK_SWEEP_PR_TIMEOUT` (default 45
+  seconds), so an unreachable forge costs an unknown reading rather than a hung
+  task, and it can never fail arming the merge watch.
 
   This gate reports and creates work; it never blocks or fails the pull request,
   and there is nothing to override. It is also deliberately **un-ignorable**: it
