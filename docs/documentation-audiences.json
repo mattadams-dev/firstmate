@@ -381,6 +381,10 @@
       "audience": "maintainer-verification"
     },
     {
+      "path": "docs/verification/session-identity-probe-2026-08-05.txt",
+      "audience": "maintainer-verification"
+    },
+    {
       "path": "docs/verification/session-identity.md",
       "audience": "maintainer-verification"
     },
@@ -411,10 +415,6 @@
     {
       "path": "skills/stow/SKILL.md",
       "audience": "public-product"
-    },
-    {
-      "path": "tests/fixtures/session-identity/identity-probe-2026-08-05.txt",
-      "audience": "maintainer-verification"
     }
   ]
 }
