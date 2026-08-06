@@ -5,6 +5,15 @@ data/
 .lavish/
 .fm-secondmate-home
 .DS_Store
+# Opt-in live-harness E2E lab directories. Each suite builds its lab under the
+# repo root and removes it on exit, but it exists for the minutes the live run
+# takes, and it contains a full clone of this repo. Anyone running `git add -A`
+# during a run would otherwise commit that embedded clone.
+.claude-autoarm-live-e2e.*/
+.codex-live-e2e.*/
+.grok-live-e2e.*/
+.opencode-live-e2e.*/
+.pi-live-e2e.*/
 __pycache__/
 *.pyc
 .env
