@@ -215,8 +215,12 @@ test_reclaims_stale_session_lock_before_arming() {
       ' 2>&1); status=$?
   expect_code 2 "$status" "a dead recorded session owner must be reclaimed before the actionable rewake"
   expected_owner=$(cat "$dir/state/expected-owner")
-  actual_owner=$(cat "$dir/state/.lock")
+  # The lock record is line-addressed: line 1 is the harness pid, line 2 the
+  # session. Read line 1 rather than the whole file.
+  actual_owner=$(sed -n 1p "$dir/state/.lock")
   [ "$actual_owner" = "$expected_owner" ] || fail "stale session lock was not claimed by the current harness: expected $expected_owner, got $actual_owner"
+  [ "$(sed -n 2p "$dir/state/.lock")" = "session=stale" ] \
+    || fail "the reclaimed lock did not record the claiming session id: got '$(sed -n 2p "$dir/state/.lock")'"
   [ -e "$dir/state/arm-ran" ] || fail "hook did not arm after reclaiming the stale session lock"
   [ "$(epoch_outcome "$dir")" = rewake ] || fail "stale-lock recovery must record outcome=rewake"
   pass "auto-arm: a demonstrably dead recorded session owner is reclaimed through fm-lock.sh before arming"
@@ -239,8 +243,15 @@ test_inert_when_lock_held_by_other_harness() {
   expect_code 0 "$status" "hook must stay inert when another live harness holds the session lock"
   [ "$owner_after" = "$other" ] || fail "hook replaced another live harness owner: expected $other, got $owner_after"
   [ ! -e "$dir/state/arm-ran" ] || fail "hook armed while another session owned the lock"
-  [ ! -e "$dir/state/.claude-autoarm-epoch" ] || fail "hook wrote an epoch while another session owned the lock"
-  pass "auto-arm: inert without arm, rewake, or lock replacement when another live harness owns the home"
+  # Inert toward the FLEET, never silent toward the RECORD. The refusal is the
+  # decision the turn-end guard's bounded escape is keyed on, so withholding it
+  # would leave that escape unreachable - the 2026-08-05 deadlock exactly.
+  [ "$(epoch_outcome "$dir")" = refused ] \
+    || fail "the identity refusal did not record outcome=refused: got '$(epoch_outcome "$dir")'"
+  [ -e "$dir/state/.claude-autoarm-failure-notified" ] \
+    || fail "the identity refusal did not raise the operator notice"
+  assert_contains "$out" 'REFUSED' "the refusal must say so on stderr"
+  pass "auto-arm: inert without arm, rewake, or lock replacement when another live harness owns the home, and the refusal is recorded"
 }
 
 test_inert_when_afk() {
