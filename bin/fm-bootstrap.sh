@@ -88,7 +88,7 @@
 #          FM_FORK_SWEEP_BOOTSTRAP_TIMEOUT (default 45s) with a timeout, or any
 #          exit outside its normal 0/3/4/5 vocabulary, reported as unknown
 #          coverage rather than silence. The sweep's stderr is relayed too, so a
-#          BACKLOG_MANUAL: line reaches this digest beside its reading.
+#          TASK_MANUAL: line reaches this digest beside its reading.
 #          Set FM_BOOTSTRAP_DETECT_ONLY=1 to skip the seven MUTATING sweeps
 #          (PR-check migration, secondmate_sync, secondmate_liveness_sweep,
 #          secondmate_handoff_resume, x_mode_setup, fleet_sync, fork_freshness)
@@ -224,7 +224,7 @@ fork_freshness() {
   # silence, because "the sweep did not finish" and "no fork is behind" are
   # different worlds and must not print the same thing.
   #
-  # Stderr is relayed rather than discarded: the sweep writes its BACKLOG_MANUAL:
+  # Stderr is relayed rather than discarded: the sweep writes its TASK_MANUAL:
   # line there because stdout carries the reading, and a sync task whose backlog
   # entry silently failed is a tracked item nobody is tracking. And 0, 3, 4 and 5
   # are the sweep's whole vocabulary of normal results, so any other status is a

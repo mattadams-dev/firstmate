@@ -103,74 +103,122 @@ materialises, idempotently, under the deterministic task id
 `fm-sync-<owner>-<repo>` (owner-qualified so two forks sharing a repository name
 under different accounts cannot collide into one task):
 
-- a backlog item,
+- `data/<id>/brief.md`, carrying the proven sync procedure and the reading that
+  opened the task,
 - a durable notification, so the result survives a restart,
 - a Bridge item addressed to the captain,
-- and last, `data/<id>/brief.md`, carrying the proven sync procedure and the
-  reading that opened the task.
+- and last, the backlog item itself.
 
-The order is the contract, not an implementation detail. The brief is also the
-idempotency guard, so it is rendered beside itself and moved into place - one
-atomic move, same directory - only after the other three have been attempted. A
-materialisation cut short by a timeout or a session kill therefore leaves no
-guard and no half-written procedure, and the next sweep redoes the whole thing
-rather than reporting `already queued` over a task nobody was told about.
+The order is the contract, not an implementation detail, and the rule behind it
+is that **whatever the sweep gates on must be the last artifact it creates**. The
+sweep short-circuits on an open task, so a task existing while the wake and the
+Bridge row do not would be skipped by every later sweep and nobody would ever be
+told this fork is behind. Creating the task last makes an open task imply the
+three artifacts before it.
+
+The brief is rendered beside itself and moved into place in one atomic move, same
+directory, so a materialisation cut short by a timeout or a session kill can
+never leave a half-written procedure for a worker to act on. It comes first
+because a task that is discoverable before its instructions are readable is the
+harmful order; a brief with no task behind it suppresses nothing, and the next
+sweep simply rewrites it.
 
 `action=task <id> queued` asserts all four. Any of the first three that did not
-happen is reported instead of assumed: a loud `BACKLOG_MANUAL:`, `WAKE_MANUAL:`
+happen is reported instead of assumed: a loud `ARCHIVE_MANUAL:`, `WAKE_MANUAL:`
 or `BRIDGE_MANUAL:` line on stderr saying what to do by hand, and a
 `MANUAL=<step>[+<step>]` marker on the reading itself, so the line never claims
-an artifact nobody observed. None of the three is fatal - a failed notification
-never costs the task its brief.
+an artifact nobody observed. A notification that failed never costs the task its
+brief; instructions that could not be written do withhold the task, because
+queueing work nobody can execute is worse than not queueing it - and the fork's
+`status=behind` reading still goes out either way.
 
-Because the id is derived from the fork, a second sweep finds the first sweep's
-task instead of creating another, and a sync already under way is left alone.
+Because the id is derived from the fork, a second sweep addresses the first
+sweep's task instead of creating another, and a sync already under way is left
+alone.
 
-### The brief proves creation; the backlog answers liveness
+### A marker existing is not the work being owed
 
-Those are two different questions, and one file cannot answer both. The brief
-proves the task was **created** - that is the job the atomic move above gives it,
-and it keeps it. Whether that task is still **open** is asked of the task system
-on every reading.
+Two questions, and no file answers both:
 
-It has to be, because `data/<id>/` is never deleted: teardown keeps it as the
-task's evidence custodian. A guard that meant only "this file exists" would
-outlive the episode that created it - the fork gets synced, the task closes, and
-months later the same fork falls fifty behind while every sweep prints
-`already queued` over a backlog item, a wake and a Bridge row that no longer
-exist. Waiting for a `behind=0` reading to notice is not enough either: upstream
-often moves again within hours (see
-[`verification/fork-freshness.md`](verification/fork-freshness.md)), so the level
-window can close between two weekly sweeps and never be observed at all.
+- **Is a sync owed?** The forge answers it: `behind > 0`.
+- **Does open work already carry it?** The **task system** answers it, asked
+  directly by id on every reading, with nothing on disk gating the question.
 
-So each reading with a brief in place resolves to one of three verdicts:
+Keying the second on the first is the conflation this instrument carried through
+three rounds, one layer further downstream each time - a file existing read as a
+task existing, then retiring on observation read as retiring on completion, then
+`add` read as reopening.
 
-| Verdict | Evidence | What the sweep does |
+So `data/<id>/brief.md` guards nothing. It is the worker's instructions, and the
+atomic move above is creation-atomicity alone; liveness is not its job and the
+two no longer share an artifact. That separation matters because `data/<id>/` is
+never deleted - teardown keeps it as the task's evidence custodian - so anything
+that meant only "this file exists" would outlive the episode that created it.
+
+Every reading resolves the task question to one of four answers:
+
+| Answer | Evidence | What the sweep does |
 | --- | --- | --- |
-| live | a worker holds `state/<id>.meta`, or the backlog reports the task queued, in flight or held | short-circuits: `action=task <id> already queued (<evidence>)` |
-| spent | the backlog reports the task done, or has no such task | retires the marker and materialises a fresh sync task |
-| unknown | the task system could not be asked (no `tasks-axi`, an unreadable backlog, a state it does not recognise) | creates nothing, retires nothing, and says which two worlds it could not tell apart |
+| open | a worker holds `state/<id>.meta`, or the backlog reports the task queued or in flight | short-circuits: `action=task <id> already queued (<evidence>)` |
+| closed | the backlog reports the task done | **reopens** it for a fresh episode |
+| absent | the backlog has no such task | creates it |
+| unknown | the task system could not be asked (no `tasks-axi`, an unreadable backlog, a state it does not recognise) | creates nothing, files nothing away, and says which two worlds it could not tell apart |
 
-Retirement is a recorded event, never a silent delete. The brief is moved aside
-to `data/<id>/brief.retired-<stamp>.md` - kept, because it carries the reading
-that opened its episode and because a retirement that turns out to have been
-wrong must stay discoverable - and the reading that decided it carries both the
-file and the reason:
+Hold is an orthogonal field, not a state: the CLI reports a held task as
+`state: queued` with `held: yes`, and there is no state named `held` anywhere in
+it. A held sync task is therefore open work somebody paused on purpose, and it
+short-circuits like any other open task.
+
+### Making the task exist, and confirming that it did
+
+The primitive is matched to the answer, because `tasks-axi add` is **create-only**:
+over an id that already exists it returns `already: true` **at exit 0**, having
+transitioned nothing and discarded the new body. Only `reopen` returns a closed
+task to the queue.
+
+Exit status therefore cannot distinguish "a sync is now owed" from "nothing was
+queued at all", so the sweep does not use it as the result. Whichever primitive
+ran, the post-state is read back from the task system and the reading is keyed on
+what was actually found:
+
+| Post-state | Reading |
+| --- | --- |
+| confirmed open | `action=task <id> queued` |
+| confirmed still closed or absent | `action=task <id> NOT queued: <state found> after <create\|reopen>`, plus `TASK_MANUAL:` on stderr |
+| could not be read | `action=task <id> queue-state unknown after <create\|reopen>`, plus `TASK_UNCONFIRMED:` on stderr |
+
+The word `queued` is reachable only from a confirmed reading. Without that, a
+guard that correctly detects a stale state and then fails to act on it is not
+half-working - it is a false-success generator, and a false success outranks a
+false failure here because nothing prompts a look.
+
+`reopen` is reached only from a confirmed **closed** reading. It moves Done *or
+In flight* back to Queued, so calling it on an open task would pull that work
+back to the queue underneath the crewmate holding it.
+
+### Superseding and retiring instructions
+
+A brief is never silently deleted. When a closed episode's brief is replaced by a
+new one it is kept as `data/<id>/brief.retired-<stamp>.md`, and the reading names
+both the file and why a new episode started:
 
 ```
-FORK_FRESHNESS: acme/widget status=behind behind=50 ahead=0 upstream=up/widget compare=main...main action=task fm-sync-acme-widget queued RETIRED=brief.retired-20260805T101500Z.md (the backlog reports it done)
+FORK_FRESHNESS: acme/widget status=behind behind=50 ahead=0 upstream=up/widget compare=main...main action=task fm-sync-acme-widget queued SUPERSEDED=brief.retired-20260805T101500Z.md (the backlog reports it done)
 ```
 
-A fork that reads `behind=0` while its marker is spent has nothing left to guard,
-so that reading retires the marker there and then rather than leaving it for the
-next episode to discover: `action=task <id> retired RETIRED=<file> (<reason>)`.
+A fork that reads `behind=0` while its brief stands beside a closed task has a
+stale instruction sheet, so that reading files it away there and then:
+`action=task <id> retired RETIRED=<file> (<reason>)`. This is record hygiene and
+is no longer load-bearing - the behind path supersedes its own brief, so the two
+paths are independent, where previously the behind path could only recover if a
+`behind=0` reading happened to be observed first. That never getting its chance
+is what kept a stale marker alive against an actively moving upstream.
 
-Neither failure mode is allowed to be quiet. A liveness question that could not be
-answered prints `GUARD_UNKNOWN:` on stderr and says on the reading itself that
-nothing was created and why; a retirement that could not be performed prints
-`RETIRE_MANUAL:` and `action=task <id> NOT created: a spent brief ... could not be
-moved aside`. Duplicating a live task and sitting silently on a dead one are both
-worse than naming the two worlds that could not be told apart.
+A liveness question that could not be answered prints `TASK_UNKNOWN:` on stderr
+and says on the reading that nothing was created and why; a brief that could not
+be filed away prints `ARCHIVE_MANUAL:` and continues, because it blocks no sync -
+the superseded reading is archived into the task body as well, by
+`reopen`'s accompanying `update --archive-body`.
 
 The sweep does not launch the worker by default. The sync pushes a merge commit
 straight to a default branch, which is not something this fleet does without a
