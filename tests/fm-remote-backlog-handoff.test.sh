@@ -4,6 +4,8 @@ set -u
 
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck source=tests/remote-job-helpers.sh
+. "$(dirname "${BASH_SOURCE[0]}")/remote-job-helpers.sh"
 
 command -v tasks-axi >/dev/null 2>&1 || { echo "skip: tasks-axi not found"; exit 0; }
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)
@@ -17,7 +19,7 @@ FAKEBIN=$(fm_fakebin "$TMP_ROOT/fake")
 SSH_COUNT="$TMP_ROOT/ssh.count"
 mkdir -p "$PARENT/data" "$PARENT/state" "$REMOTE_ROOT/bin" \
   "$REMOTE/data" "$REMOTE/state" "$REMOTE/config" "$REMOTE/projects" "$REMOTE/bin"
-trap 'touch "$TMP_ROOT/put.release" "$TMP_ROOT/route.release" 2>/dev/null || true; if [ -f "$TMP_ROOT/remote-jobs/worker.pid" ]; then kill "$(cat "$TMP_ROOT/remote-jobs/worker.pid")" 2>/dev/null || true; fi; rm -rf -- "$TMP_ROOT"' EXIT
+trap 'touch "$TMP_ROOT/put.release" "$TMP_ROOT/route.release" 2>/dev/null || true; fm_remote_job_stop_worker_tree "$TMP_ROOT/remote-jobs" "${REMOTE_ROOT:-}/bin/fm-remote-job-worker.sh"; rm -rf -- "$TMP_ROOT"' EXIT
 printf 'fixture\n' > "$REMOTE_ROOT/AGENTS.md"
 cp "$ROOT/bin/fm-remote-entrypoint.sh" "$ROOT/bin/fm-remote-job-lib.sh" \
   "$ROOT/bin/fm-remote-job-worker.sh" "$ROOT/bin/fm-remote-file.sh" \
