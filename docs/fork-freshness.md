@@ -216,9 +216,15 @@ is what kept a stale marker alive against an actively moving upstream.
 
 A liveness question that could not be answered prints `TASK_UNKNOWN:` on stderr
 and says on the reading that nothing was created and why; a brief that could not
-be filed away prints `ARCHIVE_MANUAL:` and continues, because it blocks no sync -
-the superseded reading is archived into the task body as well, by
-`reopen`'s accompanying `update --archive-body`.
+be filed away prints `ARCHIVE_MANUAL:` and continues, because it blocks no sync.
+
+That continuation costs the on-disk copy of the previous reading, and how much
+else survives depends on which path is running. Reopening a closed task also
+archives the superseded reading into the task's own body, through `reopen`'s
+accompanying `update --archive-body`, so the record survives there. Creating a
+task the backlog no longer has does not: there is no previous body to archive,
+so that copy is simply lost. The reading and the stderr line say the archive
+failed either way rather than promising a record that may not exist.
 
 The sweep does not launch the worker by default. The sync pushes a merge commit
 straight to a default branch, which is not something this fleet does without a

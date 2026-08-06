@@ -598,13 +598,17 @@ ensure_sync_task() {
 
   # A brief from a closed episode is superseded, not spent: it is kept under a
   # stamped name rather than overwritten. Failing to keep it costs that copy and
-  # nothing else - it blocks no sync, and the reading it carried is archived
-  # into the task body by backlog_reopen as well - so it is reported, not fatal.
+  # blocks no sync, so it is reported rather than fatal.
+  #
+  # How much else survives depends on the path, and the message does not promise
+  # more than the path delivers: reopening also archives the superseded reading
+  # into the task's own body (backlog_reopen), while creating a task the backlog
+  # no longer has leaves no previous body to archive, so that copy is simply lost.
   if [ -f "$brief" ]; then
     if name=$(archive_brief "$id"); then
       archived=" SUPERSEDED=$name ($(standing_phrase "$standing"))"
     else
-      printf 'ARCHIVE_MANUAL: %s has a superseded data/%s/brief.md that could not be moved aside, so this episode overwrites it; the reading it carried survives in the task body\n' \
+      printf 'ARCHIVE_MANUAL: %s could not move its superseded data/%s/brief.md aside, so this episode overwrites it and that copy of the previous reading is lost; no sync is blocked\n' \
         "$slug" "$id" >&2
       manual="$manual+brief"
     fi
