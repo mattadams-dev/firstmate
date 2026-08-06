@@ -553,11 +553,9 @@ brief_tmp_cleanup() {
 # field uses, so every reading that cites the backlog cites it the same way.
 #
 # Present tense, and correct wherever it describes a state the sweep did NOT
-# change: the already-queued short-circuit, the post-state it just confirmed, the
-# level-fork retirement, and the reason inside SUPERSEDED=<file> (<reason>),
-# which explains why that file was kept at the moment it was kept. It is NOT
-# usable on its own to describe the state an episode started from - see
-# found_marker.
+# change: the already-queued short-circuit, the post-state it just confirmed, and
+# the level-fork retirement. It is NOT usable to describe the state an episode
+# started from, on its own or inside another clause - see found_marker.
 standing_phrase() {
   case "$1" in
     'open '*|'closed '*) printf 'the backlog reports it %s\n' "${1#* }" ;;
@@ -578,6 +576,11 @@ standing_phrase() {
 # confirmed-not-open reading the pre-state and the post-state can be the very
 # same words, and past tense alone would leave two similar English clauses on one
 # line with nothing marking which is which. FOUND= marks it.
+#
+# It is emitted on EVERY reading that starts an episode, including the ones that
+# also kept a superseded brief. It was once dropped there, on the theory that the
+# SUPERSEDED= clause could carry the pre-state instead - which put the label
+# everywhere except the ambiguous case it exists for.
 found_marker() {
   case "$1" in
     absent) printf ' FOUND=absent' ;;
@@ -729,9 +732,14 @@ ensure_sync_task() {
   # Why this episode is being started at all - the backlog had the task closed, or
   # had none - stated on every reading that starts one, and LABELLED, because by
   # the time the reading prints, the sweep has changed that state and confirmed
-  # it changed. The archive branch below replaces this with the SUPERSEDED=<file>
-  # clause, whose parenthetical says the same thing where present tense is right:
-  # that state is why the file was kept, at the moment it was kept.
+  # it changed. The archive branch below ADDS SUPERSEDED=<file> beside it rather
+  # than replacing it: the label has to appear on every reading that starts an
+  # episode, or a reader has no way to tell which kind of line they are looking
+  # at, and it is needed most exactly where it used to vanish - the
+  # confirmed-not-open readings, where the state found and the state now can be
+  # the same words. SUPERSEDED= therefore names only the file it kept; the
+  # pre-state is stated once, here, and never repeated in a parenthetical beside
+  # it.
   episode=$(found_marker "$standing")
 
   taken=$(date -u -d "@$(now_epoch)" '+%Y-%m-%d %H:%M UTC' 2>/dev/null ||
@@ -787,7 +795,7 @@ ensure_sync_task() {
   else
     if [ -f "$brief" ]; then
       if name=$(archive_brief "$id"); then
-        episode=" SUPERSEDED=$name ($(standing_phrase "$standing"))"
+        episode="$episode SUPERSEDED=$name"
       else
         printf 'ARCHIVE_MANUAL: %s could not move its superseded data/%s/brief.md aside, so this episode overwrites it and that copy of the previous reading is lost; no sync is blocked\n' \
           "$slug" "$id" >&2

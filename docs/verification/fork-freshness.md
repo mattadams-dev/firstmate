@@ -505,31 +505,51 @@ second standing:
 
 `FOUND=absent|closed` now carries it, in the same `KEY=value` vocabulary as
 `MANUAL=` and `SUPERSEDED=` on that line. `standing_phrase` was NOT rewritten:
-it is still correct at every site that describes a state the sweep did not change
-- the already-queued short-circuit, the confirmed post-state, the level-fork
-retirement, and the reason inside `SUPERSEDED=<file> (<reason>)`, which explains
-why that file was kept at the moment it was kept. A reading carries the pre-state
-one way or the other, never both.
+it is still correct at every site that describes a state the sweep did not
+change - the already-queued short-circuit, the confirmed post-state, and the
+level-fork retirement.
 
-The four readings this changes, taken from the suite's own fixtures rather than
-retyped:
+**Corrected by the eighth round below.** This round first put the label on every
+reading EXCEPT the ones that also archive a brief, where the `SUPERSEDED=` clause
+replaced it - which is the set of readings the label exists for. The sample
+readings below are regenerated against the corrected code; the mutation table
+under them was run against this round's tree and still holds, because none of its
+mutants touch the archive branch.
+
+The readings this changes, each produced by running the named fixture and pasting
+what it printed:
 
 ```
 action=task fm-sync-acme-widget queued FOUND=absent
 action=task fm-sync-acme-widget NOT queued: the backlog has no such task after create MANUAL=backlog FOUND=absent
-action=task fm-sync-acme-widget queued SUPERSEDED=brief.retired-20270115T090000Z.md (the backlog reports it done)
-action=task fm-sync-acme-widget NOT queued: the backlog reports it done after reopen MANUAL=backlog FOUND=closed
+action=task fm-sync-acme-widget queued FOUND=closed SUPERSEDED=brief.retired-20270115T090000Z.md
+action=task fm-sync-acme-widget NOT queued: the backlog reports it done after reopen MANUAL=backlog FOUND=closed SUPERSEDED=brief.retired-20260806T040129Z.md
+action=task fm-sync-acme-widget NOT queued: the backlog has no such task after create MANUAL=backlog FOUND=absent SUPERSEDED=brief.retired-20270115T090000Z.md
 ```
 
-The second and fourth are the ones the label exists for: prose for the state the
-sweep confirmed, a labelled token for the state it started from, on a line where
-those two are otherwise the same words.
+In order: `test_behind_creates_a_sync_task`,
+`test_backlog_failure_is_reported_not_swallowed`,
+`test_a_changed_condition_still_supersedes_and_still_raises`,
+`test_a_remediation_that_does_not_transition_is_never_reported_as_queued`, and
+the first retry inside `test_a_repeated_undischarged_sweep_accumulates_nothing`.
+
+Rows 2, 4 and 5 are the ones the label exists for: prose for the state the sweep
+confirmed, a labelled token for the state it started from, on a line where those
+two are otherwise the same words. Rows 4 and 5 are also the two that had no
+label at all before this correction.
+
+Two provenance notes, because the stamps are checkable and a reader should be
+able to check them. Rows 3 and 5 carry `20270115T090000Z`, which is exactly the
+suite's fixed clock `FM_FORK_FRESHNESS_NOW=1800000000` plus the one-hour
+`retry_sweep` offset - reproducible byte-for-byte. Row 4's fixture does not pin
+the clock, so its stamp is wall-clock and will differ on a re-run; everything
+left of the stamp is stable.
 
 | Mutant | Captured failure |
 | --- | --- |
 | the pre-state back as a bare parenthetical (`episode=" ($(standing_phrase "$standing"))"`) | `not ok - the pre-state on a plain queued reading is not labelled as the state that was found (missing: 'action=task fm-sync-acme-widget queued FOUND=absent')` |
 | the label dropped, past tense only (`episode=" (found: ...)"`) | `not ok - the pre-state on a plain queued reading is not labelled as the state that was found (missing: 'action=task fm-sync-acme-widget queued FOUND=absent')` |
-| the SUPERSEDED clause also carrying `FOUND=` | `not ok - the pre-state was stated twice - once inside SUPERSEDED= and once as a bare token (unexpected: 'FOUND=')` |
+| the SUPERSEDED clause also spelling the pre-state out beside the label | `not ok - the pre-state is spelled out beside SUPERSEDED= as well as labelled, so it is stated twice (unexpected: '(the backlog reports it done)')` |
 | `standing_phrase` rewritten past-tense at every call site | `not ok - already queued named no open task; it may not be printed on the marker file alone (missing: 'the backlog reports it queued')` |
 
 The second row is the one worth keeping: it is the tense-only fix the ruling
@@ -542,6 +562,89 @@ already-queued short-circuit before the run ever reaches a `SUPERSEDED=` clause.
 The suite halts at its first failure, so what is captured is the first thing that
 broke, which is itself the point - present tense is load-bearing at the sites
 that describe a state the sweep did not change.
+
+## Eighth round: the label went missing exactly where it was needed
+
+Date: 2026-08-05.
+
+The seventh round labelled the pre-state and then dropped the label on the one
+set of readings that motivated it. The archive branch REPLACED the suffix rather
+than adding to it:
+
+```
+episode=" SUPERSEDED=$name ($(standing_phrase "$standing"))"
+```
+
+so any reading that filed a brief away lost `FOUND=`. Those are exactly the
+confirmed-not-open readings where the state found and the state now can be the
+same words, and the rendered line was
+
+```
+NOT queued: the backlog reports it done after reopen MANUAL=backlog SUPERSEDED=brief.retired-<stamp>.md (the backlog reports it done)
+```
+
+the identical phrase twice, with nothing marking which is the pre-state. The
+rule as written - one form or the other, never both - had been validated only on
+the confirmed-OPEN reading, where `queued` and a pre-state cannot be confused,
+and then applied to the ambiguous case. **A rule proved on the easy case and
+applied to the hard one is how the label came to be missing from the hard one**,
+which is why the assertions added here pin it on both.
+
+The archive clause is additive now: `FOUND=` appears on every reading that starts
+an episode and `SUPERSEDED=<file>` joins it. The parenthetical that used to sit
+inside `SUPERSEDED=` is gone, because with the label present it would state the
+pre-state a second time on the same line - and "the identical phrase twice" is
+the defect, not the tense it is written in. `SUPERSEDED=` now names only the file
+it kept.
+
+Four assertions pin it, two per variant, on the readings that render both
+clauses:
+
+| Case | Test |
+| --- | --- |
+| closed variant, archiving + confirmed-not-open | `test_a_remediation_that_does_not_transition_is_never_reported_as_queued` |
+| absent variant, archiving + confirmed-not-open | first retry inside `test_a_repeated_undischarged_sweep_accumulates_nothing` |
+| archiving + confirmed-OPEN (the unambiguous half) | `test_a_changed_condition_still_supersedes_and_still_raises` |
+
+Each of the first two asserts the labelled form is present AND counts the
+pre-state phrase, failing if it appears more than once on the line - a plain
+substring assertion would pass on the very output this round removed.
+
+| Mutant | Captured failure |
+| --- | --- |
+| the archive branch replacing the suffix again (the shipped defect) | `not ok - the reading did not record the state this new episode was started from (missing: 'FOUND=closed')` |
+| the parenthetical restored beside the label | `not ok - the pre-state is spelled out beside SUPERSEDED= as well as labelled, so it is stated twice (unexpected: '(the backlog reports it done)')` |
+| the label dropped on the ABSENT archive variant only (`FOUND=absent` suppressed when a brief stands) | `not ok - the reading did not record the state this new episode was started from (missing: 'FOUND=absent')` |
+
+The first and third halt earlier than the assertions written for them, and that
+is recorded as taken rather than tidied: the suite stops at its first failure,
+and dropping the label anywhere trips an earlier archiving case first. Both are
+still the right evidence - what they show is that the label is load-bearing on
+more than the one line each mutant was aimed at. The third exists because a
+mutant that breaks every variant at once cannot show the absent-variant
+assertion is doing its own work; suppressing the label on that variant alone
+does.
+
+### The composed sample reading
+
+The seventh-round section stated its sample readings were "taken from the suite's
+own fixtures rather than retyped". Three were. The fourth - `... after reopen
+MANUAL=backlog FOUND=closed` - could not be produced by any fixture: the only run
+that reaches `after reopen` with a not-open post-state also archives, and
+archiving was what dropped the label. It was composed to show what the code was
+believed to do.
+
+That is worth naming rather than quietly fixing, because it is this branch's own
+failure class landing in the document meant to prove the branch works: a record
+whose whole job is holding readings actually taken cannot present a composed line
+as captured, since it will be trusted precisely because it looks like evidence.
+The line was not merely unverified - it was wrong, and running the fixture would
+have shown that. **The composition hid the defect the fix above closes.**
+
+Every sample row in that section has been regenerated by running its fixture
+against the corrected code and pasting what it printed, the set now names which
+fixture produced each row, and the fifth row was added because the absent variant
+of the same reading had no sample at all.
 
 ## What the installed task CLI actually does
 

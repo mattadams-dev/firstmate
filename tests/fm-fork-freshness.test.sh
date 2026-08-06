@@ -1066,8 +1066,8 @@ test_closed_task_frees_a_behind_fork_to_queue_again() {
 
   assert_contains "$out" "SUPERSEDED=brief.retired-" \
     "the replaced instructions were not named, so the previous episode's reading is undiscoverable"
-  assert_contains "$out" "the backlog reports it done" \
-    "the reading did not record why a new episode was started"
+  assert_contains "$out" "FOUND=closed" \
+    "the reading did not record the state this new episode was started from"
   assert_grep "behind 14, ahead 0" "$dir/home/data/fm-sync-acme-widget/brief.md" \
     "the fresh task still carries the first episode's reading"
   pass "fm-fork-freshness: a closed sync task is reopened, and the backlog proves it"
@@ -1103,6 +1103,20 @@ test_a_remediation_that_does_not_transition_is_never_reported_as_queued() {
     "a reading nobody can act on without a hand must be marked for one"
   assert_grep "TASK_MANUAL:" "$dir/stderr.log" \
     "a task that could not be queued raised no operator line"
+
+  # This reading is the hardest one to read, and it is the one the label exists
+  # for: the condition moved, so a brief was archived, AND the post-state is
+  # not-open, so the state found and the state now are the identical words. The
+  # label went missing here once - dropped by the archive branch, on every
+  # reading that supersedes - which put it everywhere except the ambiguous case.
+  assert_contains "$out" "SUPERSEDED=brief.retired-" \
+    "this case is only meaningful while the changed condition really does archive"
+  assert_contains "$out" "FOUND=closed" \
+    "the archiving reading dropped the pre-state label, exactly where the two states read alike"
+  assert_not_contains "$out" "reopen (the backlog" \
+    "the pre-state came back as a bare parenthetical beside an identical post-state clause"
+  [ "$(printf '%s\n' "$out" | grep -c 'the backlog reports it done')" = 1 ] ||
+    fail "the pre-state is stated twice on one line in the same words; the label is what tells them apart, so it may not also be spelled out beside SUPERSEDED="
   pass "fm-fork-freshness: a remediation that transitions nothing is never read as queued"
 }
 
@@ -1378,7 +1392,7 @@ retry_sweep() {  # <case> <hours-from-base> [args...]
 }
 
 test_a_repeated_undischarged_sweep_accumulates_nothing() {
-  local dir out rc=0 asks
+  local dir out first rc=0 asks
   dir=$(new_case)
   one_fork "$dir" behind 0 3
   retry_sweep "$dir" 0 sweep --owner acme >/dev/null || true
@@ -1397,7 +1411,19 @@ test_a_repeated_undischarged_sweep_accumulates_nothing() {
   # buries the very record SUPERSEDED= exists to keep findable.
   drop_task "$dir" fm-sync-acme-widget
   compare_fixture "$dir" upstream/widget main acme main behind 0 9 >/dev/null
-  FM_TEST_TASKS_RC=1 retry_sweep "$dir" 1 sweep --owner acme >/dev/null || true
+  first=$(FM_TEST_TASKS_RC=1 retry_sweep "$dir" 1 sweep --owner acme) || true
+
+  # The first retry is the absent variant of the archiving confirmed-not-open
+  # reading: the condition moved so a brief is filed away, and the post-state is
+  # read back as still absent. Both clauses are the same words, so the label has
+  # to be on this line too.
+  assert_contains "$first" "FOUND=absent SUPERSEDED=brief.retired-" \
+    "the archiving reading dropped the pre-state label on the absent variant"
+  assert_not_contains "$first" "create (the backlog" \
+    "the pre-state came back as a bare parenthetical beside an identical post-state clause"
+  [ "$(printf '%s\n' "$first" | grep -c 'the backlog has no such task')" = 1 ] ||
+    fail "the pre-state is stated twice on one line in the same words; FOUND= is what tells them apart"
+
   FM_TEST_TASKS_RC=1 retry_sweep "$dir" 2 sweep --owner acme >/dev/null || true
   out=$(FM_TEST_TASKS_RC=1 retry_sweep "$dir" 3 sweep --owner acme) || rc=$?
 
@@ -1463,13 +1489,17 @@ test_a_changed_condition_still_supersedes_and_still_raises() {
   expect_code 3 "$rc" "the fork is behind by more than it was"
   assert_contains "$out" "SUPERSEDED=brief.retired-" \
     "a genuinely changed reading must still name the brief it filed away"
-  # A reading carries the pre-state one way or the other, never both: inside the
-  # SUPERSEDED clause, where present tense is right because that state is why the
-  # file was kept, or as the bare labelled token when no file was kept.
-  assert_contains "$out" "(the backlog reports it done)" \
-    "the SUPERSEDED clause lost the reason the file was kept"
-  assert_not_contains "$out" "FOUND=" \
-    "the pre-state was stated twice - once inside SUPERSEDED= and once as a bare token"
+  # SUPERSEDED= joins the label rather than replacing it: the pre-state is stated
+  # once, under FOUND=, on every reading that starts an episode. This is the
+  # unambiguous half of that rule - the word `queued` cannot be confused with a
+  # pre-state - and the ambiguous half is pinned on the confirmed-not-open
+  # archiving reading in test_a_remediation_that_does_not_transition_is_never
+  # _reported_as_queued, because a rule validated only here is how the label came
+  # to be dropped from exactly the lines that needed it.
+  assert_contains "$out" "FOUND=closed SUPERSEDED=brief.retired-" \
+    "the archiving reading dropped the pre-state label instead of carrying it beside the file it kept"
+  assert_not_contains "$out" "(the backlog reports it done)" \
+    "the pre-state is spelled out beside SUPERSEDED= as well as labelled, so it is stated twice"
   [ "$(count_retired "$dir" fm-sync-acme-widget)" = 1 ] ||
     fail "a changed reading archived $(count_retired "$dir" fm-sync-acme-widget) briefs; the idempotence must not swallow a real new episode"
   assert_grep "behind 41, ahead 0" "$dir/home/data/fm-sync-acme-widget/brief.md" \
