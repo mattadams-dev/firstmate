@@ -58,8 +58,16 @@ A reading under the line removes that marker; an `unknown` reading leaves it exa
 The reading never changes what the guard does: a session is not stopped mid-turn over a number, and a failed reading never blocks a turn from ending.
 
 The marker is a claim about **one session**: the one whose own reading crossed the line.
-So it is spent only by the session that earned it - the marker's session is compared against the session the last turn-end reading recorded, and a marker left behind by a session that is gone is not due.
-The failure that closes is a false success: a successor armed on its predecessor's marker inherits a number it never carried and posts a verified success to the Bridge for a rebirth that shed nothing, and nothing about that reading prompts anyone to look.
+So it is spent only by the session that earned it, and that takes two bindings, because each is blind where the other sees.
+The failure they close is a false success: a successor armed on its predecessor's marker inherits a number it never carried and posts a verified success to the Bridge for a rebirth that shed nothing, and nothing about that reading prompts anyone to look.
+
+- **The session id**, compared against the session the last turn-end reading recorded.
+  This catches a successor that has worked - and a `/clear` inside one process, which the lock cannot see.
+- **The session lock.**
+  The marker also records the pid and process identity of the harness holding `state/.lock` when the reading was taken, and that holder must still hold it and still be the same process.
+  This is what covers a successor's **first window** - the window a rebirth itself creates - because `state/.context-footprint` only updates when a turn ends, while the successor takes the lock as step one of its session-start block.
+  A predecessor that died before anything reclaimed the lock leaves its own pid in the file, so the pid alone still matches; the recorded identity is what tells "still running" apart from "gone".
+
 When either side cannot be identified the answer is `unproven`, which is not permission.
 
 ### Timing
@@ -77,6 +85,10 @@ One more thing is proven before any of that, because it is cheap and because the
 Nothing else in the home can establish that a session will come back.
 The two outcomes are not comparable - refusing costs a delayed rebirth, while an exit typed with no wrapper behind it costs the home its primary session entirely, leaving the daemon injecting into a dead shell while escalations buffer until a human returns.
 Starting the harness through the wrapper is what makes that proof true; the README line saying so is guidance, and the record is the proof.
+
+That refusal is permanent while it lasts - a home with no registered wrapper can never rebirth, however far past the line it goes - so it is reported to the **Bridge**, once per episode, rather than only to the daemon log.
+A mechanism that is silently switched off is the failure this one exists to remove, and a log line a human has to think to read is not a report.
+The note is written only after the Bridge accepted it, and the episode ends the moment a wrapper is proven again, so a recurrence is reported afresh.
 
 Every refusal names its reason, because "not now" and "could not tell" are different answers.
 
@@ -137,7 +149,8 @@ All under `state/`, all volatile:
 | Record | Written by | Meaning |
 | --- | --- | --- |
 | `.context-footprint` | the guard, every turn end | the last reading, including `unknown`, and which session took it |
-| `.rebirth-due` | the guard | the session named in it is past the threshold |
+| `.rebirth-due` | the guard | the session named in it is past the threshold, with the session lock it held |
 | `.session-launcher` | `fm-session-launch.sh`, while it runs | the live wrapper that would relaunch, with the identity that proves the pid is still it |
+| `.rebirth-relauncher-alarmed` | `fm-rebirth.sh arm` | the Bridge has already been told this home cannot rebirth; cleared when a wrapper registers |
 | `.rebirth-armed` | `fm-rebirth.sh arm` | the exit has been asked for; expires if the session does not end |
 | `.rebirth-handoff` | `fm-rebirth.sh claim` | what the successor inherits, until its footprint is verified |

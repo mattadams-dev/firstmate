@@ -46,23 +46,39 @@ rebirth_run() {  # <state> - housekeeping with no reachable pane, ever
   LOG="$state/.supervise-daemon.log" FM_STATE_OVERRIDE="$state" \
   PATH="$(dirname "$state")/fakebin:$PATH" \
   TMUX_PANE='' FM_SUPERVISOR_TARGET='' FM_SUPERVISOR_BACKEND='' \
+  FM_REBIRTH_BRIDGE="$(dirname "$state")/bridge-recorder" \
     housekeeping "$state" "" ""
 }
 
 rebirth_case() {  # <name> <afk: on|off> <due: yes|no> -> state dir
-  local dir state=
+  local dir state= identity
   dir=$(make_supercase "$1")
   state="$dir/state"
+  # A recorder standing in for the Bridge writer. The refusal path now reports a
+  # home that can never rebirth, and a test must never post that to the real
+  # ledger; FM_REBIRTH_BRIDGE (set in rebirth_run) points the owner here.
+  cat > "$dir/bridge-recorder" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$(dirname "$0")/bridge.log"
+exit 0
+SH
+  chmod +x "$dir/bridge-recorder"
   # Seed the log so the negative cases assert on a file that exists; a missing
   # log would make "no rebirth line" true for the wrong reason.
   printf '[t] daemon starting\n' > "$state/.supervise-daemon.log"
   [ "$2" = on ] && : > "$state/.afk"
-  # The marker and the footprint name the same session, because a marker is a
-  # claim about the session running now: an unbound one would be refused before
-  # the daemon's own gate was ever exercised.
+  # The marker names the same session as the footprint and the same session-lock
+  # holder this process is, because a marker is a claim about the session running
+  # now: an unbound one would be refused before the daemon's own gate was ever
+  # exercised.
   if [ "$3" = yes ]; then
-    printf 'session=old\nts=t\ntokens=368381\nthreshold=200000\n' > "$state/.rebirth-due"
-    printf 'session=old\nts=t\ntokens=368381\nthreshold=200000\nverdict=due\n' > "$state/.context-footprint"
+    printf '%s\n' "$$" > "$state/.lock"
+    identity=$(FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_pid_identity "$2"' \
+      _ "$ROOT/bin/fm-wake-lib.sh" "$$")
+    printf 'session=old\nts=t\ntokens=368381\nthreshold=200000\nlock_pid=%s\nlock_identity=%s\n' \
+      "$$" "$identity" > "$state/.rebirth-due"
+    printf 'session=old\nts=t\ntokens=368381\nthreshold=200000\nverdict=due\nlock_pid=%s\n' \
+      "$$" > "$state/.context-footprint"
   fi
   printf '%s' "$state"
 }

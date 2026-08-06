@@ -74,6 +74,11 @@ Timing - a mutant that reborns a session mid-decision or over a live composer:
 | An `unknown` composer verdict is counted as empty | `test_arm_refuses_an_unproven_composer` |
 | The undelivered-escalation check is removed | `test_arm_refuses_an_undelivered_escalation` |
 | The due marker is judged by its existence alone, not against the session running now | `test_a_marker_left_by_another_session_never_arms_this_one` |
+| The marker's session-lock binding is dropped, leaving the session id alone | `test_a_marker_is_refused_once_a_successor_holds_the_session_lock`, `test_a_marker_whose_session_died_is_refused_though_the_lock_still_names_it` |
+| The lock holder is compared by pid alone, without the identity the marker recorded | `test_a_marker_whose_session_died_is_refused_though_the_lock_still_names_it` |
+| The reading no longer records who held the session lock | `test_a_marker_left_by_another_session_never_arms_this_one` |
+| A home that can never rebirth is logged but never reported to the Bridge | `test_an_unrebirthable_home_is_reported_to_the_bridge` |
+| The report is never cleared, so a later episode is silenced by the first note | `test_an_unrebirthable_home_is_reported_to_the_bridge` |
 | `arm` no longer requires a proven relauncher | `test_arm_refuses_without_a_proven_relauncher`, `test_arm_refuses_a_relauncher_that_is_gone` |
 | The relauncher record is trusted without checking that its pid is still that process | `test_arm_refuses_a_relauncher_that_is_gone` |
 
@@ -88,6 +93,9 @@ These were applied to `bin/fm-session-launch.sh`:
 | The wrapper never registers itself, so nothing in the home can prove a relaunch | `test_the_wrapper_registers_itself_while_the_session_runs` |
 
 The pattern-match mutant is caught by the no-watcher case as well as the retirement case, and that is the point: in a home with no watcher lock a pattern match still finds something to signal, while reading the lock finds nothing to do.
+
+The mutant that stops the reading recording its lock holder fails a positive rather than a negative: without that field every marker reads `unproven` and a genuinely due session can never arm.
+That is the direction worth catching, because a guard that blocks the legitimate case is one people switch off.
 
 Every failing set names the guard the mutant broke and nothing else.
 The three-test sets are the decision guard's own pair plus the status-fold property it depends on: the paired positive exists so the negative cannot pass vacuously, so a mutant that disables the guard is expected to take both halves with it.

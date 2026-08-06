@@ -144,6 +144,15 @@ fm_primary_scope_matches "$FM_ROOT" "$STATE" || exit 0
 #
 # bin/fm-rebirth-lib.sh owns the reading, the threshold, and the unknown/under/
 # due distinction; docs/session-rebirth.md owns the whole mechanism.
+#
+# The wake library is sourced HERE rather than with the predicate below because
+# the reading records who held the session lock when it was taken, and proving
+# that holder is still the same process is what stops a predecessor's marker
+# being spent by its successor. Nothing extra is loaded: this guard sources the
+# same library unconditionally a few lines further down.
+# shellcheck source=bin/fm-wake-lib.sh
+. "$SCRIPT_DIR/fm-wake-lib.sh"
+
 if [ "${FM_TURNEND_REBIRTH:-1}" != 0 ]; then
   TRANSCRIPT=$(printf '%s' "$PAYLOAD" | jq -r '.transcript_path // empty' 2>/dev/null || true)
   if [ -n "$TRANSCRIPT" ]; then
@@ -167,8 +176,6 @@ if [ "$CLAUDE_MODE" -eq 0 ] && [ "$STOP_HOOK_ACTIVE" = "true" ]; then
 fi
 
 # --- the actual predicate ----------------------------------------------------
-# shellcheck source=bin/fm-wake-lib.sh
-. "$SCRIPT_DIR/fm-wake-lib.sh"
 
 BUDGET_FILE="$STATE/.turnend-claude-blocks"
 BUDGET_LOCK="$STATE/.turnend-claude-blocks.lock"

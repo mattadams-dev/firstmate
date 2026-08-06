@@ -41,10 +41,11 @@
 # rebirth on the wrong one.
 #
 # THE SAME STANDARD APPLIES TO BOTH ENDS OF A REBIRTH. A due marker is proof
-# about ONE session, so it is checked against the session running now rather than
-# by its own existence; and nothing asks a session to exit until a live launch
-# wrapper is proven to be waiting to bring one back. Both are positive proof, for
-# the same reason quiescence is.
+# about ONE session, so it is checked against the session running now - by its
+# session id and by the session lock it held, never by its own existence; and
+# nothing asks a session to exit until a live launch wrapper is proven to be
+# waiting to bring one back. Both are positive proof, for the same reason
+# quiescence is.
 #
 # TERMINATION IS NOT PART OF THIS. Nothing here ends a session. The exit is
 # ASKED FOR through the harness's own exit command, typed into the composer this
@@ -160,10 +161,14 @@ fm_rebirth_footprint_read() {  # <transcript-path> -> tokens (0) | nothing (1)
 #
 # The reading itself is recorded either way in state/.context-footprint, so an
 # operator can see that the instrument ran and what it saw - including that it
-# saw nothing. That record is also the home's only durable answer to WHICH
-# session is running, which is what binds the due marker to a session below.
+# saw nothing.
+#
+# Every reading also records WHO TOOK IT: the session id, and the pid and process
+# identity of the harness holding this home's session lock at that moment. Those
+# three are what bind the due marker to a session below.
 fm_rebirth_record_reading() {  # <state> <session-id> <transcript> -> due|under|unknown
   local state=$1 session=${2:-unknown} transcript=${3:-} threshold tokens verdict tmp
+  local lock_pid lock_identity
   threshold=$(fm_rebirth_threshold)
   mkdir -p "$state" 2>/dev/null || { printf 'unknown'; return 1; }
   if tokens=$(fm_rebirth_footprint_read "$transcript"); then
@@ -172,9 +177,15 @@ fm_rebirth_record_reading() {  # <state> <session-id> <transcript> -> due|under|
     tokens=unknown
     verdict=unknown
   fi
+  lock_pid=$(fm_rebirth_lock_holder "$state") || lock_pid=
+  lock_identity=
+  if [ -n "$lock_pid" ] && command -v fm_pid_identity >/dev/null 2>&1; then
+    lock_identity=$(fm_pid_identity "$lock_pid" 2>/dev/null || true)
+  fi
   tmp="$state/.context-footprint.tmp.$$"
-  if printf 'session=%s\nts=%s\ntokens=%s\nthreshold=%s\nverdict=%s\ntranscript=%s\n' \
+  if printf 'session=%s\nts=%s\ntokens=%s\nthreshold=%s\nverdict=%s\nlock_pid=%s\nlock_identity=%s\ntranscript=%s\n' \
       "$session" "$(date '+%Y-%m-%dT%H:%M:%S%z')" "$tokens" "$threshold" "$verdict" \
+      "$lock_pid" "$lock_identity" \
       "${transcript:-none}" > "$tmp" 2>/dev/null; then
     mv -f "$tmp" "$state/.context-footprint" 2>/dev/null || rm -f "$tmp" 2>/dev/null
   else
@@ -182,8 +193,9 @@ fm_rebirth_record_reading() {  # <state> <session-id> <transcript> -> due|under|
   fi
   if [ "$verdict" = due ]; then
     tmp="$state/.rebirth-due.tmp.$$"
-    if printf 'session=%s\nts=%s\ntokens=%s\nthreshold=%s\ntranscript=%s\n' \
+    if printf 'session=%s\nts=%s\ntokens=%s\nthreshold=%s\nlock_pid=%s\nlock_identity=%s\ntranscript=%s\n' \
         "$session" "$(date '+%Y-%m-%dT%H:%M:%S%z')" "$tokens" "$threshold" \
+        "$lock_pid" "$lock_identity" \
         "${transcript:-none}" > "$tmp" 2>/dev/null; then
       mv -f "$tmp" "$state/.rebirth-due" 2>/dev/null || rm -f "$tmp" 2>/dev/null
     else
@@ -196,9 +208,25 @@ fm_rebirth_record_reading() {  # <state> <session-id> <transcript> -> due|under|
   return 0
 }
 
+# fm_rebirth_lock_holder <state>
+# The pid of the harness process holding this home's session lock, or nothing.
+#
+# state/.lock is a bare pid written by bin/fm-lock.sh, and it is the earliest
+# durable boundary a new session crosses: the successor overwrites it as step one
+# of its session-start block, long before it has ended a turn.
+fm_rebirth_lock_holder() {  # <state> -> pid (0) | nothing (1)
+  local pid
+  pid=$(head -1 "$1/.lock" 2>/dev/null | tr -d '[:space:]')
+  case "$pid" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  printf '%s' "$pid"
+  return 0
+}
+
 # fm_rebirth_due_verdict <state>
-# Prints `due`, `not-marked`, `stale`, or `unproven`, and returns 0 only for
-# `due`.
+# Prints `due`, `not-marked`, `stale`, `stale-lock`, or `unproven`, and returns 0
+# only for `due`.
 #
 # A due marker is a claim about ONE session: the one whose own reading crossed
 # the line. That the file exists proves nothing about the session running now,
@@ -207,19 +235,41 @@ fm_rebirth_record_reading() {  # <state> <session-id> <transcript> -> due|under|
 # success the rebirth never earned. A false success outranks a false failure
 # because nothing prompts anyone to look.
 #
-# So the marker's session is compared against the session that took the last
-# turn-end reading, which is this home's only durable record of who is running.
-# When either side cannot be identified, the two worlds - marker belongs to the
-# running session, marker belongs to a session that is gone - produce the same
-# evidence, so the answer is `unproven` rather than either direction.
-fm_rebirth_due_verdict() {  # <state> -> due (0) | not-marked|stale|unproven (1)
-  local state=$1 marked running
+# TWO BINDINGS, because the reading's own record is blind in exactly the window a
+# rebirth creates. state/.context-footprint updates when a turn ENDS, so between
+# a successor's launch and its first completed turn it still names the
+# predecessor - and a successor sitting at an empty composer is precisely when
+# the daemon finds the moment quiescent. So the marker also records who held the
+# home's session LOCK when the reading was taken, and that holder must still hold
+# it and still be the same process:
+#
+#   - a successor that has taken the lock makes the recorded pid wrong;
+#   - a predecessor that died before the lock was reclaimed leaves its own pid in
+#     the file, so the pid alone still matches - and its identity cannot be
+#     re-read, which is what tells the two apart.
+#
+# Pid equality without identity cannot distinguish "the recording session is
+# still running" from "it died and nothing has reclaimed the lock yet", so a
+# marker carrying no identity is `unproven`, never `due`.
+fm_rebirth_due_verdict() {  # <state> -> due (0) | not-marked|stale|stale-lock|unproven (1)
+  local state=$1 marked running marked_pid lock_now marked_identity identity_now
   [ -f "$state/.rebirth-due" ] || { printf 'not-marked'; return 1; }
   marked=$(fm_rebirth_field "$state/.rebirth-due" session)
   running=$(fm_rebirth_field "$state/.context-footprint" session)
   case "$marked" in ''|unknown) printf 'unproven'; return 1 ;; esac
   case "$running" in ''|unknown) printf 'unproven'; return 1 ;; esac
   [ "$marked" = "$running" ] || { printf 'stale'; return 1; }
+
+  marked_pid=$(fm_rebirth_field "$state/.rebirth-due" lock_pid)
+  case "$marked_pid" in ''|*[!0-9]*) printf 'unproven'; return 1 ;; esac
+  lock_now=$(fm_rebirth_lock_holder "$state") || { printf 'unproven'; return 1; }
+  [ "$marked_pid" = "$lock_now" ] || { printf 'stale-lock'; return 1; }
+  marked_identity=$(fm_rebirth_field "$state/.rebirth-due" lock_identity)
+  [ -n "$marked_identity" ] || { printf 'unproven'; return 1; }
+  command -v fm_pid_identity >/dev/null 2>&1 || { printf 'unproven'; return 1; }
+  identity_now=$(fm_pid_identity "$marked_pid" 2>/dev/null || true)
+  [ "$identity_now" = "$marked_identity" ] || { printf 'stale-lock'; return 1; }
+
   printf 'due'
   return 0
 }
@@ -336,6 +386,10 @@ fm_rebirth_publish_relauncher() {  # <state> <pid>
     "$pid" "$(date '+%Y-%m-%dT%H:%M:%S%z')" "$identity" > "$tmp" 2>/dev/null \
     || { rm -f "$tmp" 2>/dev/null; return 1; }
   mv -f "$tmp" "$state/.session-launcher" 2>/dev/null || { rm -f "$tmp" 2>/dev/null; return 1; }
+  # A wrapper is now registered, so the episode the alarm reported is over and a
+  # later one is reported afresh rather than suppressed by a marker nobody
+  # remembers writing.
+  rm -f "$state/.rebirth-relauncher-alarmed" 2>/dev/null || true
   return 0
 }
 

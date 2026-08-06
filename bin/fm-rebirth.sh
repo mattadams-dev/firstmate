@@ -30,7 +30,9 @@
 #       wrapper is proven ready to bring a session back, and the moment is
 #       quiescent. Records the predecessor's number, then types the harness's own
 #       exit command into the composer it just proved empty. Nothing is ever
-#       terminated here.
+#       terminated here. A home that can never rebirth - nothing registered to
+#       relaunch it - is reported to the Bridge once per episode, because a
+#       mechanism silently switched off is the failure this one exists to remove.
 #
 #   fm-rebirth.sh claim
 #       Consume an armed rebirth: the launch wrapper's proof that this exit was
@@ -99,6 +101,32 @@ done
 # the daemon discovers from. There is no scan and no guess: an endpoint that
 # cannot be resolved makes quiescence unprovable, which is a refusal, not a
 # default.
+# A home sitting over the line with nothing registered to relaunch it cannot
+# rebirth AT ALL, however far past the threshold it goes - the mechanism is off,
+# and the transcript keeps growing. That is a captain-relevant fact, so it goes
+# where the captain already reads. A line in the daemon log once a tick is a
+# record nobody is watching, and a mechanism that is silently disabled is the
+# exact failure this machinery exists to remove.
+#
+# The marker keeps it to one note per episode rather than one a minute, and it is
+# written only after the Bridge actually accepted the note, so a write that
+# failed is retried on the next tick instead of being counted as reported.
+#
+# The episode ends where it can only end: a wrapper registering itself clears the
+# marker (bin/fm-rebirth-lib.sh), which is the one event that changes the fact
+# reported. Until then the note stands and repeating it says nothing new.
+alarm_no_relauncher() {  # <reason>
+  local mark="$STATE/.rebirth-relauncher-alarmed"
+  [ -f "$mark" ] && return 0
+  "$BRIDGE" note --project firstmate \
+    --title "session rebirth is disabled in this home: no live launch wrapper is registered" \
+    --body "$(printf 'The primary session is marked rebirth-due at %s provider tokens against a threshold of %s, and the away-mode daemon reached the point of asking it to exit - but %s. Until a launch wrapper is registered no rebirth can happen here and the context keeps growing: start the session as bin/fm-session-launch.sh -- <harness> (docs/session-rebirth.md).' \
+      "$(fm_rebirth_field "$STATE/.rebirth-due" tokens)" "$(fm_rebirth_threshold)" "$1")" \
+    --quiet >/dev/null 2>&1 || return 0
+  : > "$mark" 2>/dev/null || true
+  return 0
+}
+
 resolve_endpoint() {
   [ -n "$BACKEND" ] || BACKEND=${FM_SUPERVISOR_BACKEND:-}
   [ -n "$TARGET" ] || TARGET=${FM_SUPERVISOR_TARGET:-}
@@ -137,6 +165,10 @@ case "$COMMAND" in
         printf 'rebirth: not due - the marker belongs to session %s, and %s is running now\n' \
           "$(fm_rebirth_field "$STATE/.rebirth-due" session)" \
           "$(fm_rebirth_field "$STATE/.context-footprint" session)"
+        ;;
+      stale-lock)
+        printf 'rebirth: not due - the marker was left by the session holding lock pid %s, which no longer holds this home'\''s session lock\n' \
+          "$(fm_rebirth_field "$STATE/.rebirth-due" lock_pid)"
         ;;
       unproven)
         printf 'rebirth: unproven - a due marker exists but cannot be tied to the session running now\n'
@@ -181,6 +213,10 @@ case "$COMMAND" in
             "$(fm_rebirth_field "$STATE/.rebirth-due" session)" \
             "$(fm_rebirth_field "$STATE/.context-footprint" session)"
           ;;
+        stale-lock)
+          printf 'not armed: the due marker was left by the session holding lock pid %s, which no longer holds this home'\''s session lock; the session that earned this marker is gone\n' \
+            "$(fm_rebirth_field "$STATE/.rebirth-due" lock_pid)"
+          ;;
         unproven)
           printf 'not armed: the due marker cannot be tied to the session running now, so whether it belongs to this session or to one that is gone is unproven\n'
           ;;
@@ -197,6 +233,7 @@ case "$COMMAND" in
     # Nothing asks a session to exit until something is proven ready to bring one
     # back. A cheap durable read, so it runs before the pane is touched.
     if ! LAUNCHER=$(fm_rebirth_relauncher_proof "$STATE"); then
+      alarm_no_relauncher "$LAUNCHER"
       printf 'not armed: %s\n' "$LAUNCHER"
       exit 1
     fi

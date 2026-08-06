@@ -156,6 +156,26 @@ publish_relauncher() {  # <home> <pid>
     _ "$ROOT/bin/fm-wake-lib.sh" "$ROOT/bin/fm-rebirth-lib.sh" "$1/state" "$2"
 }
 
+# pid_identity <home> <pid>: the fleet's own "is this pid still that process"
+# primitive, read through the same library the machinery uses.
+pid_identity() {  # <home> <pid>
+  FM_STATE_OVERRIDE="$1/state" bash -c '. "$1"; fm_pid_identity "$2"' \
+    _ "$ROOT/bin/fm-wake-lib.sh" "$2"
+}
+
+# hold_session_lock <home> <pid>: make <pid> this home's session-lock holder, the
+# way bin/fm-lock.sh does - a bare pid in state/.lock.
+hold_session_lock() {  # <home> <pid>
+  printf '%s\n' "$2" > "$1/state/.lock"
+}
+
+# write_due_marker <home> <session> <lock-pid>: the due marker as a reading by
+# <session> while <lock-pid> held the session lock.
+write_due_marker() {  # <home> <session> <lock-pid>
+  printf 'session=%s\nts=2026-08-05T21:00:00-0700\ntokens=%s\nthreshold=200000\nlock_pid=%s\nlock_identity=%s\ntranscript=%s\n' \
+    "$2" "$DEATH_TOKENS" "$3" "$(pid_identity "$1" "$3")" "$DEATH" > "$1/state/.rebirth-due"
+}
+
 # A home that is due, quiescent, and ready to arm. Every quiescence test starts
 # from this and breaks exactly one thing, so a refusal can only come from the
 # thing that test broke.
@@ -169,9 +189,10 @@ publish_relauncher() {  # <home> <pid>
 # reading past the line produces this marker) and test_arm_refuses_when_not_due
 # (without it, nothing arms).
 #
-# The footprint record names the SAME session as the marker, because that is what
-# a session sitting over its own line looks like: the marker is a claim about the
-# session whose reading produced it, never about the home.
+# The footprint record names the SAME session as the marker, and this test
+# process holds the session lock the marker was written under, because that is
+# what a session sitting over its own line looks like: the marker is a claim
+# about the session whose reading produced it, never about the home.
 #
 # The relauncher is registered for this test process, which is genuinely alive
 # for the length of the run. The proof is about a live wrapper, and a fabricated
@@ -181,10 +202,10 @@ armable_home() {
   home=$(new_home)
   install_tmux_shim "$home" >/dev/null
   install_bridge_recorder "$home"
-  printf 'session=predecessor\nts=2026-08-05T21:00:00-0700\ntokens=%s\nthreshold=200000\ntranscript=%s\n' \
-    "$DEATH_TOKENS" "$DEATH" > "$home/state/.rebirth-due"
-  printf 'session=predecessor\nts=2026-08-05T21:00:00-0700\ntokens=%s\nthreshold=200000\nverdict=due\ntranscript=%s\n' \
-    "$DEATH_TOKENS" "$DEATH" > "$home/state/.context-footprint"
+  hold_session_lock "$home" "$$"
+  write_due_marker "$home" predecessor "$$"
+  printf 'session=predecessor\nts=2026-08-05T21:00:00-0700\ntokens=%s\nthreshold=200000\nverdict=due\nlock_pid=%s\ntranscript=%s\n' \
+    "$DEATH_TOKENS" "$$" "$DEATH" > "$home/state/.context-footprint"
   publish_relauncher "$home" "$$" \
     || fail "precondition: a live launch wrapper must be registerable in the test home"
   set_pane "$home" '❯'
@@ -496,7 +517,8 @@ test_exit_commands_match_the_verified_adapters() {
 test_arm_refuses_a_due_marker_with_no_reading() {
   local home out
   home=$(armable_home)
-  printf 'session=predecessor\nts=t\ntokens=\nthreshold=200000\n' > "$home/state/.rebirth-due"
+  write_due_marker "$home" predecessor "$$"
+  sed -i "s/^tokens=.*/tokens=/" "$home/state/.rebirth-due"
   out=$(arm "$home") && fail "arm must refuse a due marker carrying no readable reading: $out"
   assert_contains "$out" "nothing to prove smaller" \
     "the refusal must say why an unreadable reading blocks the rebirth"
@@ -553,6 +575,55 @@ test_an_under_reading_clears_a_stale_marker_and_unknown_does_not() {
   pass "detection: an under-threshold reading clears a marker it supersedes, an unknown one leaves it alone"
 }
 
+# THE SUCCESSOR'S FIRST WINDOW, which is the window a rebirth itself creates. A
+# successor that has come up but ended no turn has not written a footprint
+# reading, so the marker's session id still matches - and a successor sitting at
+# an empty composer is exactly when the daemon finds the moment quiescent. The
+# session lock moves first: the successor takes it as step one of its
+# session-start block, long before any turn of its own has ended.
+test_a_marker_is_refused_once_a_successor_holds_the_session_lock() {
+  local home out successor
+  home=$(armable_home)
+  sleep 30 &
+  successor=$!
+  hold_session_lock "$home" "$successor"
+  out=$(arm "$home") \
+    && fail "a marker must not be spent by a successor that has taken the lock: $out"
+  assert_contains "$out" "session lock" "the refusal must name the lock that moved"
+  assert_absent "$home/typed" "nothing may be typed for a marker this session did not earn"
+  assert_absent "$home/state/.rebirth-armed" "a refused arm must leave no armed record"
+  kill "$successor" 2>/dev/null || true
+  wait "$successor" 2>/dev/null || true
+
+  # The paired positive: the session that earned the marker still holds the lock,
+  # so it still arms. A guard that blocks the legitimate case gets switched off.
+  hold_session_lock "$home" "$$"
+  out=$(arm "$home") || fail "the session that earned the marker must still arm: $out"
+  assert_grep "/exit" "$home/typed" "the legitimate case must still ask the session to exit"
+  pass "timing: a due marker is spent only while its own session still holds the session lock"
+}
+
+# The half that pid equality alone cannot see. A session that died before
+# anything reclaimed the lock leaves its OWN pid in the file, so the pid still
+# matches - and its identity cannot be re-read, which is what tells "still
+# running" apart from "gone, lock not yet reclaimed".
+test_a_marker_whose_session_died_is_refused_though_the_lock_still_names_it() {
+  local home out dead
+  home=$(armable_home)
+  sleep 30 &
+  dead=$!
+  hold_session_lock "$home" "$dead"
+  write_due_marker "$home" predecessor "$dead"
+  kill "$dead" 2>/dev/null || true
+  wait "$dead" 2>/dev/null || true
+  out=$(arm "$home") \
+    && fail "a marker left by a session that is gone must not arm, lock pid or not: $out"
+  assert_contains "$out" "no longer holds" \
+    "the refusal must say the recording session no longer holds the lock"
+  assert_absent "$home/typed" "nothing may be typed on behalf of a session that has exited"
+  pass "timing: a lock pid that outlived its process is not proof the marker's session is running"
+}
+
 # Asking a session to exit with nothing behind it to relaunch costs the home its
 # primary session: the daemon keeps running with only a dead shell to inject
 # into, and escalations buffer until a human comes back. That is the decapitation
@@ -573,6 +644,40 @@ test_arm_refuses_without_a_proven_relauncher() {
   out=$(arm "$home") || fail "a home with a live launch wrapper must still arm: $out"
   assert_grep "/exit" "$home/typed" "the legitimate case must still ask the session to exit"
   pass "timing: arm refuses without a proven relauncher and proceeds with one"
+}
+
+# A home with no registered relauncher can never rebirth, however far past the
+# line it goes. Reporting that only in the daemon log is the alarm-chain failure
+# this whole task exists to remove: the mechanism is off and the only witness is
+# a file nobody reads. It goes to the Bridge, where the captain already looks -
+# once per episode, not once a tick, and afresh when it happens again.
+test_an_unrebirthable_home_is_reported_to_the_bridge() {
+  local home
+  home=$(armable_home)
+  rm -f "$home/state/.session-launcher"
+  arm "$home" >/dev/null && fail "precondition: a home with no relauncher must refuse"
+  assert_grep "rebirth is disabled" "$home/bridge.log" \
+    "a home that can never rebirth must reach the Bridge, not only the daemon log"
+  [ "$(grep -c "rebirth is disabled" "$home/bridge.log")" -eq 1 ] \
+    || fail "the first refusal must post exactly one note"
+
+  # Once per episode: the daemon retries every tick, and the captain must not be
+  # handed the same note a minute apart forever.
+  arm "$home" >/dev/null && fail "precondition: the second attempt must still refuse"
+  [ "$(grep -c "rebirth is disabled" "$home/bridge.log")" -eq 1 ] \
+    || fail "a repeated refusal must not post a second note in the same episode"
+
+  # The episode ends when a wrapper is registered, and the home arms normally.
+  publish_relauncher "$home" "$$" || fail "precondition: the relauncher must be registerable"
+  arm "$home" >/dev/null || fail "a home with a live wrapper must arm rather than report"
+
+  # And a LATER episode is reported afresh, or the dedupe would silence the
+  # second occurrence permanently.
+  rm -f "$home/state/.rebirth-armed" "$home/state/.session-launcher"
+  arm "$home" >/dev/null && fail "precondition: the home must refuse again once the wrapper is gone"
+  [ "$(grep -c "rebirth is disabled" "$home/bridge.log")" -eq 2 ] \
+    || fail "a fresh episode must be reported again, not suppressed by the first note"
+  pass "timing: a home that cannot rebirth is reported to the Bridge once per episode"
 }
 
 # A record is not a wrapper. The pid it names has to be running right now, and
@@ -849,7 +954,10 @@ test_exit_commands_match_the_verified_adapters
 test_arm_refuses_a_due_marker_with_no_reading
 test_a_marker_left_by_another_session_never_arms_this_one
 test_an_under_reading_clears_a_stale_marker_and_unknown_does_not
+test_a_marker_is_refused_once_a_successor_holds_the_session_lock
+test_a_marker_whose_session_died_is_refused_though_the_lock_still_names_it
 test_arm_refuses_without_a_proven_relauncher
+test_an_unrebirthable_home_is_reported_to_the_bridge
 test_arm_refuses_a_relauncher_that_is_gone
 test_wrapper_exits_with_the_session_when_no_rebirth_was_armed
 test_the_wrapper_registers_itself_while_the_session_runs
