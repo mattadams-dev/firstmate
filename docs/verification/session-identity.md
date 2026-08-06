@@ -28,6 +28,7 @@ Only changing the identity basis can.
 ## Where the session id is observable
 
 Probed on 2026-08-05, Linux 6.18.33.2 (WSL2), Claude Code 2.1.223.
+The unedited probe output is kept beside this record at [`session-identity-probe-2026-08-05.txt`](session-identity-probe-2026-08-05.txt), because the live processes behind it cannot be re-observed later.
 
 The harness process's own environment does **not** carry the session id:
 
