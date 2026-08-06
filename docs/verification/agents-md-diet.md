@@ -176,6 +176,10 @@ After rewriting the description to two sentences and shortening both the stub an
 It decomposes as 164 tokens of net resident removal from `AGENTS.md` against the 87-token description.
 The 87 and the 77 are measured; the 164 is derived from them rather than read off an instrument, because no run isolates the tuned trim on its own.
 
+One later edit postdates every reading in this record: this change also trimmed `.agents/skills/firstmate-coding-guidelines`'s own `description:` to the two-sentence cap, removing a third sentence that was resident in the listing when all the floors above were read.
+The shipped tree's floor is therefore below 49,831 by an amount nobody has measured, so treat 49,831 as the reading it is rather than as the current floor.
+Every delta in this record is unaffected, because each is a difference between two readings that both carried the longer description.
+
 Keep descriptions short for this reason.
 A verbose trigger description is not free documentation; it is resident context charged to every session that never uses the skill.
 

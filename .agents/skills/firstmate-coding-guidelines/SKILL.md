@@ -3,7 +3,6 @@ name: firstmate-coding-guidelines
 description: >-
   Agent-only reference for changing firstmate's shared, tracked material per AGENTS.md section 1.
   Use before editing any of that material, whether working as firstmate directly or as a crewmate briefed on a firstmate-repo task.
-  Covers the knowledge-placement decision tree, the one-owner rule for contracts, the inline-stub pattern for content moved into a skill, AGENTS.md size discipline, trigger hygiene for new skills, and repo style rules (one sentence per line, plain dash, no agent co-author, shellcheck-clean bin scripts, colocated tests, and maintainer-verification evidence).
 user-invocable: false
 metadata:
   internal: true
@@ -99,6 +98,7 @@ Every new skill needs its load trigger declared inline: section 13 for agent-onl
 State the trigger as a condition ("load before X", "load on Y wake"), never as a vague pointer.
 
 **Cap a skill's `description:` frontmatter at two sentences.**
+The cap binds new and touched skills; the pre-existing skills that exceed it are tracked separately as `fm-skill-description-retrofit` and are not to be retrofitted on unrelated changes.
 The description is resident in the harness's skill listing from the first turn, so every session pays for it including every session that never loads the skill.
 The cost is real and invisible, which is why this is a cap rather than a preference: a four-sentence description measured 184 tokens against 87 for the two-sentence rewrite that replaced it, and that difference alone was the difference between an extraction that helped and one that made the floor worse.
 Spend those two sentences on the trigger condition and what the skill owns; everything else belongs in the body, where only the sessions that load it pay.
