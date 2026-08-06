@@ -42,9 +42,17 @@ if [ "${1:-}" = "status" ]; then
     echo "lock: unreadable"
     exit 0
   }
+  # The session is APPENDED rather than folded into these lines. Both are read
+  # by other suites and by operators scanning output; a reshaped message is a
+  # silent break, while a suffix is not.
   old_session=$(fm_session_lock_session "$STATE") || old_session=
-  if [ -n "$old_session" ]; then held="session $old_session (harness pid $old)"; else held="harness pid $old, no session recorded"; fi
-  if fm_harness_pid_alive "$old"; then echo "lock: held by live $held"; else echo "lock: stale ($held; pid dead or not a harness)"; fi
+  suffix=
+  [ -z "$old_session" ] || suffix=", session $old_session"
+  if fm_harness_pid_alive "$old"; then
+    echo "lock: held by live harness pid $old$suffix"
+  else
+    echo "lock: stale (pid $old dead or not a harness)$suffix"
+  fi
   exit 0
 fi
 
@@ -122,7 +130,7 @@ if [ ! -f "$LOCK" ] || [ -L "$LOCK" ] || [ "$written" != "$me" ] || [ "$written_
 fi
 release_claim_lock
 if [ -n "$my_session" ]; then
-  echo "lock acquired: session $my_session (harness pid $me)"
+  echo "lock acquired: harness pid $me, session $my_session"
 else
   echo "lock acquired: harness pid $me"
 fi
