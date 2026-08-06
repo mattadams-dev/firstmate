@@ -61,7 +61,14 @@ me=$(fm_harness_ancestry_pid) || { echo "error: cannot locate harness process in
 # Claude Code publish no session id here, and refusing them would take the whole
 # fleet read-only. It degrades to the pre-existing pid basis for THIS lock only,
 # which is never weaker than what that home had before.
+#
+# The environment source is trusted only when the harness we resolved is
+# genuinely Claude Code. FM_SESSION_ID stays trusted unconditionally because a
+# caller setting it has already read the value from an authoritative payload.
 my_session=$(fm_session_id_self) || my_session=
+if [ -n "$my_session" ] && [ -z "${FM_SESSION_ID:-}" ] && ! fm_harness_pid_is_claude "$me"; then
+  my_session=
+fi
 probe=$(mktemp "$STATE/.lock-write.XXXXXX" 2>/dev/null) || {
   echo "error: cannot write session lock; operate read-only until resolved" >&2
   exit 1

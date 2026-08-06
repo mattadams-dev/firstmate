@@ -269,6 +269,41 @@ test_lock_without_a_session_id_stays_on_the_pid_basis() {
   pass "lock: a harness publishing no session id still acquires, on the unchanged pid basis"
 }
 
+test_lock_ignores_an_inherited_session_id_on_another_harness() {
+  local home="$TMP_ROOT/lock-inherited" fakebin out
+  mkdir -p "$home/state"
+  fakebin=$(fm_fakebin "$home")
+  # A non-Claude primary. Firstmate launches other harnesses from inside a
+  # Claude tool call, so CLAUDE_CODE_SESSION_ID is inherited into this session's
+  # environment while naming a session in a completely different home.
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+set -u
+field= pid=
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -o) field=$2; shift 2 ;;
+    -p) pid=$2; shift 2 ;;
+    *) shift ;;
+  esac
+done
+case "$pid:$field" in
+  888:comm=) printf '%s\n' /opt/kimi/bin/kimi ;;
+  888:args=) printf '%s\n' kimi ;;
+  888:ppid=) printf '%s\n' 1 ;;
+  *:comm=) printf '%s\n' bash ;;
+  *:args=) printf '%s\n' 'bash /repo/bin/fm-lock.sh' ;;
+  *:ppid=) printf '%s\n' 888 ;;
+esac
+SH
+  chmod +x "$fakebin/ps"
+  out=$(PATH="$fakebin:$PATH" run_lock "$home" someone-elses-session) \
+    || fail "a non-Claude primary could not acquire its lock: $out"
+  [ "$(wc -l < "$home/state/.lock")" -eq 1 ] \
+    || fail "a non-Claude primary recorded an inherited session id: $(sed -n 2p "$home/state/.lock")"
+  pass "lock: a non-Claude primary does not record an inherited Claude session id"
+}
+
 # --- line 1 stays a pid: bin/fm-safe-kill.sh ----------------------------------
 
 test_safe_kill_still_refuses_the_lock_holder() {
@@ -465,6 +500,7 @@ test_lock_records_pid_then_session
 test_lock_is_reacquired_by_its_own_session
 test_lock_refuses_a_different_live_session
 test_lock_without_a_session_id_stays_on_the_pid_basis
+test_lock_ignores_an_inherited_session_id_on_another_harness
 test_safe_kill_still_refuses_the_lock_holder
 test_identity_refusal_is_recorded
 test_refusal_record_waits_for_the_need_gate
