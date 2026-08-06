@@ -121,28 +121,85 @@ SH
 # backlog item then goes missing only in production.
 #
 # It answers `show <id>` too, in the installed CLI's shape: an indented
-# `state: <queued|in_flight|held|done>` line at rc=0, and `code: NOT_FOUND` on
+# `state: <queued|in_flight|done>` line at rc=0, and `code: NOT_FOUND` on
 # STDOUT at rc=1 for a task the backlog does not have (verified against the
 # installed tasks-axi 0.2.x - the error goes to stdout, not stderr). That is the
 # call the sweep uses to tell an open sync task from one that closed, so a fake
-# that answered only `add` would let the guard's whole liveness question pass
-# untested.
+# that answered only `add` would let the whole liveness question pass untested.
+#
+# `add` here is CREATE-ONLY, because the installed CLI's is: over an id that
+# already exists it prints `already: true` and returns 0 having transitioned
+# nothing (docs/verification/fork-freshness.md). An earlier fake modelled add as
+# an upsert that also reopened, and that single permissive line is why a sweep
+# printing `queued` over a task that stayed done passed this suite. A fake may
+# only be as generous as the tool it stands in for; anywhere it is more
+# generous, the difference ships.
+#
+# `reopen` is the primitive that does transition, and NOT_FOUND at rc=1 over an
+# absent id. FM_TEST_TASKS_REOPEN_NOOP makes it report success while changing
+# nothing - the exact false-success shape the remediation path must survive.
+# FM_TEST_TASKS_HELD adds the orthogonal `held: yes` field to `show`, which the
+# real CLI reports alongside `state: queued` rather than instead of it.
 install_fake_tasks_axi() {  # <bin-dir>
   cat > "$1/tasks-axi" <<'SH'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$FM_TEST_TASKS_LOG"
 store=${FM_TEST_TASKS_STORE:-}
+state_of() {
+  [ -n "$store" ] && [ -f "$store" ] || return 0
+  grep "^$1 " "$store" 2>/dev/null | tail -1 | cut -d' ' -f2
+}
+not_found() {
+  printf 'error: "Task \\"%s\\" not found in this backlog"\ncode: NOT_FOUND\n' "$1"
+  exit 1
+}
 if [ "${1:-}" = show ]; then
   id=${2:-}
-  state=""
-  [ -z "$store" ] || [ ! -f "$store" ] ||
-    state=$(grep "^$id " "$store" 2>/dev/null | tail -1 | cut -d' ' -f2)
-  if [ -z "$state" ]; then
-    printf 'error: "Task \\"%s\\" not found in this backlog"\ncode: NOT_FOUND\n' "$id"
-    exit 1
+  # FM_TEST_TASKS_SHOW_FAIL_FROM makes the Nth and later reads unreadable -
+  # NOT absent, which is a different answer. The sweep reads the backlog twice
+  # per episode, before and after the remediation, so a blanket failure would
+  # only ever exercise the first; counting is what reaches the second.
+  if [ -n "${FM_TEST_TASKS_SHOW_FAIL_FROM:-}" ]; then
+    shows=0
+    [ ! -f "$store.shows" ] || shows=$(cat "$store.shows")
+    shows=$((shows + 1))
+    printf '%s' "$shows" > "$store.shows"
+    if [ "$shows" -ge "$FM_TEST_TASKS_SHOW_FAIL_FROM" ]; then
+      printf 'error: "backlog could not be read"\ncode: EIO\n'
+      exit 1
+    fi
   fi
-  printf 'task:\n  id: %s\n  state: %s\n  body: -\n' "$id" "$state"
+  state=$(state_of "$id")
+  [ -n "$state" ] || not_found "$id"
+  printf 'task:\n  id: %s\n  state: %s\n  held: %s\n  body: -\n' \
+    "$id" "$state" "${FM_TEST_TASKS_HELD:-no}"
   exit 0
+fi
+if [ "${1:-}" = reopen ]; then
+  id=${2:-}
+  state=$(state_of "$id")
+  [ -n "$state" ] || not_found "$id"
+  if [ -z "${FM_TEST_TASKS_REOPEN_NOOP:-}" ] && [ -n "$store" ]; then
+    printf '%s queued\n' "$id" >> "$store"
+  fi
+  printf 'ok: reopen %s -> Queued\n' "$id"
+  exit "${FM_TEST_TASKS_REOPEN_RC:-0}"
+fi
+if [ "${1:-}" = update ]; then
+  id=${2:-}
+  state=$(state_of "$id")
+  [ -n "$state" ] || not_found "$id"
+  shift 2
+  while [ "$#" -gt 0 ]; do
+    case $1 in
+      --body|--body-file|--title|--repo|--kind|--priority|--pr|--report)
+        [ "$#" -ge 2 ] || { printf 'error: "%s needs a value"\n' "$1" >&2; exit 2; }
+        shift 2 ;;
+      --archive-body|--json) shift ;;
+      *) printf 'error: "Unknown flag: %s"\n' "$1" >&2; exit 2 ;;
+    esac
+  done
+  exit "${FM_TEST_TASKS_UPDATE_RC:-0}"
 fi
 if [ "${1:-}" = add ]; then
   shift
@@ -160,14 +217,20 @@ if [ "${1:-}" = add ]; then
       *) printf 'error: "Unknown flag: %s"\n' "$1" >&2; exit 2 ;;
     esac
   done
-  # Recorded for every add the real CLI would have completed, including the one
-  # whose caller is killed immediately after it: the kill stands in for the
-  # caller dying, not for the backlog write failing.
-  if [ -n "$store" ] && [ "${FM_TEST_TASKS_RC:-0}" = 0 ]; then
+  # Create-only, exactly as installed: an id that already exists is left alone
+  # and still reported at rc=0.
+  if [ -n "$(state_of "$added")" ]; then
+    printf 'ok: add %s already exists\nalready: true\n' "$added"
+  # FM_TEST_TASKS_KILL_BEFORE_STORE is the caller dying with the backlog write
+  # still in flight, so the task never lands. Plain FM_TEST_TASKS_KILL is the
+  # caller dying immediately AFTER a write that did land.
+  elif [ -n "${FM_TEST_TASKS_KILL_BEFORE_STORE:-}" ]; then
+    :
+  elif [ -n "$store" ] && [ "${FM_TEST_TASKS_RC:-0}" = 0 ]; then
     printf '%s queued\n' "$added" >> "$store"
   fi
 fi
-if [ -n "${FM_TEST_TASKS_KILL:-}" ]; then
+if [ -n "${FM_TEST_TASKS_KILL:-}${FM_TEST_TASKS_KILL_BEFORE_STORE:-}" ]; then
   grandparent=$(ps -o ppid= -p "$PPID" 2>/dev/null | tr -d ' ')
   kill -TERM "$PPID" 2>/dev/null || true
   case "$grandparent" in
@@ -192,6 +255,23 @@ close_task() {
 drop_task() {
   grep -v "^$2 " "$1/tasks.store" > "$1/tasks.store.next" 2>/dev/null || true
   mv -f "$1/tasks.store.next" "$1/tasks.store"
+}
+
+# assert_task_state <case> <id> <queued|in_flight|done|-> <message>: what the
+# backlog ACTUALLY reports for that task afterwards, read the same way the sweep
+# reads it, with "-" meaning the backlog has no such task.
+#
+# This is the assertion the remediation path turns on. A sweep that detects a
+# stale state correctly and then fails to act on it still prints a reading, so
+# asserting the reading alone cannot tell a queued task from a discarded call -
+# `tasks-axi add` returns 0 either way. Every test that expects work to have been
+# made to exist checks the post-state here as well as the words on stdout.
+assert_task_state() {
+  local dir=$1 id=$2 want=$3 msg=$4 got
+  got=$(grep "^$id " "$dir/tasks.store" 2>/dev/null | tail -1 | cut -d' ' -f2)
+  [ -n "$got" ] || got=-
+  [ "$got" = "$want" ] ||
+    fail "$msg (the backlog reports '$got', expected '$want')"
 }
 
 # --- fixtures ---------------------------------------------------------------
@@ -779,39 +859,68 @@ test_task_already_under_way_is_left_alone() {
   pass "fm-fork-freshness: a sync already under way is recognised and left alone"
 }
 
-test_interrupted_materialisation_leaves_no_guard() {
+test_interrupted_materialisation_never_strands_the_task() {
   local dir out rc=0 leftover
   dir=$(new_case)
   one_fork "$dir" behind 0 3
 
-  # The brief is the idempotency guard, so a run cut short between its first
-  # artifact and its last must leave no guard at all - otherwise the fork keeps
-  # reading "already queued" over a task with no backlog item, no wake and no
-  # Bridge row, forever, which is the silent omission wearing the guard's clothes.
+  # The task is the sweep's commit point, and it is created last precisely so an
+  # interruption AT it cannot strand the rest. A run killed the instant the
+  # backlog write lands has, by construction, already placed the brief, the wake
+  # and the Bridge row - so the materialisation is complete, and the next sweep
+  # has nothing left to do but recognise it.
   FM_TEST_TASKS_KILL=1 run_sweep "$dir" sweep --owner acme >/dev/null 2>&1 || true
 
   assert_grep "Sync acme/widget" "$dir/tasks.log" \
     "the interrupted run never reached the backlog step, so it proves nothing"
-  assert_absent "$dir/home/data/fm-sync-acme-widget/brief.md" \
-    "an interrupted materialisation left the guard behind, and no later sweep will finish the task"
-  assert_absent "$dir/home/state/.wake-queue" \
-    "the interrupted run queued a wake it should never have reached"
   leftover=$(find "$dir/home/data" -name '.brief.*' | wc -l)
   [ "$leftover" = 0 ] ||
     fail "an interrupted materialisation left $leftover half-written brief(s) behind"
+  assert_present "$dir/home/data/fm-sync-acme-widget/brief.md" \
+    "the task landed without the instructions that must precede it"
+  assert_grep "## Definition of done" "$dir/home/data/fm-sync-acme-widget/brief.md" \
+    "the interrupted run left a half-written procedure, which is the one thing the atomic move exists to prevent"
+  assert_present "$dir/home/state/.wake-queue" \
+    "the task landed without the wake that must precede it - creating it last is what prevents exactly this"
+
+  out=$(run_sweep "$dir" sweep --owner acme) || rc=$?
+
+  expect_code 3 "$rc" "the fork is still behind on the sweep after the interruption"
+  assert_contains "$out" "already queued" \
+    "the completed materialisation must be recognised, not repeated"
+  assert_task_state "$dir" fm-sync-acme-widget queued \
+    "the recognised task must still be the one the interrupted run created"
+  pass "fm-fork-freshness: an interruption at the commit point leaves a complete materialisation"
+}
+
+test_interruption_before_the_task_lands_is_completed_by_the_next_sweep() {
+  local dir out rc=0
+  dir=$(new_case)
+  one_fork "$dir" behind 0 3
+
+  # The other side of the same window: the backlog write never landed, so the
+  # work is still owed. Nothing on disk may suppress that - a brief and a wake
+  # from the dead run are both standing, and the next sweep must still ask the
+  # task system, find no task, and finish the job.
+  FM_TEST_TASKS_KILL_BEFORE_STORE=1 run_sweep "$dir" sweep --owner acme >/dev/null 2>&1 || true
+
+  assert_present "$dir/home/data/fm-sync-acme-widget/brief.md" \
+    "the interrupted run should still have placed the instructions"
+  assert_present "$dir/home/state/.wake-queue" \
+    "the interrupted run should still have raised the wake"
+  assert_task_state "$dir" fm-sync-acme-widget - \
+    "this case is only meaningful if the backlog write never landed"
 
   out=$(run_sweep "$dir" sweep --owner acme) || rc=$?
 
   expect_code 3 "$rc" "the fork is still behind on the sweep after the interruption"
   assert_contains "$out" "action=task fm-sync-acme-widget queued" \
-    "the sweep after an interrupted one must redo the whole materialisation"
+    "a brief and a wake left by a dead run suppressed the sweep - only the task system may answer whether work is owed"
   assert_not_contains "$out" "already queued" \
-    "the sweep after an interrupted one found a guard the interrupted run should not have left"
-  assert_present "$dir/home/data/fm-sync-acme-widget/brief.md" \
-    "the completing sweep left the task without its instructions"
-  assert_present "$dir/home/state/.wake-queue" \
-    "the completing sweep left the task without its wake entry"
-  pass "fm-fork-freshness: an interrupted materialisation leaves no guard and the next sweep completes it"
+    "the sweep read a standing brief as an existing task, which is the conflation this redesign removed"
+  assert_task_state "$dir" fm-sync-acme-widget queued \
+    "the completing sweep did not actually create the task it reported"
+  pass "fm-fork-freshness: a brief left by a dead run never stands in for the task itself"
 }
 
 test_guard_expires_once_the_fork_is_level_again() {
@@ -869,7 +978,7 @@ test_guard_expires_once_the_fork_is_level_again() {
 }
 
 test_closed_task_frees_a_behind_fork_to_queue_again() {
-  local dir out rc=0 adds
+  local dir out rc=0 adds reopens
   dir=$(new_case)
   one_fork "$dir" behind 0 21
   run_sweep "$dir" sweep --owner acme >/dev/null || true
@@ -887,15 +996,131 @@ test_closed_task_frees_a_behind_fork_to_queue_again() {
     "the reading claimed a queued task over a backlog item that closed with the first episode"
   assert_contains "$out" "action=task fm-sync-acme-widget queued" \
     "a fork behind with no open sync task must get a real new one"
-  assert_contains "$out" "RETIRED=brief.retired-" \
-    "the marker was retired without naming what was retired"
+
+  # The reading is not the result. A sweep that detects the closed task and then
+  # fails to reopen it prints this same word, which is exactly how the third
+  # finding shipped, so the post-state is asserted separately and in the
+  # backlog's own terms.
+  assert_task_state "$dir" fm-sync-acme-widget queued \
+    "the reading said queued while the task stayed closed - the false success this redesign exists to remove"
+
+  # And by the primitive that can actually do it. `add` cannot reopen anything:
+  # over an existing id the installed CLI returns 0 having changed nothing, so a
+  # second add here would be the defect wearing a passing test.
+  reopens=$(grep -c '^reopen fm-sync-acme-widget' "$dir/tasks.log" || true)
+  [ "$reopens" = 1 ] ||
+    fail "the closed task must be reopened by the primitive that transitions it, found $reopens reopen(s)"
+  adds=$(grep -c '^add fm-sync-acme-widget' "$dir/tasks.log" || true)
+  [ "$adds" = 1 ] ||
+    fail "add is create-only and must not be used to reopen; found $adds add(s) across two episodes"
+
+  assert_contains "$out" "SUPERSEDED=brief.retired-" \
+    "the replaced instructions were not named, so the previous episode's reading is undiscoverable"
   assert_contains "$out" "the backlog reports it done" \
-    "the reading did not record why the marker was judged spent"
+    "the reading did not record why a new episode was started"
   assert_grep "behind 14, ahead 0" "$dir/home/data/fm-sync-acme-widget/brief.md" \
     "the fresh task still carries the first episode's reading"
+  pass "fm-fork-freshness: a closed sync task is reopened, and the backlog proves it"
+}
+
+test_a_remediation_that_does_not_transition_is_never_reported_as_queued() {
+  local dir out rc=0
+  dir=$(new_case)
+  one_fork "$dir" behind 0 21
+  run_sweep "$dir" sweep --owner acme >/dev/null || true
+  close_task "$dir" fm-sync-acme-widget
+  compare_fixture "$dir" upstream/widget main acme main behind 0 14 >/dev/null
+
+  # The acceptance test the third finding earned. A guard that detects a stale
+  # state correctly and then fails to act on it is not half-working: it is a
+  # false-success generator, and a false success outranks a false failure here
+  # because nothing prompts a look.
+  #
+  # So the remediation is made to report success while transitioning nothing -
+  # the exact shape `tasks-axi add` has over an existing id - and the reading
+  # must still refuse to say queued.
+  out=$(FM_TEST_TASKS_REOPEN_NOOP=1 run_sweep "$dir" sweep --owner acme) || rc=$?
+
+  assert_task_state "$dir" fm-sync-acme-widget "done" \
+    "this case is only meaningful while the task stays closed"
+  assert_not_contains "$out" "action=task fm-sync-acme-widget queued" \
+    "the sweep printed queued over a task that never left done - exit status was treated as a result"
+  assert_contains "$out" "NOT queued" \
+    "a remediation that changed nothing must say so on the reading"
+  assert_contains "$out" "the backlog reports it done" \
+    "the reading must name the state actually found, not just that something failed"
+  assert_contains "$out" "MANUAL=" \
+    "a reading nobody can act on without a hand must be marked for one"
+  assert_grep "TASK_MANUAL:" "$dir/stderr.log" \
+    "a task that could not be queued raised no operator line"
+  pass "fm-fork-freshness: a remediation that transitions nothing is never read as queued"
+}
+
+test_unreadable_post_state_reads_unknown_rather_than_queued() {
+  local dir out rc=0
+  dir=$(new_case)
+  one_fork "$dir" behind 0 21
+
+  # The third world. The task may or may not have been created and the sweep
+  # cannot tell, so it may print neither definite word: naming the two states a
+  # reading is meant to distinguish and finding that both produce it is the test
+  # for fabrication, and "queued" would fail it here.
+  out=$(FM_TEST_TASKS_SHOW_FAIL_FROM=2 run_sweep "$dir" sweep --owner acme) || rc=$?
+
+  assert_not_contains "$out" "action=task fm-sync-acme-widget queued" \
+    "an unconfirmable post-state was reported as a definite success"
+  assert_not_contains "$out" "NOT queued" \
+    "an unconfirmable post-state was reported as a definite failure"
+  assert_contains "$out" "queue-state unknown" \
+    "an unreadable post-state must read as unknown, in those words"
+  assert_grep "TASK_UNCONFIRMED:" "$dir/stderr.log" \
+    "an unconfirmable remediation raised no operator line"
+  pass "fm-fork-freshness: a post-state that cannot be read is unknown, not queued and not failed"
+}
+
+test_a_held_task_is_open_work_and_is_not_duplicated() {
+  local dir out rc=0 adds
+  dir=$(new_case)
+  one_fork "$dir" behind 0 21
+  run_sweep "$dir" sweep --owner acme >/dev/null || true
+
+  # Hold is an orthogonal field, not a state: the CLI reports a held task as
+  # `state: queued` with `held: yes`, and there is no state named `held`
+  # anywhere in it. A held sync task is therefore open work somebody has paused
+  # on purpose, and raising a second one over it would be the duplicate the
+  # short-circuit exists to prevent.
+  compare_fixture "$dir" upstream/widget main acme main behind 0 30 >/dev/null
+  out=$(FM_TEST_TASKS_HELD=yes run_sweep "$dir" sweep --owner acme) || rc=$?
+
+  expect_code 3 "$rc" "the fork is still behind"
+  assert_contains "$out" "already queued" \
+    "a held sync task is open work and must short-circuit, not raise a second episode"
+  assert_task_state "$dir" fm-sync-acme-widget queued \
+    "a held task must be left exactly as it was found"
   adds=$(grep -c '^add fm-sync-acme-widget' "$dir/tasks.log" || true)
-  [ "$adds" = 2 ] || fail "expected a second backlog item for the second episode, found $adds add(s)"
-  pass "fm-fork-freshness: a closed sync task frees its fork to raise a fresh one"
+  [ "$adds" = 1 ] || fail "a held task was duplicated; found $adds add(s)"
+  pass "fm-fork-freshness: a held sync task is open work, not a state the sweep invents"
+}
+
+test_reopen_is_never_called_on_an_open_task() {
+  local dir reopens
+  dir=$(new_case)
+  one_fork "$dir" behind 0 21
+  run_sweep "$dir" sweep --owner acme >/dev/null || true
+
+  # `reopen` moves Done OR In flight back to Queued, so calling it on work a
+  # crewmate already holds would pull that work back to the queue underneath
+  # them. It is reachable only from a confirmed closed reading.
+  printf '%s in_flight\n' fm-sync-acme-widget >> "$dir/tasks.store"
+  compare_fixture "$dir" upstream/widget main acme main behind 0 30 >/dev/null
+  run_sweep "$dir" sweep --owner acme >/dev/null || true
+
+  assert_task_state "$dir" fm-sync-acme-widget in_flight \
+    "an in-flight sync task was pulled back to the queue underneath its worker"
+  reopens=$(grep -c '^reopen fm-sync-acme-widget' "$dir/tasks.log" || true)
+  [ "$reopens" = 0 ] ||
+    fail "reopen was called on an open task $reopens time(s); it may only follow a confirmed closed reading"
+  pass "fm-fork-freshness: reopen is reachable only from a confirmed closed reading"
 }
 
 test_absent_task_frees_a_behind_fork_to_queue_again() {
@@ -911,7 +1136,7 @@ test_absent_task_frees_a_behind_fork_to_queue_again() {
   expect_code 3 "$rc" "the fork is still behind"
   assert_contains "$out" "action=task fm-sync-acme-widget queued" \
     "a marker backed by no task at all still suppressed the work it was tracking"
-  assert_contains "$out" "the backlog has no task fm-sync-acme-widget" \
+  assert_contains "$out" "the backlog has no such task" \
     "the reading did not record why the marker was judged spent"
   pass "fm-fork-freshness: a marker the backlog has no task for is retired, not honoured"
 }
@@ -930,13 +1155,13 @@ test_unreadable_task_state_neither_duplicates_nor_retires() {
   stderr=$(cat "$dir/stderr.log")
 
   expect_code 3 "$rc" "the fork is behind whatever the backlog could say"
-  assert_contains "$stderr" "GUARD_UNKNOWN:" \
+  assert_contains "$stderr" "TASK_UNKNOWN:" \
     "a liveness question that could not be answered passed silently"
-  assert_contains "$out" "not re-queued" \
+  assert_contains "$out" "not queued" \
     "the reading claimed a state of the sync task that was never read"
   assert_absent "$dir/home/state/fm-sync-acme-widget.meta" "no worker was ever spawned here"
   assert_present "$dir/home/data/fm-sync-acme-widget/brief.md" \
-    "a marker whose task state is unknown was retired anyway"
+    "instructions whose task state is unknown were filed away anyway"
   [ -z "$(find "$dir/home/data/fm-sync-acme-widget" -name 'brief.retired-*.md')" ] ||
     fail "an unreadable task state must retire nothing"
   adds=$(grep -c '^add fm-sync-acme-widget' "$dir/tasks.log" || true)
@@ -965,22 +1190,32 @@ test_a_sync_under_way_keeps_its_guard() {
 }
 
 test_a_task_that_could_not_be_created_keeps_its_reason() {
-  local dir out rc=0
+  local dir out stderr rc=0
   dir=$(new_case)
   one_fork "$dir" behind 0 3
-  # A directory where the brief belongs: every artifact up to the atomic move
-  # happens, and the move itself cannot. With the backlog write failing too, the
-  # composed line carries both the cause and the MANUAL marker - the two things
-  # a generic "task NOT created" literal would overwrite.
+  # A directory where the brief belongs: the atomic move cannot land, so there
+  # are no usable instructions. Instructions come before the task now, so this
+  # stops there rather than queueing work nobody could execute - and it must say
+  # which of the several ways it stopped, not a generic "NOT queued".
   mkdir -p "$dir/home/data/fm-sync-acme-widget/brief.md/blocked"
-  out=$(FM_TEST_TASKS_RC=1 run_sweep "$dir" sweep --owner acme) || rc=$?
+  out=$(run_sweep "$dir" sweep --owner acme) || rc=$?
+  stderr=$(cat "$dir/stderr.log")
 
   expect_code 3 "$rc" "the fork is behind however its task ended"
-  assert_contains "$out" "NOT created: instructions could not be placed" \
+  assert_contains "$out" "NOT queued: instructions could not be placed" \
     "the reading dropped the reason its task could not be created"
-  assert_contains "$out" "MANUAL=backlog" \
-    "the reading dropped the marker naming the artifact nobody observed"
-  pass "fm-fork-freshness: a task that could not be created keeps its reason and its MANUAL marker"
+  assert_grep "TASK_MANUAL:" "$dir/stderr.log" \
+    "a task withheld for want of instructions raised no operator line"
+  assert_contains "$stderr" "instructions could not be placed" \
+    "the operator line dropped the reason the task was withheld"
+  assert_task_state "$dir" fm-sync-acme-widget - \
+    "a task was queued against instructions that could not be written"
+
+  # The fork's behind reading still goes out. Withholding the task is not the
+  # same as withholding the alarm.
+  assert_contains "$out" "acme/widget status=behind behind=3" \
+    "a local write failure swallowed the reading that the fork is behind"
+  pass "fm-fork-freshness: a task that could not be created keeps its reason and reports the fork anyway"
 }
 
 test_sync_brief_never_carries_a_remote_credential() {
@@ -1053,10 +1288,14 @@ test_backlog_failure_is_reported_not_swallowed() {
   one_fork "$dir" behind 0 3
   out=$(FM_TEST_TASKS_RC=1 run_sweep "$dir" sweep --owner acme) || true
   stderr=$(cat "$dir/stderr.log")
-  assert_contains "$stderr" "BACKLOG_MANUAL: add fm-sync-acme-widget" \
+  assert_contains "$stderr" "TASK_MANUAL: acme/widget is behind but sync task fm-sync-acme-widget" \
     "a backlog write that failed must say so rather than pass silently"
   assert_contains "$out" "MANUAL=backlog" \
     "the reading claimed a queued task while its backlog item was never observed"
+  assert_contains "$out" "NOT queued" \
+    "a backlog write that failed still read as a queued task"
+  assert_task_state "$dir" fm-sync-acme-widget - \
+    "this case is only meaningful while the backlog write actually fails"
   assert_present "$dir/home/data/fm-sync-acme-widget/brief.md" \
     "a failed backlog write must not cost the task its instructions"
   pass "fm-fork-freshness: a backlog write that fails is reported, not swallowed"
@@ -1243,12 +1482,12 @@ test_session_start_relays_everything_the_sweep_says() {
   # and the captain tracks an item that is on no backlog.
   out=$(FM_TEST_SWEEP_RC=3 \
     FM_TEST_SWEEP_STDOUT='FORK_FRESHNESS: acme/widget status=behind behind=3 ahead=0 upstream=upstream/widget compare=main...main action=task fm-sync-acme-widget queued' \
-    FM_TEST_SWEEP_STDERR='BACKLOG_MANUAL: add fm-sync-acme-widget to the backlog by hand' \
+    FM_TEST_SWEEP_STDERR='TASK_MANUAL: acme/widget is behind but sync task fm-sync-acme-widget did not create' \
     run_bootstrap "$dir" "$root")
 
   assert_contains "$out" "action=task fm-sync-acme-widget queued" \
     "the session-start digest lost the sweep's reading"
-  assert_contains "$out" "BACKLOG_MANUAL: add fm-sync-acme-widget" \
+  assert_contains "$out" "TASK_MANUAL: acme/widget is behind but sync task fm-sync-acme-widget" \
     "a sync task whose backlog write failed reached the digest as a clean queued task"
   pass "fm-fork-freshness: session start relays the sweep's backlog failure, not only its reading"
 }
@@ -1331,9 +1570,14 @@ test_sync_task_carries_the_proven_procedure
 test_behind_queues_a_wake
 test_repeat_sweep_creates_no_duplicate_task
 test_task_already_under_way_is_left_alone
-test_interrupted_materialisation_leaves_no_guard
+test_interrupted_materialisation_never_strands_the_task
+test_interruption_before_the_task_lands_is_completed_by_the_next_sweep
 test_guard_expires_once_the_fork_is_level_again
 test_closed_task_frees_a_behind_fork_to_queue_again
+test_a_remediation_that_does_not_transition_is_never_reported_as_queued
+test_unreadable_post_state_reads_unknown_rather_than_queued
+test_a_held_task_is_open_work_and_is_not_duplicated
+test_reopen_is_never_called_on_an_open_task
 test_absent_task_frees_a_behind_fork_to_queue_again
 test_unreadable_task_state_neither_duplicates_nor_retires
 test_a_sync_under_way_keeps_its_guard

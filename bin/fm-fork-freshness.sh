@@ -76,11 +76,16 @@
 # alternative is the failure this replaced: `queued` printed over a task that
 # stayed done, on every sweep, forever.
 #
-# The wake and the Bridge row rest on the forge reading, not on the bookkeeping,
-# so a backlog step that failed can never also silence the alarm that this fork
-# is behind. Any step that did not happen prints TASK_MANUAL:, TASK_UNCONFIRMED:,
-# TASK_UNKNOWN:, ARCHIVE_MANUAL:, WAKE_MANUAL: or BRIDGE_MANUAL: on stderr
-# (stdout is the reading) and marks the reading with MANUAL=<step>[+<step>].
+# The task is created LAST, after the brief, the wake and the Bridge row, because
+# whatever a sweep gates on must be the last artifact it creates: a task existing
+# while the wake and Bridge row do not would be short-circuited by every later
+# sweep, and nobody would ever be told. Creating it last makes an open task imply
+# the three artifacts before it. The wake and the Bridge row therefore rest on the
+# forge reading rather than on the bookkeeping, so a backlog step that failed can
+# never also silence the alarm that this fork is behind. Any step that did not
+# happen prints TASK_MANUAL:, TASK_UNCONFIRMED:, TASK_UNKNOWN:, ARCHIVE_MANUAL:,
+# WAKE_MANUAL: or BRIDGE_MANUAL: on stderr (stdout is the reading) and marks the
+# reading with MANUAL=<step>[+<step>].
 # Re-running never creates a second task for the same fork. --dispatch
 # additionally launches the worker through bin/fm-spawn.sh when this home has a
 # clone of that fork and FM_FORK_SYNC_HARNESS or config/fork-sync-harness names
@@ -478,6 +483,16 @@ brief_tmp_cleanup() {
   BRIEF_TMP=
 }
 
+# standing_phrase <liveness>: a task_liveness reading in the words the action
+# field uses, so every reading that cites the backlog cites it the same way.
+standing_phrase() {
+  case "$1" in
+    'open '*|'closed '*) printf 'the backlog reports it %s\n' "${1#* }" ;;
+    absent) printf 'the backlog has no such task\n' ;;
+    *) printf '%s\n' "${1#unknown }" ;;
+  esac
+}
+
 # archive_brief <id>: move a superseded brief aside, printing the name it was
 # kept under. Never a delete: the brief carries the reading that opened its
 # episode, and an episode that has been replaced must stay discoverable
@@ -493,6 +508,16 @@ archive_brief() {
   name="brief.retired-$stamp.md"
   mv -f "$DATA/$id/brief.md" "$DATA/$id/$name" 2>/dev/null || return 1
   printf '%s\n' "$name"
+}
+
+# brief_failed <slug> <id> <written|placed>: the sweep could not put usable
+# instructions on disk, so it stops before creating the task rather than
+# queueing work nobody can execute. The fork's behind reading still goes out on
+# the FORK_FRESHNESS line above - only the task is withheld - and this names the
+# failure on stderr so it reaches the session digest with the other loud ones.
+brief_failed() {
+  printf 'TASK_MANUAL: %s is behind but sync task %s was not created - its instructions could not be %s; queue it by hand\n' \
+    "$1" "$2" "$3" >&2
 }
 
 # ensure_sync_task <slug> <upstream> <fork-branch> <upstream-branch> <behind> <ahead> <status>
@@ -516,7 +541,9 @@ archive_brief() {
 # Because the brief is not a guard, it is placed BEFORE the task exists rather
 # than last. A task that is discoverable before its instructions are readable is
 # the harmful order; a brief standing with no task behind it suppresses nothing
-# and the next sweep simply rewrites it.
+# and the next sweep simply rewrites it. The task itself is created last, after
+# the wake and the Bridge row too - see below, where that ordering is what makes
+# short-circuiting on an open task sound.
 #
 # MAKING ONE EXIST, AND CONFIRMING IT
 #
@@ -550,8 +577,7 @@ ensure_sync_task() {
   standing=$(task_liveness "$id")
   case "$standing" in
     'open '*)
-      printf 'task %s already queued (the backlog reports it %s)\n' \
-        "$id" "${standing#open }"
+      printf 'task %s already queued (%s)\n' "$id" "$(standing_phrase "$standing")"
       return 0
       ;;
     'unknown '*)
@@ -576,7 +602,7 @@ ensure_sync_task() {
   # into the task body by backlog_reopen as well - so it is reported, not fatal.
   if [ -f "$brief" ]; then
     if name=$(archive_brief "$id"); then
-      archived=" SUPERSEDED=$name"
+      archived=" SUPERSEDED=$name ($(standing_phrase "$standing"))"
     else
       printf 'ARCHIVE_MANUAL: %s has a superseded data/%s/brief.md that could not be moved aside, so this episode overwrites it; the reading it carried survives in the task body\n' \
         "$slug" "$id" >&2
@@ -587,13 +613,11 @@ ensure_sync_task() {
   trap brief_tmp_cleanup EXIT
   trap 'exit 1' HUP INT TERM
   if ! mkdir -p "$DATA/$id" 2>/dev/null ||
-    ! BRIEF_TMP=$(mktemp "$DATA/$id/.brief.XXXXXX" 2>/dev/null); then
-    printf 'task %s NOT queued: instructions could not be written%s\n' "$id" "$archived"
-    return 1
-  fi
-  if ! write_sync_brief "$BRIEF_TMP" "$slug" "$up" "$fork_branch" "$up_branch" \
-    "$behind" "$ahead" "$status" "$taken"; then
+    ! BRIEF_TMP=$(mktemp "$DATA/$id/.brief.XXXXXX" 2>/dev/null) ||
+    ! write_sync_brief "$BRIEF_TMP" "$slug" "$up" "$fork_branch" "$up_branch" \
+      "$behind" "$ahead" "$status" "$taken"; then
     brief_tmp_cleanup
+    brief_failed "$slug" "$id" written
     printf 'task %s NOT queued: instructions could not be written%s\n' "$id" "$archived"
     return 1
   fi
@@ -602,19 +626,11 @@ ensure_sync_task() {
   # the brief somewhere nobody looks while the reading says queued.
   if ! mv -f "$BRIEF_TMP" "$brief" 2>/dev/null || [ ! -f "$brief" ]; then
     brief_tmp_cleanup
+    brief_failed "$slug" "$id" placed
     printf 'task %s NOT queued: instructions could not be placed%s\n' "$id" "$archived"
     return 1
   fi
   BRIEF_TMP=
-
-  case "$need" in
-    create) backlog_create "$id" "$title" "$note" || rc=$? ;;
-    reopen) backlog_reopen "$id" "$note" || rc=$? ;;
-  esac
-  [ "$rc" != 2 ] || manual="$manual+note"
-
-  # Never inferred from $rc: confirmed.
-  confirmed=$(task_liveness "$id")
 
   queue_wake "fork-freshness: $slug is behind $up by $behind (ahead $ahead) - sync task $id" || {
     printf 'WAKE_MANUAL: %s raised no wake entry; carry sync task %s forward by hand\n' "$slug" "$id" >&2
@@ -625,6 +641,24 @@ ensure_sync_task() {
     printf 'BRIDGE_MANUAL: %s has no Bridge row; put sync task %s to the captain by hand\n' "$slug" "$id" >&2
     manual="$manual+bridge"
   }
+
+  # The task is created LAST, and that ordering is what makes the short-circuit
+  # above sound. Whatever the sweep gates on has to be the last artifact it
+  # creates, or an interruption strands the rest: a task that exists while the
+  # wake and the Bridge row do not would be skipped by every later sweep, and
+  # nobody would ever be told this fork is behind. Creating it last means an
+  # open task genuinely implies the three artifacts before it.
+  #
+  # The old design had the brief last for this same reason and got that part
+  # right; what was wrong was gating on a file instead of on the work.
+  case "$need" in
+    create) backlog_create "$id" "$title" "$note" || rc=$? ;;
+    reopen) backlog_reopen "$id" "$note" || rc=$? ;;
+  esac
+  [ "$rc" != 2 ] || manual="$manual+note"
+
+  # Never inferred from $rc: confirmed.
+  confirmed=$(task_liveness "$id")
 
   case "$confirmed" in
     'open '*) verb="queued" ;;
@@ -638,12 +672,12 @@ ensure_sync_task() {
       return 0
       ;;
     *)
-      printf 'TASK_MANUAL: %s is behind but sync task %s did not %s - the backlog still reports it %s; queue it by hand\n' \
-        "$slug" "$id" "$need" "$confirmed" >&2
+      printf 'TASK_MANUAL: %s is behind but sync task %s did not %s - %s; queue it by hand\n' \
+        "$slug" "$id" "$need" "$(standing_phrase "$confirmed")" >&2
       manual="$manual+backlog"
       [ -z "$manual" ] || manual=" MANUAL=${manual#+}"
-      printf 'task %s NOT queued: the backlog still reports it %s after %s%s%s\n' \
-        "$id" "$confirmed" "$need" "$manual" "$archived"
+      printf 'task %s NOT queued: %s after %s%s%s\n' \
+        "$id" "$(standing_phrase "$confirmed")" "$need" "$manual" "$archived"
       return 1
       ;;
   esac
@@ -700,11 +734,11 @@ retire_sync_task() {
 
   if ! name=$(archive_brief "$id"); then
     printf 'ARCHIVE_MANUAL: %s is level again and its data/%s/brief.md is superseded (%s), but it could not be moved aside; file it by hand so it stops reading as the current procedure\n' \
-      "$slug" "$id" "$standing" >&2
+      "$slug" "$id" "$(standing_phrase "$standing")" >&2
     printf 'task %s NOT retired: superseded instructions could not be moved aside\n' "$id"
     return 1
   fi
-  printf 'task %s retired RETIRED=%s (%s)\n' "$id" "$name" "$standing"
+  printf 'task %s retired RETIRED=%s (%s)\n' "$id" "$name" "$(standing_phrase "$standing")"
 }
 
 # --- one fork ---------------------------------------------------------------
