@@ -226,6 +226,25 @@ case ":$FM_REMOTE_JOB_OPERATOR_PATH:" in
 esac
 pass "operator PATH resolves the authorized Nix profile bin link"
 
+# Staged here, deliberately, while no worker has ever existed for this state root:
+# the record is completed and its deadline allowed to pass before anything can
+# claim it, so the worker's first sight of this job is always of an expired one,
+# on any machine at any load. That makes the expiry guarantee provable without a
+# blocking job to hold the worker off, and so without any window to lose. Nothing
+# is stopped or restarted to arrange it - doing that turned out to be its own
+# source of flakiness, because a stop racing a restart can strand worker ownership
+# and leave the replacement unable to come back. The result is asserted just after
+# the worker below reports ready.
+PRESTARTED_SIDE_EFFECT="$TMP_ROOT/prestarted-side-effect"
+FM_REMOTE_JOB_QUEUE_TIMEOUT=1
+fm_remote_job_stage "$ACCOUNT_HOME" "$REMOTE_ROOT" "$REMOTE_HOME" \
+  fm-touch-job.sh "$PRESTARTED_SIDE_EFFECT" < /dev/null > /dev/null
+PRESTARTED_JOB_ID=$FM_REMOTE_JOB_ID
+FM_REMOTE_JOB_QUEUE_TIMEOUT=5
+PRESTARTED_DEADLINE=$(fm_remote_job_read_number "$STATE_ROOT/jobs/$PRESTARTED_JOB_ID" queue_deadline) \
+  || fail "the pre-expired job did not record a durable deadline"
+while [ "$(date +%s)" -le "$PRESTARTED_DEADLINE" ]; do sleep 0.05; done
+
 HOME="$ACCOUNT_HOME" PATH="$RUNTIME_BIN:/usr/bin:/bin:/usr/sbin:/sbin" FM_FAKE_PERL_LOG="$FAKE_PERL_LOG" \
   FM_ROOT_OVERRIDE="$REMOTE_ROOT" FM_REMOTE_JOB_STATE_ROOT="$STATE_ROOT" \
   FM_REMOTE_JOB_PLATFORM_OVERRIDE=Linux FM_REMOTE_JOB_TIMEOUT=5 \
@@ -235,6 +254,15 @@ for _ in $(seq 1 100); do
   sleep 0.05
 done
 assert_present "$STATE_ROOT/worker.ready" "the worker did not publish its readiness heartbeat"
+
+# The job staged above expired before this worker existed, so its very first pass
+# over the queue must expire it rather than run it.
+fm_remote_job_wait "$ACCOUNT_HOME" "$PRESTARTED_JOB_ID" || fail "$FM_REMOTE_JOB_ERROR"
+[ "$FM_REMOTE_JOB_EXIT" -eq 124 ] \
+  || fail "a job whose deadline passed before the worker started was not expired"
+assert_absent "$PRESTARTED_SIDE_EFFECT" "a worker executed a job that expired before the worker existed"
+fm_remote_job_reap "$ACCOUNT_HOME" "$PRESTARTED_JOB_ID" || fail "the pre-expired job could not be reaped"
+pass "a queued job that expires before the worker starts is never executed"
 
 file_mode() {
   if [ "$(uname)" = Darwin ]; then
@@ -403,32 +431,6 @@ assert_absent "$QUEUED_SIDE_EFFECT" "the worker executed a queued job after its 
 fm_remote_job_reap "$ACCOUNT_HOME" "$FIRST_JOB_ID" || fail "the blocking job could not be reaped"
 fm_remote_job_reap "$ACCOUNT_HOME" "$JOB_ID" || fail "the expired queued job could not be reaped"
 pass "the worker expires queued jobs before they can mutate"
-
-# The same guarantee with the timing forced rather than arranged: the queued
-# record is completed, and its deadline allowed to pass, while no worker exists at
-# all. The worker's first sight of the job is therefore always of an already
-# expired one, on any machine at any load, with no window for it to be seen
-# earlier. This is the case that would have caught the original defect had it been
-# real, and it cannot itself go order-sensitive.
-PRESTARTED_SIDE_EFFECT="$TMP_ROOT/prestarted-side-effect"
-stop_worker_tree "$STATE_ROOT"
-assert_absent "$STATE_ROOT/worker.pid" "the worker tree did not stop before the pre-expired stage"
-FM_REMOTE_JOB_QUEUE_TIMEOUT=1
-FM_REMOTE_JOB_TIMEOUT=5
-fm_remote_job_stage "$ACCOUNT_HOME" "$REMOTE_ROOT" "$REMOTE_HOME" \
-  fm-touch-job.sh "$PRESTARTED_SIDE_EFFECT" < /dev/null > /dev/null
-JOB_ID=$FM_REMOTE_JOB_ID
-FM_REMOTE_JOB_QUEUE_TIMEOUT=5
-QUEUED_DEADLINE=$(fm_remote_job_read_number "$STATE_ROOT/jobs/$JOB_ID" queue_deadline) \
-  || fail "the pre-expired job did not record a durable deadline"
-while [ "$(date +%s)" -le "$QUEUED_DEADLINE" ]; do sleep 0.05; done
-fm_remote_job_ensure_worker "$REMOTE_ROOT" "$ACCOUNT_HOME" || fail "$FM_REMOTE_JOB_ERROR"
-fm_remote_job_wait "$ACCOUNT_HOME" "$JOB_ID" || fail "$FM_REMOTE_JOB_ERROR"
-[ "$FM_REMOTE_JOB_EXIT" -eq 124 ] \
-  || fail "a job whose deadline passed before the worker started was not expired"
-assert_absent "$PRESTARTED_SIDE_EFFECT" "a worker executed a job that expired before the worker existed"
-fm_remote_job_reap "$ACCOUNT_HOME" "$JOB_ID" || fail "the pre-expired job could not be reaped"
-pass "a queued job that expires before the worker starts is never executed"
 
 FIRST_DELAYED_SIDE_EFFECT="$TMP_ROOT/first-delayed-side-effect"
 SECOND_DELAYED_SIDE_EFFECT="$TMP_ROOT/second-delayed-side-effect"
