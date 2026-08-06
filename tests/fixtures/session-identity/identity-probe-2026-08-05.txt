@@ -1,0 +1,21 @@
+probe host: Linux 6.18.33.2-microsoft-standard-WSL2   date: 2026-08-05T20:29:04-07:00
+
+## A. the primary firstmate home's session lock
+state/.lock = 392881
+lock pid 392881 cmdline: claude --dangerously-skip-permissions -n firstmate 
+lock pid 392881 CLAUDE_* environ:
+    (count: 0)
+
+## B. a tool-call child of an interactive claude harness
+  shell pid 51380  parent 3874878 = claude --dangerously-skip-permissions --model opus --effort 
+    CLAUDE_CODE_SESSION_ID=b20a76b2-0464-4db9-82ec-983f51125e24
+    CLAUDE_PID=3874878
+  shell pid 138017  parent 3568128 = claude --dangerously-skip-permissions --model opus --effort 
+    CLAUDE_CODE_SESSION_ID=e880a734-41e2-44b1-9c11-4dbd7a2b6077
+    CLAUDE_PID=3568128
+
+## C. session-id-named artifacts on disk
+  ~/.claude/session-env/ entries: 484 directories, each named by session id
+    415f9ddc-3987-4dbb-a743-f2f5d10a5199
+    d5d24389-9814-46da-a01a-dda52aa36cca
+    8e1d172c-4f85-4f62-ad45-90998dc993cb
