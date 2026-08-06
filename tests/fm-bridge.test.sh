@@ -1686,7 +1686,7 @@ def row(key):
     if anchor not in html:
         return None
     rest = html.split(anchor, 1)[1]
-    return re.split(r'<div class="hitem"|</section>', rest, maxsplit=1)[0]
+    return re.split(r'<div class="hitem"|<p class="grouplabel"|</section>', rest, maxsplit=1)[0]
 
 merged = row("t-merged")
 if merged is None:
@@ -1818,7 +1818,7 @@ board = open(sys.argv[2]).read()
 anchor = '<div class="hitem" id="item-task-pr">'
 if anchor not in history:
     sys.exit("the task vanished from both pages instead of staying visible")
-row = re.split(r'<div class="hitem"|</section>',
+row = re.split(r'<div class="hitem"|<p class="grouplabel"|</section>',
                history.split(anchor, 1)[1], maxsplit=1)[0]
 if "discarded" not in row:
     sys.exit("the row does not show how the work ended: %s" % row)

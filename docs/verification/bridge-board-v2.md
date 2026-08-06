@@ -209,7 +209,24 @@ What must stay outside every control, and is pinned by `tests/fm-bridge.test.sh`
 Those three are what a free-text annotation needs in order to name the ask it was placed on.
 The board still renders no free-text input of its own: no `input`, no `textarea`, no `contenteditable`.
 
-## 7. The live guard, and what it covers
+## 7. The render's cost, because it runs on the supervision loop
+
+`bin/fm-watch.sh` runs the tick from its own poll, so a slow render is a slow watcher.
+Measured on this machine:
+
+| Render | Wall clock |
+| --- | --- |
+| v1, no live readings | ~0.2s |
+| v2, cold probe cache (host memory + quota both spawned) | 1.392s |
+| v2, warm probe cache | 0.109s |
+
+The 1.4s cold render was enough to push a one-second watcher poll past a three-second guard in `tests/fm-watch-triage.test.sh`, which is the fleet's supervision responsiveness being spent on a captain-facing number.
+
+So the two probes that spawn a process are cached in `state/.bridge-probe-host` and `state/.bridge-probe-quota` for five minutes, with a two-second probe timeout; memory headroom is a file read and stays fresh every time.
+A reused reading carries its age on the gauge.
+Worst case on the watcher's thread is now one bounded probe per five-minute window, and the typical render is faster than v1's was.
+
+## 8. The live guard, and what it covers
 
 `tests/fm-bridge-lavish-annotation-live-e2e.test.sh` is the opt-in guard that re-checks the vendor-dependent half against the **installed** `lavish-axi` and a real hosted session.
 Run it after every `lavish-axi` upgrade: `FM_BRIDGE_LAVISH_LIVE_E2E=1 bash tests/fm-bridge-lavish-annotation-live-e2e.test.sh`, with `CHROME_DEVTOOLS_AXI_BROWSER_URL` pointing at a Chrome with remote debugging.
