@@ -63,6 +63,27 @@ Two consequences follow, and both are load-bearing:
 
 The session id therefore reaches both the writer and the readers of the lock, and it is the same value on both sides of the CLI/harness split that defeats a process id.
 
+## Live-harness confirmation
+
+`CLAUDE_CODE_SESSION_ID` is a vendor-emitted signal, so only a real session can confirm it is still emitted, still a session-id token, and still the same id the Stop payload carries.
+`tests/fm-claude-stop-autoarm-live-e2e.test.sh` is the guard that refreshes this claim; it is opt-in because standard CI has neither harness binaries nor credentials.
+
+```sh
+FM_CLAUDE_LIVE_E2E=1 bash tests/fm-claude-stop-autoarm-live-e2e.test.sh
+```
+
+Result on 2026-08-05, Claude 2.1.223:
+
+```
+ok - Claude 2.1.223 (Claude Code) live E2E reclaimed a stale session lock through session start,
+recorded a session id matching this session (ac23ea91-15da-4f43-8852-bb7dcff74c6e), completed two
+tokenless Stop-owned rewake cycles, and preserved the competing-live-owner boundary with a recorded
+refusal
+```
+
+Run it after every Claude Code upgrade.
+It fails naming the harness and version, so a vendor change that stopped emitting the variable is loud rather than a silent slide back to the process basis.
+
 ## The refusal bias, and what it costs when a refusal is silent
 
 The identity gate must keep refusing a session that does not own the home.
