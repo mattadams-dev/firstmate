@@ -2178,7 +2178,7 @@ def rendered_count(html, which):
     if body < 0:
         sys.exit("the %s board has no body at all" % which)
     seen = [(match.start(), match.group(1))
-            for match in re.finditer(r"<b>(\d+)</b>waiting on you", html)]
+            for match in re.finditer(r'<b class="you">(\d+)</b> waiting on you', html)]
     if not seen:
         sys.exit("the %s board renders no open-ask count at all, so the count "
                  "has nowhere left to live that survives a redraw" % which)

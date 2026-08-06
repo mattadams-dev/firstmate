@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # fm-bridge-render.sh - the READER half of the Bridge: the ONE authoritative
-# fold over the ledger, exposed in two output shapes.
+# fold over the ledger, exposed in several output shapes.
 #
 #   fm-bridge-render.sh --state            folded current state, as structured JSON
 #   fm-bridge-render.sh --state --id ID    the same fold, narrowed to one item
