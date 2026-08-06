@@ -3,7 +3,6 @@ name: firstmate-coding-guidelines
 description: >-
   Agent-only reference for changing firstmate's shared, tracked material per AGENTS.md section 1.
   Use before editing any of that material, whether working as firstmate directly or as a crewmate briefed on a firstmate-repo task.
-  Covers the knowledge-placement decision tree, the one-owner rule for contracts, the inline-stub pattern for content moved into a skill, AGENTS.md size discipline, trigger hygiene for new skills, and repo style rules (one sentence per line, plain dash, no agent co-author, shellcheck-clean bin scripts, colocated tests, and maintainer-verification evidence).
 user-invocable: false
 metadata:
   internal: true
@@ -60,7 +59,36 @@ The model to copy is `AGENTS.md` section 8's "Away-mode stub": it keeps only the
 Apply the decision tree above to every line you are about to add to `AGENTS.md`.
 If an addition needs more than a few lines of conditional detail (detail that matters only in a specific situation) or reference detail (a wire format, an exact schema, historical rationale), you are almost certainly adding it to the wrong file.
 `AGENTS.md`'s token cost is paid by every session of every fleet member, every time, whether or not that session ever hits the situation the new lines describe.
-A skill's cost is paid only by the sessions that actually load it.
+A skill's cost is paid only by the sessions that actually load it - but in those sessions it is paid in full, on every turn from the load onward, exactly as if the text had been in `AGENTS.md` all along.
+Moving a block into a skill therefore does not remove its cost, it makes the cost conditional:
+
+```
+saving per session = block tokens x P(this session never fires the trigger)
+```
+
+A trigger that fires in nearly every session saves nearly nothing and adds a tool round trip, however cleanly the block splits into law and verb.
+Estimate that probability before proposing an extraction, and prefer deleting a duplicate outright wherever an owner already exists, because a doc read on demand carries no such discount.
+
+### The extraction break-even
+
+A new skill carries a resident tax paid from the first turn whether or not it ever loads: its `description:` frontmatter sits in the harness's skill listing.
+Its section 13 trigger line and its inline stub are resident too, but both stay inside `AGENTS.md`, so they are already netted out of whatever the trim removes and must not be counted a second time.
+
+**The break-even is a relation, never a constant: an extraction pays only when the net resident removal from `AGENTS.md` - the trim measured after the stub and the index line are written back - exceeds that skill's listing-description cost.**
+Rarity raises what a qualifying extraction returns; it cannot pay the description's cost, which every session carries including the ones that never load the skill.
+Evaluate the relation by measuring both sides, never by applying a remembered number.
+
+Today's evaluation of the right-hand side, recorded for calibration and not as a floor: on 2026-08-05, claude 2.1.222, a `description:` written to the two-sentence cap below measured 87 tokens on an isolated matched pair.
+That figure holds only under those conditions - a harness change, a listing-format change, or a longer description moves it - so re-measure rather than reuse it.
+The one qualifying extraction in `AGENTS.md` section 7 decomposes as 164 tokens of net resident removal against 87 tokens of description, a 77-token saving; its untuned first attempt carried a four-sentence description and made the floor 82 tokens *worse*.
+
+Prefer the dedup class instead.
+Content that already has an owner elsewhere carries no resident tax at all and returns its full size, because removing a duplicate adds nothing back.
+That is the larger lever by a wide margin: removing `AGENTS.md`'s duplicated operational-home tree returned 4,228 tokens per call, against 77 for the section 7 extraction.
+Look for a duplicate before you look for something to extract.
+
+[`docs/verification/agents-md-diet.md`](../../../docs/verification/agents-md-diet.md) holds the measurements behind this rule, including why a fresh-session birth-weight reading is an upper bound on a conversion's saving rather than the achieved figure.
+
 When in doubt, write the fact into the skill or doc first by patching that owner's existing language, and add only the one-line trigger to `AGENTS.md`.
 
 ## Trigger hygiene
@@ -68,6 +96,13 @@ When in doubt, write the fact into the skill or doc first by patching that owner
 A new skill is dead weight if nothing loads it.
 Every new skill needs its load trigger declared inline: section 13 for agent-only reference skills, or the relevant operating section for anything else.
 State the trigger as a condition ("load before X", "load on Y wake"), never as a vague pointer.
+
+**Cap a skill's `description:` frontmatter at two sentences.**
+The cap binds new and touched skills; the pre-existing skills that exceed it are tracked separately as `fm-skill-description-retrofit` and are not to be retrofitted on unrelated changes.
+The description is resident in the harness's skill listing from the first turn, so every session pays for it including every session that never loads the skill.
+The cost is real and invisible, which is why this is a cap rather than a preference: a four-sentence description measured 184 tokens against 87 for the two-sentence rewrite that replaced it, and that difference alone was the difference between an extraction that helped and one that made the floor worse.
+Spend those two sentences on the trigger condition and what the skill owns; everything else belongs in the body, where only the sessions that load it pay.
+
 Briefs for tasks that touch firstmate's own tracked material should tell the crewmate to load this skill.
 `bin/fm-brief.sh`'s `REPO` argument is a caller-supplied string with no reliable signal that it names firstmate's own repo, unlike a project registered in `data/projects.md`, so there is no clean point inside the scaffold to detect this case automatically.
 Firstmate adds this skill's load instruction to firstmate-repo briefs by hand instead.
