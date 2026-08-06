@@ -199,7 +199,11 @@ TARGET_IDENTITY=$(fm_pid_identity "$TARGET") \
 # The captain's session. This is the specimen refusal: `kill -TERM 17907` failed
 # a real identity check and a real ancestry check and was still wrong, because
 # 17907 was the process holding this lock.
-SESSION_LOCK_PID=$(cat "$STATE/.lock" 2>/dev/null || true)
+# Read line 1 through the lock-record owner, never the whole file: the record
+# carries a session line below the pid, and reading the file whole would make
+# this comparison silently stop matching - turning the specimen refusal into
+# permission to signal the captain's own session.
+SESSION_LOCK_PID=$(fm_session_lock_pid "$STATE" 2>/dev/null || true)
 case "$SESSION_LOCK_PID" in
   ''|*[!0-9]*) ;;
   *) [ "$SESSION_LOCK_PID" != "$TARGET" ] || refuse 3 "pid $TARGET holds this home's session lock; it is a firstmate session, not a supervisor" ;;
