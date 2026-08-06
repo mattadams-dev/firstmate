@@ -1277,6 +1277,93 @@ for phrase in ("nothing was queued", "nothing was sent"):
 sys.exit(0)
 HONESTY
 pass "an answer reads as queued only when the queue call was observed to succeed"
+
+# --- 16c. recommender attribution, and the disagreement it must not hide ----
+#
+# An answer form may end with a `[rec: ...]` marker naming who recommends it.
+# The captain is being asked precisely BECAUSE two readings exist, so a fold
+# that picked a winner - or that kept only the first marker, or dropped the
+# unfamiliar one - would delete the reason the question reached the board. That
+# is the same silent-masking failure as guard 2, wearing a recommender's name.
+#
+# Pinned here: every marker survives the fold verbatim, more than one per ask
+# survives together, the marker leaves the option's own text so the captain
+# reads a choice rather than a footnote, and nothing on the card pre-picks a
+# recommended option.
+
+HOMEREC=$(new_home)
+FM_HOME=$HOMEREC "$BRIDGE" ask -q --id rec-split --project orca \
+  --title "two readings, and the captain is the tiebreak" \
+  --answer "A: serialize behind the holder write [rec: fm]" \
+  --answer "B: let the loser retry with backoff [rec: worker]" \
+  --answer "C: leave it" >/dev/null
+FM_HOME=$HOMEREC "$BRIDGE" ask -q --id rec-agree --project orca \
+  --title "one reading, agreed" \
+  --answer "A: keep it on the watcher poll [rec: worker+fm]" \
+  --answer "B: give it its own timer" >/dev/null
+FM_HOME=$HOMEREC "$BRIDGE" ask -q --id rec-strange --project orca \
+  --title "a recommender the fold has never heard of" \
+  --answer "A: do the thing (rec: secondmate)" \
+  --answer "B: do not" >/dev/null
+FM_HOME=$HOMEREC "$RENDER" --html > "$TMP_ROOT/rec.html"
+FM_HOME=$HOMEREC "$RENDER" --state > "$TMP_ROOT/rec-state.json"
+
+python3 - "$TMP_ROOT/rec.html" "$TMP_ROOT/rec-state.json" <<'RECCHECK' \
+  || fail "recommender: see the reported option"
+import json, re, sys
+html = open(sys.argv[1]).read()
+doc = json.load(open(sys.argv[2]))
+items = doc["items"]
+
+def recs(key):
+    return [(f["label"], f["rec"], f["body"], f["text"])
+            for f in items[key]["answer_forms"]]
+
+# 1. THE DISAGREEMENT SURVIVES. Two options, two different recommenders, both
+#    kept - no winner, no first-one-wins, no collapse to a single field.
+split = dict((label, rec) for label, rec, _, _ in recs("rec-split"))
+if split != {"A": "fm", "B": "worker", "C": ""}:
+    sys.exit("a split recommendation did not survive the fold intact: %r" % split)
+
+# 2. A JOINT RECOMMENDATION IS ONE TOKEN, not two halves the fold invented.
+agree = dict((label, rec) for label, rec, _, _ in recs("rec-agree"))
+if agree.get("A") != "worker+fm":
+    sys.exit("a joint recommendation was not preserved verbatim: %r" % agree)
+
+# 3. AN UNFAMILIAR RECOMMENDER IS PRESERVED, NOT DEFAULTED AND NOT DROPPED -
+#    this fold never maps an unrecognized value into a known bucket.
+strange = dict((label, rec) for label, rec, _, _ in recs("rec-strange"))
+if strange.get("A") != "secondmate":
+    sys.exit("an unfamiliar recommender was not preserved verbatim: %r" % strange)
+
+# 4. THE MARKER LEAVES THE OPTION'S OWN TEXT. The captain clicks a choice; the
+#    attribution is a chip beside it, never part of what the choice says.
+for key in ("rec-split", "rec-agree", "rec-strange"):
+    for label, rec, body, text in recs(key):
+        if "rec:" in body.lower() or "rec:" in text.lower():
+            sys.exit("ask %s option %s still carries its recommender marker in "
+                     "the option text: %r" % (key, label, text))
+
+# 5. THE BOARD SHOWS BOTH. A card where only one side of a disagreement is
+#    visible is the collapse happening in CSS instead of in the fold.
+card = html.split('id="item-rec-split"', 1)
+if len(card) != 2:
+    sys.exit("the split-recommendation ask never reached the board")
+card = re.split(r'<div class="ask" id=|</section>', card[1], maxsplit=1)[0]
+chips = re.findall(r'<span class="rectag">([^<]*)</span>', card)
+if chips != ["rec: fm", "rec: worker"]:
+    sys.exit("the board does not show both recommenders on the one card: %r" % chips)
+
+# 6. NOTHING PRE-PICKS A RECOMMENDED OPTION. A recommendation is information;
+#    a pre-selected option is a ruling the captain did not make.
+for found in re.finditer(r'<button class="([^"]*ansbtn[^"]*)"', card):
+    if "selected" in found.group(1) or "queued" in found.group(1):
+        sys.exit("the board pre-picks a recommended option, which queues a "
+                 "ruling nobody made: %s" % found.group(1))
+sys.exit(0)
+RECCHECK
+pass "every recommender survives the fold verbatim, and a disagreement reaches the card as both"
+
 # --- 17. ledger text cannot break out of the embedded state document -------
 #
 # The board carries the exact state document it drew from inside a

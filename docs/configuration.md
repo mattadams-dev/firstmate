@@ -180,8 +180,8 @@ A symlink is recorded in that same manifest by its target and never followed, si
 
 ## Bridge board and ledger (data/bridge/)
 
-The captain's board and the append-only ledger it is generated from live at `$FM_HOME/data/bridge/`, per home, gitignored.
-The supervision cycle renders the board on its own tick; nothing here needs setting for it to work.
+The captain's board, the history page beside it, and the append-only ledger they are both generated from live at `$FM_HOME/data/bridge/`, per home, gitignored.
+The supervision cycle renders both pages on its own tick; nothing here needs setting for it to work.
 [docs/bridge.md](bridge.md) owns the record schema, the canonical paths, the one fold every consumer reads through, and the rendering caps.
 The `FM_BRIDGE_*` variables below tune it.
 
@@ -534,11 +534,12 @@ FM_CHECK_TIMEOUT=30     # seconds allowed per slow check script
 FM_BRIDGE_INTERVAL=180  # seconds between Bridge board ticks in the watcher; a tick whose ledger content is unchanged writes nothing (docs/bridge.md)
 FM_BRIDGE_AGING_SECONDS=86400   # how long an open ask waits before the board flags it as aging
 FM_BRIDGE_LEDGER=       # absolute override of the Bridge ledger path; default is $FM_HOME/data/bridge/ledger.jsonl
-FM_BRIDGE_BOARD=        # absolute override of the generated board path; default is $FM_HOME/data/bridge/bridge.html
+FM_BRIDGE_BOARD=        # absolute override of the generated board path; default is $FM_HOME/data/bridge/bridge.html; the history page follows it into the same directory
+FM_BRIDGE_HISTORY=      # absolute override of the generated history page; default is history.html beside the board, and pointing it outside the board's own directory stops the two pages linking to each other
 FM_BRIDGE_NOW=          # fixed RFC3339 UTC clock for the Bridge, mainly for tests
-FM_BRIDGE_CAP_EVENTS=12   # notable events shown on the board before the zone overflows to the record
-FM_BRIDGE_CAP_FLEET_CLOSED=6        # rows shown per closed fleet group (landed, discarded, ended-unknown)
-FM_BRIDGE_CAP_RESOLVED_DECISIONS=3  # rows shown per closed decision or critical group
+FM_BRIDGE_CAP_EVENTS=12   # notable events shown on the history page before the section overflows to the record
+FM_BRIDGE_CAP_FLEET_CLOSED=6        # history rows shown per closed fleet group (landed, discarded, ended-unknown)
+FM_BRIDGE_CAP_RESOLVED_DECISIONS=3  # history rows shown per closed decision or critical group
 FM_BRIDGE_MAX_RECORD_BYTES=3800   # per-record bound that keeps one ledger append atomic under O_APPEND
 FM_BRIDGE_TICK_LOG_MAX_BYTES=131072   # size cap for state/.bridge-tick.log, the render-failure and recovery history behind the board's alarm (docs/bridge.md)
 FM_PROCEVENT_MAX_OUTPUT_BYTES=1048576   # bound on one captured process-to-event result

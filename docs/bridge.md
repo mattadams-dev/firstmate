@@ -15,8 +15,8 @@ bin/fm-bridge.sh          writer  ->  data/bridge/ledger.jsonl   append-only JSO
                                     bin/fm-bridge-render.sh      the ONE fold
                                        /         |         \
                               --html        --state      --lifecycle
-                             the board    folded state   typed answer
-                                          (published)     about one id
+                             --history    folded state   typed answer
+                          the two pages    (published)    about one id
 ```
 
 The board dates its content and claims nothing about supervision liveness.
@@ -91,6 +91,10 @@ Only `ts` and `id` are required on every record.
 | `phase` | string | WHERE IT GOT TO mechanically, e.g. `dispatched`, `pr-open`, `merged`, `cleaned`, `force-cleaned`, or `sent`/`delivered`/`consumed`; not a disposition |
 | `truncated` | bool | the writer had to shorten this record |
 
+**The recommender marker is parsed once, for everyone.**
+It is read case-insensitively and in parentheses too, and the fold publishes the split on each item as `answer_forms` (`label`, `body`, `text`, `rec`), so no consumer parses that marker a second time.
+An unfamiliar recommender is preserved verbatim rather than dropped, like every other unrecognized value here, and an option carrying none simply has an empty `rec`.
+
 **The state field is load-bearing.**
 It exists so the captain never mistakes an fm-handled item for an open ask, and so an item that is not theirs to answer never reaches their queue at all.
 `needs-captain` items are captain asks and nothing else is; `fm-handling` is visible so it is not forgotten but is not an ask; `resolved` means nobody owes anything further.
@@ -139,7 +143,7 @@ A recorded landed-test verdict arrives as a stated `outcome`, so it is `observed
 That phase is the ambiguous field the two axes exist to split: it was written both for genuinely unlanded work and for merged work whose worktree was force-cleaned, and the record cannot say which.
 Mapping it would dress the old ambiguity in the new axis's confidence, so such an item is `unknown`.
 
-Rows that cannot be resolved are named on the board rather than quietly filled in, and `--state` lists them under `unobserved_outcomes` with the per-item source in `outcome_source`.
+Rows that cannot be resolved are named in a banner on both rendered pages rather than quietly filled in, and `--state` lists them under `unobserved_outcomes` with the per-item source in `outcome_source`.
 
 Where a definition needs both axes it is a **conjunction of independently necessary conditions**, never a tiebreak.
 An ask is "someone owes a decision" AND "the work is still live": a discarded item is not an ask because there is nothing left to decide, and a merged item is not an ask because nobody owes it.
@@ -216,11 +220,11 @@ An ordinary cleanup additionally records `state=resolved`, because it ran every 
 Where no landed-work test applies at all - no worktree left, or a scout or secondmate kind - both paths record `unknown`, since "the gate let it through" is not the same statement as "the test passed".
 Uncommitted changes are unlanded work on every path: teardown removes the worktree, so those changes are gone.
 A forced retirement of a persistent secondmate records the same provenance as a `kind=event` note against `fleet`, because a secondmate is not a work item and must never become a strip row.
-The events zone renders that note on the board, so the most destructive override in the fleet is not the one whose reason is hardest to read.
+The events section renders that note on the history page, so the most destructive override in the fleet is not the one whose reason is hardest to read.
 
 **Work that ended is still shown, and still shows both axes.**
 An item whose outcome is `landed`, `discarded` or `unknown` leaves the ask queues, the `needs-captain` and `needs-cocaptain` tallies, the open-ask count and the aging flag, and its answer forms are withdrawn - nobody can rule on work that has ended.
-That is the ask conjunction doing its job, not the outcome axis overruling the state axis: the state it earned stays in the ledger and in `--state` for audit, and the board renders it as its own chip beside the outcome chip so a reader sees both answers rather than guessing the second from the first.
+That is the ask conjunction doing its job, not the outcome axis overruling the state axis: the state it earned stays in the ledger and in `--state` for audit, and the history page renders it as its own chip beside the outcome chip so a reader sees both answers rather than guessing the second from the first.
 When work ended and the ledger never said who owed it, the fold declines to invent a state rather than defaulting one - every value would be a claim nothing observed.
 Each closed group is capped with a visible overflow pointer to the record (`caps.fleet_closed`, default 6, `FM_BRIDGE_CAP_FLEET_CLOSED`; `caps.closed_decisions` for decisions and criticals, default 3, `FM_BRIDGE_CAP_RESOLVED_DECISIONS`), because a rare override must not grow into a permanent wall of rows, and a cap that hides rows silently would be its own lie.
 `bin/fm-bridge.sh lint` reads the same two axes, so it never asks for an answer form on work that has ended.
@@ -241,9 +245,9 @@ Decisions silently masked each other and the authoritative reader announced 1 op
 Two rules in this fold exist because of that, and both are asserted by `tests/fm-bridge.test.sh`:
 
 1. **Conservation.** Every non-blank line is accounted for: `lines_considered == records + malformed`.
-   The counts are published in `--state` and printed on the board, so a parser that stops reading a field stops adding up in public on the very next tick.
+   The counts are published in `--state` and printed on the history page, and a stream that does not add up banners on **both** rendered pages, so a parser that stops reading a field stops adding up in public on the very next tick.
 2. **Never default an unrecognized value.** An unknown `kind`, `state`, or `severity` is preserved verbatim and flagged in `recognized`, never mapped into a known bucket.
-   An unknown kind renders in its own "Unrecognized records" section rather than being filed somewhere convenient.
+   An unknown kind renders in its own "Unrecognized records" section on the history page rather than being filed somewhere convenient.
    Silent masking was the failure; visible strangeness is the fix.
 
 The fold also reads the key from any position it has ever occupied (`id`, `key`, `item_id`, `itemId`), preserves unknown fields under `extra`, and accepts records with no `v`, no trailing newline, or `answers` written as a bare string.
@@ -258,7 +262,7 @@ Adding it required no migration and no second fold, which is the property to pre
 
 Steering records are substrate.
 They fold through the identical path but never render as board items and are kept out of the captain's disposition tallies, so machinery cannot inflate the numbers they triage against.
-The board reports their count in the footer so the record's contents are not misrepresented.
+The history page reports their count in its footer so the record's contents are not misrepresented.
 
 **The epistemic point, which is the reason these records exist at all:** consumed and never-arrived present identically on screen.
 A message that was delivered and acted on leaves an empty composer; so does a message that never arrived.

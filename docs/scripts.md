@@ -75,7 +75,7 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-supervise-daemon.sh` | Presence-gated away-mode sub-supervisor: self-handle routine wakes, guard injection by the detected primary harness, escalate batched digests, alert on failed delivery |
 | `fm-crew-state.sh`       | Print one deterministic current-state line for a crew, or its run's completed-step evidence with `--steps` |
 | `fm-bridge.sh`           | Write, route, and lint the captain-facing records in the Bridge ledger (docs/bridge.md) |
-| `fm-bridge-render.sh`    | The one fold over that ledger: folded state, lifecycle answers, and the generated board |
+| `fm-bridge-render.sh`    | The one fold over that ledger: folded state, lifecycle answers, and the generated board and history page |
 | `fm-bridge-lib.sh`       | Shared Bridge path resolution, record normalization, and the bounded append primitive |
 | `fm-tangle-lib.sh`       | Shared default-branch resolution and primary-checkout tangle classification          |
 | `fm-supervision-lib.sh`  | Shared in-flight-work-without-fresh-watcher-beacon predicate                         |
