@@ -77,11 +77,26 @@ die() { printf 'fm-bridge-render: %s\n' "$1" >&2; exit 1; }
 
 # --- the one embedded program ----------------------------------------------
 # Written to a temp file once per invocation so both modes run the SAME bytes.
+#
+# STAGE IT IN THE CALLER'S OWN SHELL, NEVER THROUGH COMMAND SUBSTITUTION. This
+# used to be a `program_path()` whose callers read it as `prog=$(program_path)`,
+# and the substitution is a subshell: the assignment to PROGRAM landed in a
+# process that then exited, so the parent's PROGRAM stayed empty. Two things
+# followed from that one fact, and both were invisible - every call re-staged a
+# fresh ~90KB file because the memo was never seen, and the EXIT trap below
+# found nothing to remove because it reads the same empty variable. A single
+# home leaked 6,972 files and 600 MiB over two days of supervision ticks.
+#
+# So the contract is: stage_program is called from the top-level shell, sets
+# PROGRAM there, and every consumer reads "$PROGRAM". A consumer may then be
+# called from inside a substitution safely, because by then there is nothing
+# left to assign.
 PROGRAM=
-program_path() {
-  [ -n "$PROGRAM" ] && { printf '%s' "$PROGRAM"; return 0; }
-  PROGRAM=$(mktemp "${TMPDIR:-/tmp}/fm-bridge-prog.XXXXXX.py") || return 1
-  cat > "$PROGRAM" <<'PY'
+stage_program() {
+  [ -n "$PROGRAM" ] && return 0
+  local staged
+  staged=$(mktemp "${TMPDIR:-/tmp}/fm-bridge-prog.XXXXXX.py") || return 1
+  cat > "$staged" <<'PY'
 """Bridge fold, targeted queries, and board renderer.
 
 argv[1] selects the mode. Every mode that produces output folds exactly ONCE and
@@ -1942,7 +1957,7 @@ def main(argv):
 if __name__ == "__main__":
     sys.exit(main(sys.argv))
 PY
-  printf '%s' "$PROGRAM"
+  PROGRAM=$staged
 }
 
 cleanup() { [ -n "$PROGRAM" ] && rm -f "$PROGRAM"; }
@@ -1953,30 +1968,29 @@ require_python() {
     || die "python3 is required to fold the ledger; refusing to render a board that would look empty"
 }
 
+# Everything a mode needs before it can run, in one call, FROM THE TOP-LEVEL
+# SHELL. Staging inside a substitution is the defect above.
+prepare() {
+  require_python
+  stage_program || die "cannot stage the fold program"
+}
+
 # The single seam every consumer goes through.
 emit_state() {  # <folded-at> [id]
-  local prog
-  prog=$(program_path) || die "cannot stage the fold program"
-  python3 "$prog" state "$(fm_bridge_ledger_path)" "$1" "${2:-}"
+  python3 "$PROGRAM" state "$(fm_bridge_ledger_path)" "$1" "${2:-}"
 }
 
 emit_lifecycle() {  # <folded-at> <id>
-  local prog
-  prog=$(program_path) || die "cannot stage the fold program"
-  python3 "$prog" lifecycle "$(fm_bridge_ledger_path)" "$1" "$2"
+  python3 "$PROGRAM" lifecycle "$(fm_bridge_ledger_path)" "$1" "$2"
 }
 
 emit_html() {  # <folded-at>
-  local prog
-  prog=$(program_path) || die "cannot stage the fold program"
   # One process, one fold, shared in-process with the renderer.
-  python3 "$prog" html "$(fm_bridge_ledger_path)" "$1"
+  python3 "$PROGRAM" html "$(fm_bridge_ledger_path)" "$1"
 }
 
 ledger_signature() {
-  local prog
-  prog=$(program_path) || die "cannot stage the fold program"
-  python3 "$prog" signature "$(fm_bridge_ledger_path)"
+  python3 "$PROGRAM" signature "$(fm_bridge_ledger_path)"
 }
 
 # WRITING THE BOARD IS NOT FREE. Lavish hosts this file and reloads the page on
@@ -2131,6 +2145,12 @@ do_tick() {
     note_tick_failure "$err"
     return 1
   fi
+  # Staged HERE, in do_tick's own shell, which the dispatch calls at top level -
+  # so the memo and the EXIT trap see the same variable. See stage_program.
+  if ! stage_program; then
+    note_tick_failure "cannot stage the fold program"
+    return 1
+  fi
   now=$(fm_bridge_now)
   board=$(fm_bridge_board_path)
   # The signature IS this call's stdout, so its stderr goes to a file rather
@@ -2211,7 +2231,7 @@ case "$MODE" in
   path) fm_bridge_board_path; echo ;;
   ledger-path) fm_bridge_ledger_path; echo ;;
   state)
-    require_python
+    prepare
     if [ -n "$OUT" ]; then
       emit_state "$NOW" "$ITEM_ID" > "$OUT"
     else
@@ -2219,7 +2239,7 @@ case "$MODE" in
     fi
     ;;
   lifecycle)
-    require_python
+    prepare
     if [ -n "$OUT" ]; then
       emit_lifecycle "$NOW" "$ITEM_ID" > "$OUT"
     else
@@ -2227,11 +2247,11 @@ case "$MODE" in
     fi
     ;;
   html)
-    require_python
+    prepare
     if [ -n "$OUT" ]; then emit_html "$NOW" > "$OUT"; else emit_html "$NOW"; fi
     ;;
   write)
-    require_python
+    prepare
     write_board "$NOW" || die "could not write the board"
     printf '%s\n' "$(fm_bridge_board_path)"
     ;;

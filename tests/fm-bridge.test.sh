@@ -2014,4 +2014,63 @@ sys.exit(0)
 TABDOC
 pass "the documentation states the title is propagated at load, and promises no freshness past it"
 
+# --- 30. the renderer leaves nothing behind --------------------------------
+#
+# The fold is staged to a temp file so every mode runs the SAME bytes, and an
+# EXIT trap removes it. That trap read a variable the process could never have
+# set: its callers staged through `prog=$(program_path)`, and a command
+# substitution is a subshell, so the assignment died with it. The parent's
+# variable stayed empty, which cost twice over - the memo was never seen, so
+# every call staged a fresh ~90KB copy, and the trap found nothing to remove.
+# One home accumulated 6,972 files and 600 MiB across two days of supervision
+# ticks, growing every tick, and nothing on any surface said so.
+#
+# It is fixtured by DIRECTORY rather than by counting a pattern: a private
+# TMPDIR makes every file this renderer stages attributable, so a future
+# temporary under a different name is caught by the same assertion. And the
+# tick is run repeatedly, because the failure that matters is not one stray
+# file - it is per-invocation growth on a script the supervision cycle runs
+# every few minutes, forever.
+
+HOME30=$(new_home)
+FM_HOME=$HOME30 "$BRIDGE" ask -q --id leak-ask --project orca \
+  --title "does the renderer clean up after itself" --answer "A: it must" >/dev/null
+FM_HOME=$HOME30 "$BRIDGE" note -q --id leak-note --project orca \
+  --title "a second record so the fold has something to do" >/dev/null
+
+leak_tmp="$TMP_ROOT/tmpdir-30"
+
+# <label> <command...> - runs one renderer invocation with a private, EMPTY
+# TMPDIR and reports every file left in it afterwards.
+assert_leaves_nothing() {
+  local label=$1 left
+  shift
+  rm -rf "$leak_tmp"
+  mkdir -p "$leak_tmp"
+  TMPDIR="$leak_tmp" FM_HOME=$HOME30 "$@" >/dev/null 2>&1
+  left=$(find "$leak_tmp" -mindepth 1 | wc -l | tr -d '[:space:]')
+  [ "$left" = "0" ] || fail "$label left $left file(s) behind in its temp dir: $(find "$leak_tmp" -mindepth 1 -printf '%f ' 2>/dev/null)"
+}
+
+assert_leaves_nothing "--state" "$RENDER" --state
+assert_leaves_nothing "--state --id" "$RENDER" --state --id leak-ask
+assert_leaves_nothing "--lifecycle" "$RENDER" --lifecycle leak-ask
+assert_leaves_nothing "--html" "$RENDER" --html
+assert_leaves_nothing "--write" "$RENDER" --write
+pass "every renderer mode removes the fold program it staged"
+
+# Per-invocation growth is the actual defect. Five ticks over a ledger that
+# keeps changing, so every one of them genuinely renders.
+rm -rf "$leak_tmp"
+mkdir -p "$leak_tmp"
+for round in 1 2 3 4 5; do
+  FM_HOME=$HOME30 "$BRIDGE" note -q --id "leak-tick-$round" --project orca \
+    --title "tick $round changes the ledger so the tick cannot skip" >/dev/null
+  TMPDIR="$leak_tmp" FM_HOME=$HOME30 "$RENDER" --tick >/dev/null 2>&1
+done
+left=$(find "$leak_tmp" -mindepth 1 | wc -l | tr -d '[:space:]')
+[ "$left" = "0" ] \
+  || fail "five supervision ticks left $left temp file(s) behind - this is the growth that reached 600 MiB, not a stray file"
+pass "repeated supervision ticks leave no temp file behind at all"
+
 echo "all bridge ledger and fold tests passed"
