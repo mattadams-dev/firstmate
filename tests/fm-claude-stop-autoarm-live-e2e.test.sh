@@ -125,8 +125,27 @@ grep -q 'stale: fixture-rapid-1' "$TRANSCRIPT" || fail "first rapid rewake reaso
 grep -q 'stale: fixture-rapid-2' "$TRANSCRIPT" || fail "second rapid rewake reason missing from the transcript"
 [ "$(sed -n '1p' "$HOME_DIR/state/tool-calls.log" 2>/dev/null)" = 'bin/fm-session-start.sh' ] \
   || fail "fresh Claude session did not run session start first: $(cat "$HOME_DIR/state/tool-calls.log" 2>/dev/null)"
-[ "$(cat "$HOME_DIR/state/.lock" 2>/dev/null)" != 9999999 ] \
+[ "$(sed -n 1p "$HOME_DIR/state/.lock" 2>/dev/null)" != 9999999 ] \
   || fail "session start did not reclaim the stale dead-owner lock"
+
+# The session-identity basis, proven against the REAL harness rather than a
+# fixture. CLAUDE_CODE_SESSION_ID is a vendor-emitted signal, so nothing but a
+# live session can confirm it is still emitted, still a session id, and still
+# the SAME id the Stop payload carries - the two sources the lock and the
+# auto-arm respectively read. If Claude Code ever stops emitting it, the code
+# degrades to the legacy process basis silently; this assertion is what makes
+# that degradation loud instead (docs/verification/session-identity.md).
+LOCK_SESSION=$(sed -n '2s/^session=//p' "$HOME_DIR/state/.lock" 2>/dev/null || true)
+[ -n "$LOCK_SESSION" ] \
+  || fail "Claude $CLAUDE_VERSION: session start recorded NO session id on the lock; the identity basis silently fell back to the process id"
+case "$LOCK_SESSION" in
+  *[!A-Za-z0-9._-]*|'') fail "Claude $CLAUDE_VERSION: recorded session id is not a session-id token: '$LOCK_SESSION'" ;;
+esac
+PAYLOAD_SESSION=$(grep -o '"session_id":"[^"]*"' "$TRANSCRIPT" 2>/dev/null | head -1 | sed 's/.*:"//; s/"$//')
+[ -n "$PAYLOAD_SESSION" ] \
+  || fail "Claude $CLAUDE_VERSION: no session_id appeared in the live transcript, so the payload source could not be confirmed"
+[ "$LOCK_SESSION" = "$PAYLOAD_SESSION" ] \
+  || fail "Claude $CLAUDE_VERSION: the session id on the lock ($LOCK_SESSION) is not the one this session reports ($PAYLOAD_SESSION); the two identity sources have diverged"
 if [ -f "$HOME_DIR/state/tool-calls.log" ]; then
   ! grep -q 'fm-watch-arm.sh' "$HOME_DIR/state/tool-calls.log" \
     || fail "model issued an arm command despite Stop-owned continuity: $(cat "$HOME_DIR/state/tool-calls.log")"
@@ -157,8 +176,15 @@ printf '%s\n' '{"session_id":"live-owner-control"}' \
 [ "$LIVE_OWNER_RC" -eq 0 ] || fail "competing Stop hook returned $LIVE_OWNER_RC while another live session owned the home"
 [ "$(cat "$LIVE_OWNER_HOME/state/.lock")" = "$LIVE_OWNER_PID" ] || fail "competing Stop hook replaced the live session owner"
 [ ! -e "$LIVE_OWNER_HOME/state/arm-ran" ] || fail "competing Stop hook armed while another live session owned the home"
-[ ! -e "$LIVE_OWNER_HOME/state/.claude-autoarm-epoch" ] || fail "competing Stop hook wrote an epoch while another live session owned the home"
-[ ! -s "$LAB/live-owner.out" ] && [ ! -s "$LAB/live-owner.err" ] || fail "competing Stop hook produced a rewake while another live session owned the home"
+# Inert toward the fleet, never silent toward the record. The competing hook
+# must still refuse, and must now say so: the turn-end guard's bounded escape is
+# keyed on this record, so a silent refusal leaves that escape unreachable.
+grep -q 'outcome=refused' "$LIVE_OWNER_HOME/state/.claude-autoarm-epoch" 2>/dev/null \
+  || fail "competing Stop hook did not record its refusal: $(cat "$LIVE_OWNER_HOME/state/.claude-autoarm-epoch" 2>/dev/null || echo '<no epoch at all>')"
+grep -q 'REFUSED' "$LAB/live-owner.err" \
+  || fail "competing Stop hook refused without saying why: $(cat "$LAB/live-owner.err")"
+[ ! -s "$LAB/live-owner.out" ] || fail "competing Stop hook wrote to stdout, which the Stop contract forbids"
 wait "$LIVE_OWNER_PID"
 
-printf 'ok - Claude %s live E2E reclaimed a stale session lock through session start, completed two tokenless Stop-owned rewake cycles, and preserved the competing-live-owner boundary\n' "$CLAUDE_VERSION"
+printf 'ok - Claude %s live E2E reclaimed a stale session lock through session start, recorded a session id matching this session (%s), completed two tokenless Stop-owned rewake cycles, and preserved the competing-live-owner boundary with a recorded refusal\n' \
+  "$CLAUDE_VERSION" "$LOCK_SESSION"
