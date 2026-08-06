@@ -76,13 +76,14 @@ A reader of a red check must separate three possibilities rather than two: their
 Nothing in the red itself tells them which.
 
 That unbounded window is what the surfacing rule below closes, and the bound is a property of the rule rather than a description of any particular moment.
-Wherever a runtime carries that rule and follows it, a red `main` is read within one review interval, because every review reads every cloned project's default branch.
+Wherever a runtime carries that rule and follows it, a red `main` is read on the next wake-handling turn, because every such turn reads every cloned project's default branch.
 The condition is evaluable rather than temporal, so a reader can test whether it applies to them: check whether the runtime doing the reading carries an `AGENTS.md` that already contains the unconditional default-branch read.
 A document that has landed is not yet a rule a runtime is carrying, so merging this file does not by itself put the bound in effect for a runtime that started before it.
 
-The interval is one review, not one watcher heartbeat, and those differ by mode.
-`bin/fm-watch.sh` wakes firstmate on every heartbeat only in away mode; in always-on mode a no-change heartbeat is absorbed unless the cheap fleet-scan finds an unsurfaced captain-relevant status, and a red default branch produces no such status ([`architecture.md`](architecture.md) owns that wake classification).
-So an attached fleet whose crew statuses are all already surfaced can run a long stretch with no heartbeat review at all, and the bound is only as tight as the review cadence that mode actually produces.
+The trigger is every wake-handling turn, of any kind, in both always-on and away mode, and that choice is the substance of the rule rather than a detail of it.
+Hanging the read on the fleet-wide heartbeat review instead would have made it a gate that a busy fleet can suppress: `bin/fm-watch.sh` absorbs a no-change heartbeat in always-on mode unless the cheap fleet-scan finds an unsurfaced captain-relevant status, and a red default branch produces no such status ([`architecture.md`](architecture.md) owns that wake classification).
+A gate that could not run is indistinguishable from a gate that ran and found nothing, and always-on is the attended fast tier where changes move quickest, so that shape put the protection at its weakest exactly where it was needed most.
+The residual is a latency bound rather than a suppression: a fleet with no wakes at all waits for its next wake or its next session start, but nothing absorbs or discards the read, and a busier fleet now makes it fire more often rather than less, which is the inversion of the failure it replaces.
 
 ## Revert procedure
 
@@ -127,17 +128,17 @@ Leaving that to be found by whichever worker pushes next is exactly the failure 
 **When the check happens matters.**
 A merged-pull-request wake arrives at merge time, and the `main` run for that merge has not concluded yet - it needs about 9.4 minutes.
 Reading it at that moment returns "in progress", which is a third outcome and must never be reported as green.
-The check therefore belongs to the periodic fleet-wide review, which reads every cloned project's default branch unconditionally, every time.
+The check therefore belongs to every wake-handling turn rather than to that one wake: every turn reads every cloned project's default branch unconditionally, so a run that was unknown stays unknown, is never folded into green, and is simply read again on the next turn until it concludes.
 
 **Reading unconditionally is what makes the unknown safe.**
-Restricting the read to projects that landed work since the previous review would drop that third outcome on the floor: a merge landing shortly before a review is read as "in progress", so no item opens, and at the next review nothing has landed since, so nobody looks again and a red `main` stays invisible indefinitely.
-An unconditional read is stateless, so nothing is carried between reviews and nothing can be carried wrongly.
+Restricting the read to projects that landed work since the previous turn would drop that third outcome on the floor: a merge landing shortly before a turn is read as "in progress", so no item opens, and at the next turn nothing has landed since, so nobody looks again and a red `main` stays invisible indefinitely.
+An unconditional read is stateless, so nothing is carried between turns and nothing can be carried wrongly.
 It is idempotent: a re-read costs one API call and changes nothing when the answer has not moved.
 And it makes an unconcluded run self-healing by construction rather than by anyone remembering to look again, because the run that was in progress last time is simply read again this time.
 
 **Deliberately not built:** no new watcher, poll, script, state file, or remembered marker for a run previously read as unconcluded.
 Remembered state is the more fragile shape for an identical outcome.
-This is a procedure step on a wake that already happens, because the fleet already performs a periodic fleet-wide review.
+This is a procedure step on wakes that already happen, because the fleet already handles every wake in a turn.
 
 ## How a `main` run result is read
 
