@@ -34,10 +34,18 @@
 # are self-owned and nothing outside the calling suite can be selected - the
 # hazard tests/fm-remote-job.test.sh pins at "stale ownership is reclaimed
 # without signaling a reused pid".
+#
+# The path must be an existing regular FILE, not merely non-empty. Trap bodies
+# tolerate their root variable being unset so no call site depends on definition
+# order under `set -u`, and when that fallback fires the argument collapses to a
+# bare "/bin/fm-remote-job-worker.sh" - still non-empty, but no longer unique to
+# the calling suite, so an argv substring match on it could select another
+# suite's or another shard's worker. A collapsed path names no file, so refusing
+# here selects nothing, which is the only safe answer.
 fm_remote_job_fixture_worker_pid() { # <pid> <worker-path>
   local pid=${1:-} worker=${2:-}
   case "$pid" in ''|*[!0-9]*) return 1 ;; esac
-  [ -n "$worker" ] || return 1
+  [ -f "$worker" ] || return 1
   case "$(ps -o args= -p "$pid" 2>/dev/null || true)" in
     *"$worker"*) return 0 ;;
   esac
@@ -45,12 +53,19 @@ fm_remote_job_fixture_worker_pid() { # <pid> <worker-path>
 }
 
 # fm_remote_job_stop_worker_tree <state-root> <worker-path>: stop the worker tree
-# recorded in <state-root>/worker.pid and wait for it. The supervisor is reached
-# structurally, as the parent of the recorded child. Always returns 0 so a caller
-# using it from an EXIT trap under `set -e` cannot have the shell's exit status
-# changed by teardown.
+# recorded in <state-root>/worker.pid, wait for it, and report to stderr when the
+# stop could not be confirmed. The supervisor is reached structurally, as the
+# parent of the recorded child.
+#
+# Always returns 0 so a caller using it from an EXIT trap under `set -e` cannot
+# have the shell's exit status changed by teardown. That means the return value
+# carries no outcome, so the outcome has to be observed and said out loud: after
+# the bounded wait escalates to the uncatchable signal, both pids are re-tested
+# and any that survive are named on stderr. A silent return here would let a
+# caller's following `rm -rf` race a process nobody knows is still running, which
+# is exactly how the "Directory not empty" removal failure reads as unrelated.
 fm_remote_job_stop_worker_tree() { # <state-root> <worker-path>
-  local state=$1 worker=$2 child supervisor _i
+  local state=$1 worker=$2 child supervisor unconfirmed _i
   child=
   if [ -f "$state/worker.pid" ]; then
     child=$(tr -d ' \n' < "$state/worker.pid" 2>/dev/null || true)
@@ -73,5 +88,16 @@ fm_remote_job_stop_worker_tree() { # <state-root> <worker-path>
   if [ -n "$supervisor" ]; then kill -KILL "$supervisor" 2>/dev/null || true; fi
   if [ -n "$child" ]; then kill -KILL "$child" 2>/dev/null || true; fi
   sleep 0.2
+  unconfirmed=
+  if fm_remote_job_fixture_worker_pid "$supervisor" "$worker"; then
+    unconfirmed=$supervisor
+  fi
+  if fm_remote_job_fixture_worker_pid "$child" "$worker"; then
+    unconfirmed="${unconfirmed:+$unconfirmed }$child"
+  fi
+  if [ -n "$unconfirmed" ]; then
+    printf 'warning: could not confirm the worker tree under %s stopped; still present: %s\n' \
+      "$state" "$unconfirmed" >&2
+  fi
   return 0
 }
