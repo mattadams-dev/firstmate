@@ -4,6 +4,8 @@ set -u
 
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck source=tests/remote-job-helpers.sh
+. "$(dirname "${BASH_SOURCE[0]}")/remote-job-helpers.sh"
 
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)
 TMP_ROOT=$(fm_test_tmproot fm-remote-job)
@@ -20,70 +22,20 @@ OTHER_PID=
 RECOVERY_WORKER_PID=
 mkdir -p "$REMOTE_ROOT/bin" "$REMOTE_HOME" "$ACCOUNT_HOME" "$RUNTIME_BIN"
 
-# True only when <pid> is BOTH live and running this test's own mktemp-unique
-# fixture worker path. A recorded pid is only a record: by teardown the process is
-# often already gone and its number reused, so the file alone is never authority
-# to signal. Both facts checked here are self-owned, so nothing outside this test
-# can ever be selected - the hazard this suite pins at "stale ownership is
-# reclaimed without signaling a reused pid".
-fixture_worker_pid() { # <pid>
-  local pid=${1:-}
-  case "$pid" in ''|*[!0-9]*) return 1 ;; esac
-  case "$(ps -o args= -p "$pid" 2>/dev/null || true)" in
-    *"$REMOTE_ROOT/bin/fm-remote-job-worker.sh"*) return 0 ;;
-  esac
-  return 1
-}
-
-# Stop the worker tree and WAIT for it before removing the directory it lives in.
-#
-# What this test launches is worker_supervise_linux, not the worker itself: it
-# respawns its --serve child whenever that child exits non-zero. Signalling only
-# the pid recorded in worker.pid and deleting the tree in the same breath left the
-# child's shutdown writing into a directory rm was already removing, which failed
-# the shutdown, which is exactly the supervisor's respawn trigger - so the tree got
-# rebuilt underneath the removal. That surfaces as
-# "rm: cannot remove ...: Directory not empty", printed after the real message, so
-# it reads as a second unrelated defect while burying the assertion that actually
-# failed; and whatever rm did win left a live supervisor spinning in the runner.
-# The supervisor is reached structurally, as the parent of the recorded child.
-stop_worker_tree() { # <state-root>
-  local state=$1 child supervisor
-  child=
-  if [ -f "$state/worker.pid" ]; then
-    child=$(tr -d ' \n' < "$state/worker.pid" 2>/dev/null || true)
-  fi
-  fixture_worker_pid "$child" || child=
-  supervisor=
-  if [ -n "$child" ]; then
-    supervisor=$(ps -o ppid= -p "$child" 2>/dev/null | tr -d ' ' || true)
-    fixture_worker_pid "$supervisor" || supervisor=
-  fi
-  if [ -n "$supervisor" ]; then kill -TERM "$supervisor" 2>/dev/null || true; fi
-  if [ -n "$child" ]; then kill -TERM "$child" 2>/dev/null || true; fi
-  for _ in $(seq 1 100); do
-    if ! fixture_worker_pid "$supervisor" && ! fixture_worker_pid "$child"; then
-      return 0
-    fi
-    sleep 0.05
-  done
-  if [ -n "$supervisor" ]; then kill -KILL "$supervisor" 2>/dev/null || true; fi
-  if [ -n "$child" ]; then kill -KILL "$child" 2>/dev/null || true; fi
-  sleep 0.2
-  return 0
-}
+FIXTURE_WORKER="$REMOTE_ROOT/bin/fm-remote-job-worker.sh"
 
 fm_remote_job_test_teardown() {
   if [ -n "$OTHER_PID" ]; then kill "$OTHER_PID" 2>/dev/null || true; fi
   if [ -n "$RECOVERY_WORKER_PID" ]; then
+    # Reap it rather than polling: this pid is this shell's own background child,
+    # so once it dies unwaited it becomes a zombie that answers a signal-0 probe
+    # forever - a poll loop would burn its whole bound and then conclude success
+    # by exhaustion instead of by observation.
     kill "$RECOVERY_WORKER_PID" 2>/dev/null || true
-    for _ in $(seq 1 100); do
-      kill -0 "$RECOVERY_WORKER_PID" 2>/dev/null || break
-      sleep 0.05
-    done
+    wait "$RECOVERY_WORKER_PID" 2>/dev/null || true
   fi
-  stop_worker_tree "$STATE_ROOT"
-  stop_worker_tree "$TMP_ROOT/recovery-jobs"
+  fm_remote_job_stop_worker_tree "$STATE_ROOT" "$FIXTURE_WORKER"
+  fm_remote_job_stop_worker_tree "$TMP_ROOT/recovery-jobs" "$FIXTURE_WORKER"
   # Report a leftover rather than swallowing it or letting a failed removal read
   # as a failing test: by here the tree is stopped, so anything still present is
   # news worth printing.
@@ -92,6 +44,11 @@ fm_remote_job_test_teardown() {
     rm -rf -- "$TMP_ROOT" 2>/dev/null ||
       printf 'warning: could not fully remove %s\n' "$TMP_ROOT" >&2
   fi
+  # Replacing lib.sh's own EXIT trap makes this function responsible for the
+  # cleanup that trap would have run; lib.sh states that contract in its header.
+  # Without it the mktemp registry file it creates under /tmp on every source
+  # survives each run.
+  fm_test_cleanup
   return 0
 }
 trap fm_remote_job_test_teardown EXIT
@@ -446,16 +403,29 @@ SECOND_DELAYED_SIDE_EFFECT="$TMP_ROOT/second-delayed-side-effect"
 # defect that had not occurred, because a slow machine and a subtracted window
 # produce the identical reading through a stopwatch.
 #
-# The durable record answers the question directly. The window's opening time is
-# recorded, so compare it against when the job was staged: the difference is the
-# queue wait the window was granted ON TOP of its timeout, which is exactly the
-# quantity a subtracting implementation would drive to zero. A slow machine makes
-# the queue wait longer, so this reading moves away from the failure threshold
-# under the conditions that used to cross it.
+# The durable record answers the question directly, and it can answer it without
+# the test's clock appearing in the reading at all. Every value below comes from
+# the job's own record plus the two bounds this test configured:
+#
+#   granted = deadline - queue_deadline - timeout + queue_timeout
+#
+# and since queue_deadline is (staged_at + queue_timeout) and a correct deadline
+# is (claimed_at + timeout), that reduces to (claimed_at - staged_at) - the true
+# queue wait - with both configured bounds and both recorded timestamps
+# cancelling out. A window measured from staging instead of from the claim drives
+# it to exactly 0. Reading it this way matters because the earlier version
+# compared the record against a `date` taken right after the test observed the
+# first job as running, which put the test's own poll lag into the measurement
+# and let a slow machine shrink it - the same stopwatch defect one level down.
+#
+# The blocking job also holds the worker for longer than the reading needs, so
+# the quantity being measured sits clear of the threshold rather than near it,
+# and load can only lengthen that hold.
 FM_REMOTE_JOB_QUEUE_TIMEOUT=30
-FM_REMOTE_JOB_TIMEOUT=10
+FM_REMOTE_JOB_TIMEOUT=20
+QUEUE_TIMEOUT_AT_STAGE=$FM_REMOTE_JOB_QUEUE_TIMEOUT
 fm_remote_job_stage "$ACCOUNT_HOME" "$REMOTE_ROOT" "$REMOTE_HOME" \
-  fm-delay-job.sh 2 "$FIRST_DELAYED_SIDE_EFFECT" < /dev/null > /dev/null
+  fm-delay-job.sh 6 "$FIRST_DELAYED_SIDE_EFFECT" < /dev/null > /dev/null
 FIRST_JOB_ID=$FM_REMOTE_JOB_ID
 FIRST_JOB_DIR="$STATE_ROOT/jobs/$FIRST_JOB_ID"
 for _ in $(seq 1 200); do
@@ -464,7 +434,6 @@ for _ in $(seq 1 200); do
 done
 [ "$(fm_remote_job_read_state "$FIRST_JOB_DIR" 2>/dev/null || true)" = running ] \
   || fail "the first delayed job did not begin running"
-SECOND_STAGED_AT=$(date +%s)
 fm_remote_job_stage "$ACCOUNT_HOME" "$REMOTE_ROOT" "$REMOTE_HOME" \
   fm-delay-job.sh 1 "$SECOND_DELAYED_SIDE_EFFECT" < /dev/null > /dev/null
 JOB_ID=$FM_REMOTE_JOB_ID
@@ -477,9 +446,11 @@ done
   || fail "the queued job never began running behind the first"
 SECOND_DEADLINE=$(fm_remote_job_read_deadline "$JOB_DIR") \
   || fail "the claimed queued job did not record an execution deadline"
+SECOND_QUEUE_DEADLINE=$(fm_remote_job_read_number "$JOB_DIR" queue_deadline) \
+  || fail "the claimed queued job did not record a durable queue deadline"
 SECOND_TIMEOUT=$(fm_remote_job_read_number "$JOB_DIR" timeout) \
   || fail "the claimed queued job did not record an execution timeout"
-GRANTED_AFTER_QUEUE_WAIT=$((SECOND_DEADLINE - SECOND_STAGED_AT - SECOND_TIMEOUT))
+GRANTED_AFTER_QUEUE_WAIT=$((SECOND_DEADLINE - SECOND_QUEUE_DEADLINE - SECOND_TIMEOUT + QUEUE_TIMEOUT_AT_STAGE))
 [ "$GRANTED_AFTER_QUEUE_WAIT" -ge 1 ] \
   || fail "queue time consumed the second job's execution timeout"
 fm_remote_job_wait "$ACCOUNT_HOME" "$FIRST_JOB_ID" || fail "$FM_REMOTE_JOB_ERROR"
