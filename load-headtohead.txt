@@ -1,0 +1,10 @@
+=== INTERLEAVED HEAD-TO-HEAD UNDER DELIBERATE LOAD (corroboration only) ===
+host: Linux 6.18.33.2-microsoft-standard-WSL2, 32 cores
+round 1 BASE loadavg_at_start=75.58  exit=0    59s  -
+round 1 HEAD loadavg_at_start=100.52 exit=0    70s  -
+round 2 BASE loadavg_at_start=108.54 exit=0    59s  -
+round 2 HEAD loadavg_at_start=110.63 exit=0    73s  -
+round 3 BASE loadavg_at_start=118.22 exit=1    26s  not ok - queue time consumed the second job's execution timeout
+round 3 HEAD loadavg_at_start=119.56 exit=0    71s  -
+loadavg after: 115.71 89.32 46.07
+mem available: 10768 MiB

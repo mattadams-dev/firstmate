@@ -1,0 +1,5 @@
+=== WORLD SEPARATION: perturb the PRODUCT side (the publisher), test side untouched ===
+Original base test, unmodified. Fixture copy of the worker delays publishing the queued-expiry result.
+
+FM_PERTURB_PUBLISHER=3   exit=0    perturbed queued-expiry publication by 3s      ok - the worker expires queued jobs before they can mutate
+FM_PERTURB_PUBLISHER=25  exit=0    perturbed queued-expiry publication by 25s     ok - the worker expires queued jobs before they can mutate

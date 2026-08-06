@@ -1,0 +1,7 @@
+ok - disabled: a remote-routed second mate records and receives no carrier and stays enabled-off end to end
+ok - enabled: a remote-routed second mate receives one carrier in its pane, identical to the parent's recorded identity, before launch
+ok - relaunch: a remote-routed second mate keeps one stable identity across restarts
+ok - boundary: each remote-routed second mate roots its own trace and never adopts the spawning environment's carrier
+ok - allowlist: the remote receiver accepts exactly the declared inherited-material set, including the enablement flag
+ok - delivery: a parent-supplied carrier is accepted only for a secondmate launch and only as a strict W3C value
+ALL TESTS PASSED

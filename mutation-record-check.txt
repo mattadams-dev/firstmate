@@ -1,0 +1,13 @@
+=== MUTATION: is the new record-only queue-wait check discriminating? ===
+Mutant (fixture worker only): execution deadline computed from STAGE time, not CLAIM time.
+
+--- 1. Mutant absent (control): the check passes ---
+exit=0   RECORD CHECK (softened for this probe): granted_after_queue_wait=6
+        ok - queued jobs receive a fresh bounded execution window
+
+--- 2. Mutant present, record check softened: what the BEHAVIORAL assertions see ---
+exit=0   RECORD CHECK (softened for this probe): granted_after_queue_wait=0
+        behavioral verdict: ok - queued jobs receive a fresh bounded execution window
+
+--- 3. Mutant present, record check as shipped ---
+exit=1   not ok - queue time consumed the second job's execution timeout

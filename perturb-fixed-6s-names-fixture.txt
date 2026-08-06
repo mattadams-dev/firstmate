@@ -1,0 +1,3 @@
+=== FIXED, perturbation 6s > the 5s blocking hold: the fixture can no longer establish its precondition ===
+exit=1
+not ok - fixture precondition lost: the blocking job released the worker before the queued deadline passed

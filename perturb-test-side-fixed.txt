@@ -1,0 +1,6 @@
+=== FIXED (HEAD 95ea090) queued-expiry case, SAME test-side perturbation at the SAME boundary ===
+
+FM_PERTURB_TEST_SIDE=2  exit=0   ok - the worker expires queued jobs before they can mutate
+FM_PERTURB_TEST_SIDE=2  exit=0   ok - the worker expires queued jobs before they can mutate
+FM_PERTURB_TEST_SIDE=2  exit=0   ok - the worker expires queued jobs before they can mutate
+FM_PERTURB_TEST_SIDE=4  exit=0   ok - the worker expires queued jobs before they can mutate

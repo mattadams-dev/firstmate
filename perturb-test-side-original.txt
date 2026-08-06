@@ -1,0 +1,9 @@
+=== ORIGINAL (base 0d65ed4) queued-expiry case, TEST-SIDE perturbation ===
+perturbation: sleep N between staging the queued job and rewriting its live queue_deadline
+
+FM_PERTURB_TEST_SIDE=0  exit=0   ok - the worker expires queued jobs before they can mutate
+FM_PERTURB_TEST_SIDE=2  exit=1   not ok - an expired queued job did not publish a timeout result
+FM_PERTURB_TEST_SIDE=2  exit=1   not ok - an expired queued job did not publish a timeout result
+FM_PERTURB_TEST_SIDE=2  exit=1   not ok - an expired queued job did not publish a timeout result
+FM_PERTURB_TEST_SIDE=2  exit=1   not ok - an expired queued job did not publish a timeout result
+FM_PERTURB_TEST_SIDE=2  exit=1   not ok - an expired queued job did not publish a timeout result

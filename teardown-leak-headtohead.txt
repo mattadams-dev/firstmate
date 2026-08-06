@@ -1,0 +1,21 @@
+=== TEARDOWN HEAD-TO-HEAD: worker supervisors left alive after the suite exits (pid-set diff) ===
+A leaked supervisor is a bash process still running a suite's fixture worker after the suite returned.
+
+fm-remote-backlog-handoff BASE           exit=0   ALL_TESTS_PASSED=yes leaked_supervisors=1  first_problem=-
+    leaked pid 3334353  /bin/bash /tmp/fm-remote-handoff.1gzTX0/remote-root/bin/fm-remote-job-worker.sh
+    its temp root /tmp/fm-remote-handoff.1gzTX0              exists=NO-already-deleted-by-the-suite
+fm-remote-backlog-handoff HEAD           exit=0   ALL_TESTS_PASSED=yes leaked_supervisors=0  first_problem=-
+
+fm-remote-secondmate-trace-context BASE  exit=0   ALL_TESTS_PASSED=yes leaked_supervisors=1  first_problem=-
+    leaked pid 3462763  /bin/bash /tmp/fm-remote-trace-context.3ZISoS/remote-root/bin/fm-remote-job-worker.sh
+    its temp root /tmp/fm-remote-trace-context.3ZISoS        exists=NO-already-deleted-by-the-suite
+fm-remote-secondmate-trace-context HEAD  exit=0   ALL_TESTS_PASSED=yes leaked_supervisors=0  first_problem=-
+
+fm-remote-job BASE                       exit=0   ALL_TESTS_PASSED=yes leaked_supervisors=0  first_problem=-
+fm-remote-job HEAD                       exit=0   ALL_TESTS_PASSED=yes leaked_supervisors=0  first_problem=-
+
+fm-on BASE                               exit=1   ALL_TESTS_PASSED=no  leaked_supervisors=1  first_problem=not ok - composed child PATH did not match the portable contract
+    leaked pid 3946451  /bin/bash /tmp/fm-on.oSGd71/remote-root/bin/fm-remote-job-worker.sh
+    its temp root /tmp/fm-on.oSGd71                          exists=NO-already-deleted-by-the-suite
+fm-on HEAD                               exit=1   ALL_TESTS_PASSED=no  leaked_supervisors=0  first_problem=not ok - composed child PATH did not match the portable contract
+

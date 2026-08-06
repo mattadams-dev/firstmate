@@ -1,0 +1,8 @@
+ok - fm-on preserves argv, stdin, stdout, stderr, and exit status without shell interpretation
+ok - fm-on arms a bounded SSH dead-peer detection window by default (15s x 3 = 45s)
+ok - fm-on's dead-peer detection window is env-overridable
+ok - fm-on rejects invalid dead-peer settings before launching ssh
+ok - the fixed entrypoint runs every command in the worker's explicit environment
+not ok - composed child PATH did not match the portable contract
+expected: /tmp/fm-on.oSGd71/remote-root/bin:/home/jamada/.local/bin:/home/jamada/.nvm/versions/node/v24.11.1/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin
+actual:   /tmp/fm-on.oSGd71/remote-root/bin:/home/jamada/.local/bin:/home/jamada/.nvm/versions/node/v24.11.1/bin:/nix/store/xjpdl8bl00qags7vayywrr0s29ifyf0g-home-manager-path/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin

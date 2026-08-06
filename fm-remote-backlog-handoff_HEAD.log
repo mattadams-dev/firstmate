@@ -1,0 +1,11 @@
+ok - confined put rejects incomplete and superseded payload generations
+ok - confined put rejects directory replacement without external writes
+ok - ambiguous receipt leaves one durable outbox and no duplicate dispatchable source
+ok - re-delivery after unknown completion converges without duplication
+ok - dropped transfer recovery overwrites scratch and delivers exactly once
+ok - concurrent handoffs serialize staging through confirmed cleanup
+ok - receiver removes one proven dead stale lock and retries once
+ok - bootstrap detects pending outbox handoffs without a journal
+ok - route classification serializes with retirement before staging
+ok - unconfigured bootstrap has no remote handoff behavior
+ALL TESTS PASSED
