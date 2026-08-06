@@ -195,6 +195,10 @@ So the freshness poll reports and never acts: the bar names both times and offer
 Its value is the case Lavish's own reload does not cover - a copy opened as a plain file, or a write the host missed - where nothing else would ever say the page had gone stale.
 A poll that fails or returns something unparseable changes nothing on the page: unknown is neither fresh nor stale.
 
+Both rendered pages carry the bar, because both run the same poll.
+The history page turned its freshness dot orange while emitting no bar, so it signalled a state it could neither explain nor let the reader act on.
+Dropping the dot there would have removed the signal rather than the confusion, so the bar is what the two pages share, emitted from one construction site in the renderer.
+
 ## 6. Controls, and what stays annotatable
 
 v1 was authored by forbidding every native control, because Lavish skips a control and everything inside it when deciding what can be annotated (`docs/verification/bridge-hosted-input.md`).

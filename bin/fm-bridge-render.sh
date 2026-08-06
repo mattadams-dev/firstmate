@@ -791,9 +791,13 @@ def fold(ledger_path, folded_at):
                          and item["age_seconds"] is not None
                          and item["age_seconds"] >= AGING_SECONDS)
 
-    # Every open ask, across every project and kind, oldest first. Oldest first
-    # is deliberate: the forgotten ones rise to the top instead of sinking under
-    # whatever arrived most recently.
+    # Every open ask, across every project and kind, SEVERITY FIRST and then
+    # longest waiting. Severity leads because this is a surface triaged from,
+    # and age breaks the tie so the forgotten ones rise within their severity
+    # instead of sinking under whatever arrived most recently. The rendered
+    # label states this same ordering, and a guard holds the two together: a
+    # claim about the sort that the sort does not keep is a false claim on the
+    # one surface whose job is collecting rulings.
     # AN ASK IS A CONJUNCTION, NOT A RANKING. Someone owes a decision AND the
     # work is still live. Both conditions are necessary and neither overrides
     # the other: a discarded item is not an ask because there is nothing left to
@@ -1411,11 +1415,10 @@ def link(href, label=None, external=None):
     ANCHORS ARE THE ONLY THING ON THIS BOARD THAT CARRY THE ATTRIBUTE, and an
     anchor is the only thing that earns it - an anchor's own job is to navigate,
     so trading its annotatability for a working left-click is a fair trade
-    nothing else on the board can make. A few anchors with structured inner
-    markup are emitted by hand rather than through here (the header tally and
-    the two index lists); they are still anchors, and the guard suite pins both
-    halves of the rule - every anchor carries the attribute, and nothing that is
-    not an anchor does.
+    nothing else on the board can make. This function is the only place either
+    page builds an anchor, so the rule has one enforcement point rather than a
+    convention, and the guard suite pins both halves of it - every anchor
+    carries the attribute, and nothing that is not an anchor does.
 
     External links open in a new tab because the board is served in an iframe,
     and a same-tab navigation would replace the board with the PR.
@@ -1524,14 +1527,22 @@ def _cached_probe(state_dir, name, reader, now_epoch):
     value so the gauge can say when it was taken, and a failed refresh falls
     back to the last good reading rather than blanking the gauge - with its
     real age attached, so nothing about it reads as current.
+
+    WITH NO USABLE CLOCK THERE IS NO FRESHNESS SHORTCUT. `now_epoch` is None
+    when the fold's own timestamp could not be parsed, and an age that cannot be
+    computed is unknown, not zero: serving the cache as under-TTL then would
+    present a reading of any age as one taken just now. So the TTL test fails
+    closed, the reading is retaken, and a cache that cannot be stamped is not
+    written - a record with no `at` is a reading whose age nothing can recover.
     """
     path = _cache_path(state_dir, name)
     cached, age = None, None
     try:
         with open(path, "r", encoding="utf-8") as handle:
             record = json.load(handle)
-        age = max(0, now_epoch - int(record["at"]))
+        taken_at = int(record["at"])
         cached = record["value"]
+        age = None if now_epoch is None else max(0, now_epoch - taken_at)
     except (OSError, ValueError, KeyError, TypeError):
         cached, age = None, None
 
@@ -1543,11 +1554,14 @@ def _cached_probe(state_dir, name, reader, now_epoch):
         if cached is not None:
             return cached, "", age
         return None, why, None
-    try:
-        with open(path, "w", encoding="utf-8") as handle:
-            json.dump({"at": now_epoch, "value": value}, handle)
-    except OSError:
-        pass                      # a cache that cannot be written is not fatal
+    if now_epoch is not None:
+        try:
+            with open(path, "w", encoding="utf-8") as handle:
+                json.dump({"at": now_epoch, "value": value}, handle)
+        except OSError:
+            pass                  # a cache that cannot be written is not fatal
+    # Zero here is this reading's own age - it was taken a moment ago - and not
+    # a stand-in for a clock that could not be read.
     return value, "", 0
 
 
@@ -1671,7 +1685,14 @@ def _watcher_live(state_dir, now_epoch):
     the absence of a warning marker is only good news while something is
     actually maintaining them, so this is checked first and a lapsed beacon
     makes every lane read `unknown` rather than green.
+
+    A fold whose own timestamp could not be parsed leaves nothing to age the
+    beacon against, and that is reported as unreadable too. Substituting zero
+    for the missing clock would make every beacon read as newer than now, so a
+    supervision that stopped days ago would still render green.
     """
+    if now_epoch is None:
+        return False, "the fold carries no readable clock to age the beacon against"
     beacon = os.path.join(state_dir, ".last-watcher-beat")
     try:
         age = now_epoch - int(os.path.getmtime(beacon))
@@ -1693,6 +1714,33 @@ def _meta_fields(path):
     except OSError:
         return None
     return fields
+
+
+def _marker_key(fields):
+    """The key the watcher files this lane's verdicts under, or None.
+
+    ONE DERIVATION, TAKEN FROM THE WATCHER'S. bin/fm-watch.sh keys
+    `.stale-since-<key>` and `.wedge-escalations-<key>` off the lane's backend
+    TARGET, which fm_backend_target_of_meta in bin/fm-backend.sh resolves as the
+    `terminal` field for an Orca lane and the `window` field otherwise. Reading
+    `window` alone here would silently miss every Orca lane's markers, and a
+    missed marker is indistinguishable from an absent one.
+
+    None when the meta names no target at all, because a key that cannot match
+    any marker is a verdict that was never read - which the caller renders as
+    unknown rather than as the absence of a warning.
+    """
+    backend = fields.get("backend") or "tmux"
+    target = ""
+    if backend == "orca":
+        target = fields.get("terminal", "")
+    if not target:
+        target = fields.get("window", "")
+    if not target:
+        return None
+    for bad in ":/.":
+        target = target.replace(bad, "_")
+    return target
 
 
 def _last_status(path):
@@ -1771,7 +1819,11 @@ def _collect_env(fm_home, state_dir, folded_at):
     could not, because a board that silently drops a gauge and a board whose
     gauge reads zero are the same page to whoever is reading it.
     """
-    now_epoch = _epoch(folded_at) or 0
+    # AN UNPARSEABLE FOLD TIME IS AN ABSENT CLOCK, NOT ZERO. Every age below is
+    # measured against this, and zero is a real instant in 1970 - substituting it
+    # would make every marker on disk read as freshly written, which is the one
+    # direction a freshness reading must never round.
+    now_epoch = _epoch(folded_at)
     live, why_not = _watcher_live(state_dir, now_epoch)
 
     lanes = {}
@@ -1804,13 +1856,16 @@ def _collect_env(fm_home, state_dir, folded_at):
             phase = "%s: %s" % (state_word, note)
         else:
             phase = note or state_word or "no word yet"
-        age = None if stamp is None else max(0, now_epoch - stamp)
-        key = fields.get("window", "")
-        for bad in ":/.":
-            key = key.replace(bad, "_")
-        if not live:
+        age = (None if stamp is None or now_epoch is None
+               else max(0, now_epoch - stamp))
+        key = _marker_key(fields)
+        if not live or key is None:
+            # An unresolved key matches no marker, so the watcher's verdict was
+            # never read. That is an unknown verdict and it renders as one: a
+            # green dot over a lane supervision has flagged as wedged is exactly
+            # the reading this state exists to prevent.
             health = "unknown"
-        elif key and key in warned:
+        elif key in warned:
             health = "warn"
         else:
             health = "ok"
@@ -2053,7 +2108,7 @@ SCRIPT = r"""
 """
 
 
-def page_open(title, doc, extra_meta=""):
+def page_open(title, doc):
     """Everything above <body>, shared by the two pages this renderer emits."""
     out = ["<!doctype html>",
            '<html lang="en"><head><meta charset="utf-8">',
@@ -2063,8 +2118,6 @@ def page_open(title, doc, extra_meta=""):
     # is the one field that has to survive being fetched and string-matched
     # rather than parsed, so it lives in a meta element of its own.
     out.append('<meta name="fm-folded-at" content="%s">' % esc(doc["folded_at"]))
-    if extra_meta:
-        out.append(extra_meta)
     # THE TITLE NAMES THE PAGE AND COUNTS NOTHING. Lavish copies the artifact's
     # <title> into the HOSTING page at load and does not re-propagate it when
     # the tick rewrites the board and the frame live-reloads, so a count kept
@@ -2255,8 +2308,12 @@ def _as_of(age_seconds):
     """How old a reused reading is, whenever it is not from this fold.
 
     A cached number shown without its age is the capacity lesson again: a value
-    that was true once, presented as a value that is true now.
+    that was true once, presented as a value that is true now. An age that could
+    not be worked out says so, for the same reason and one step further along:
+    unknown age and taken-just-now are different facts about the reading.
     """
+    if age_seconds is None:
+        return " · reused, and how old it is could not be worked out"
     if not age_seconds:
         return ""
     return " · read %s ago" % _age_label(age_seconds)
@@ -2399,6 +2456,32 @@ def problem_banners(doc):
     return "".join(out)
 
 
+def stale_bar():
+    """The freshness bar, emitted identically by both pages.
+
+    THE POLL RUNS ON BOTH PAGES, SO THE EXPLANATION MUST TOO. The shared script
+    turns the freshness dot orange wherever it detects a newer fold; a page that
+    changed the dot without this bar would signal a state it could neither
+    explain nor let the reader act on. A signal with no explanation is the
+    defect - dropping the dot on one page would remove the signal rather than
+    the confusion, so the bar is what gets shared, from one construction site so
+    the two pages cannot drift.
+
+    Hidden by default and in normal flow like everything else on both pages:
+    nothing here is fixed, absolute or sticky, so it can never come to cover the
+    rows it sits over. It names both times, offers the button, and never reloads
+    by itself.
+    """
+    return "\n".join([
+        '<div class="stalebar" id="fm-stale" hidden>',
+        '<span><b>STALE</b> - <span id="fm-stale-times"></span></span>',
+        '<button id="fm-stale-reload">reload now</button>',
+        '<span class="why">this page never reloads itself - nothing you have '
+        "part-way written is at risk from it</span>",
+        "</div>",
+    ])
+
+
 def render_board(doc, env):
     """The captain's action surface (Laws 1 and 2).
 
@@ -2473,12 +2556,7 @@ def render_board(doc, env):
     add(lanes_section(env))
     add(admission_section(env))
 
-    add('<div class="stalebar" id="fm-stale" hidden>')
-    add("<span><b>STALE</b> - <span id=\"fm-stale-times\"></span></span>")
-    add('<button id="fm-stale-reload">reload now</button>')
-    add('<span class="why">this page never reloads itself - nothing you have '
-        "part-way written is at risk from it</span>")
-    add("</div>")
+    add(stale_bar())
 
     add("<footer>")
     add('<div class="cols">')
@@ -2531,7 +2609,7 @@ def render_board(doc, env):
     return "\n".join(out) + "\n"
 
 
-def history_row(item, doc):
+def history_row(item):
     """One closed item, in the same one-line form the board uses for an ask."""
     ends = chip(item) + outcome_chip(item) + sev_chip(item)
     parts = ['<div class="hitem" id="item-%s">' % esc(item["id"]),
@@ -2574,7 +2652,7 @@ def history_row(item, doc):
     return "".join(parts)
 
 
-def render_history(doc, env):
+def render_history(doc):
     """Everything the board excludes, on its own page.
 
     Named history rather than archive: it says what the page is, not a storage
@@ -2673,7 +2751,7 @@ def render_history(doc, env):
     if still_open:
         add('<p class="grouplabel">open, and not waiting on you</p>')
         for key in still_open:
-            add(history_row(items[key], doc))
+            add(history_row(items[key]))
         shown_any = True
     for group, label in (("criticals_landed", "landed"),
                          ("criticals_discarded", "discarded"),
@@ -2684,7 +2762,7 @@ def render_history(doc, env):
         shown_any = True
         add('<p class="grouplabel">%s</p>' % esc(label))
         for key in shown:
-            add(history_row(items[key], doc))
+            add(history_row(items[key]))
         hidden = len(zones[group]) - len(shown)
         if hidden > 0:
             add('<div class="overflow">+%d more %s - the record has them: '
@@ -2723,14 +2801,14 @@ def render_history(doc, env):
         if open_elsewhere:
             add('<p class="grouplabel">open, and not waiting on you</p>')
         for key in open_elsewhere:
-            add(history_row(items[key], doc))
+            add(history_row(items[key]))
         for side, label in (("landed", "landed"), ("discarded", "discarded"),
                             ("unknown", "ended, how unknown")):
             shown = group[side][:caps["closed_decisions"]]
             if shown:
                 add('<p class="grouplabel">%s</p>' % esc(label))
             for key in shown:
-                add(history_row(items[key], doc))
+                add(history_row(items[key]))
             hidden = len(group[side]) - len(shown)
             if hidden > 0:
                 add('<div class="overflow">+%d more %s in %s - the record has '
@@ -2743,13 +2821,21 @@ def render_history(doc, env):
 
     add("<section><h2>Notable events</h2>")
     add('<p class="zone-note">Newest first, capped. Nothing here is an ask.</p>')
-    shown_events = zones["events"][:caps["events"]]
+    # THROUGH THE COMPLEMENT LIKE EVERY OTHER SECTION. An event routed to a
+    # reader - `note --to captain`, or a later `route` - is on that reader's
+    # queue and therefore an ask card on the board, so rendering the zone
+    # unfiltered here put the same item on both pages and had the captain
+    # triaging it twice. The overflow count is taken from the filtered list for
+    # the same reason: counting board rows as hidden history overstates what is
+    # left behind.
+    events_elsewhere = elsewhere(zones["events"])
+    shown_events = events_elsewhere[:caps["events"]]
     if shown_events:
         for key in shown_events:
-            add(history_row(items[key], doc))
+            add(history_row(items[key]))
     else:
         add('<p class="empty">No events recorded.</p>')
-    hidden = len(zones["events"]) - len(shown_events)
+    hidden = len(events_elsewhere) - len(shown_events)
     if hidden > 0:
         add('<div class="overflow">+%d older events. They are not lost - the '
             "record has every one: <code>%s</code></div>"
@@ -2773,7 +2859,7 @@ def render_history(doc, env):
                 continue
             add('<p class="grouplabel">%s</p>' % esc(label))
             for key in rows:
-                add(history_row(items[key], doc))
+                add(history_row(items[key]))
     else:
         add('<p class="empty">No tasks in the record.</p>')
     for group, label in (("fleet_landed", "landed"),
@@ -2793,8 +2879,10 @@ def render_history(doc, env):
             "record quietly placed in the wrong bucket is how a surface starts "
             "lying.</p>")
         for key in zones["unzoned"]:
-            add(history_row(items[key], doc))
+            add(history_row(items[key]))
         add("</section>")
+
+    add(stale_bar())
 
     add("<footer>")
     add("<div><b>Check this page against its own source.</b></div>")
@@ -2862,16 +2950,17 @@ def main(argv):
         # document, for the same reason in the other direction: they are not
         # ledger facts and must never enter the fold, or `--state` - read by the
         # linter, the co-captain and every lifecycle query - would grow a
-        # subprocess behind it.
+        # subprocess behind it. Only the board renders them, and this runs on
+        # the supervision loop, so only the board pays to collect them.
         global BOARD_FILENAME, HISTORY_FILENAME
         fm_home, state_dir = argv[4], argv[5]
         BOARD_FILENAME, HISTORY_FILENAME = argv[6], argv[7]
         doc = fold(argv[2], argv[3])
-        env = collect_env(fm_home, state_dir, argv[3])
         if mode == "html":
-            sys.stdout.write(render_board(doc, env))
+            sys.stdout.write(render_board(doc, collect_env(fm_home, state_dir,
+                                                           argv[3])))
         else:
-            sys.stdout.write(render_history(doc, env))
+            sys.stdout.write(render_history(doc))
         return 0
     if mode == "signature":
         sys.stdout.write(signature(argv[2]) + "\n")

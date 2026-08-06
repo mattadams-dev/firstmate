@@ -2259,6 +2259,13 @@ pass "the documentation states the title is propagated at load, and promises no 
 # resolved on the state axis that nothing has yet observed to end on the outcome
 # axis. It is not an ask, so the board excludes it; it is not closed, so a
 # closed-zone list excludes it too.
+#
+# AND THE OTHER DIRECTION, WHICH THIS GUARD ONCE MISSED. An event routed to a
+# reader is on that reader's queue and therefore an ask card on the board, while
+# still sitting in the events zone history renders. The first version of this
+# fixture had no routed event, so the guard reported pass over a live double
+# render; both routings are fixtured here now, because a partition guard whose
+# fixture never contains the overlapping case proves only that the fold has one.
 
 HOME29B=$(new_home)
 FM_HOME=$HOME29B "$BRIDGE" ask -q --id gap-ask --project orca \
@@ -2272,6 +2279,16 @@ FM_HOME=$HOME29B "$BRIDGE" append -q id=gap-crit kind=critical project=fleet \
 FM_HOME=$HOME29B "$BRIDGE" task -q --id gap-task --project orca --phase validating >/dev/null
 FM_HOME=$HOME29B "$BRIDGE" ask -q --id gap-co --project machine \
   --title "routed away" --answer "A: yes" --to cocaptain >/dev/null
+# An event on each reader's queue: kind=event puts it in the events zone, the
+# routing puts it on a queue, and only one of the two pages may render it.
+FM_HOME=$HOME29B "$BRIDGE" note -q --id gap-ev-cap --project orca \
+  --title "an event routed to the captain, so it is an ask too" --to captain >/dev/null
+FM_HOME=$HOME29B "$BRIDGE" note -q --id gap-ev-co --project machine \
+  --title "an event routed to the co-captain" --to cocaptain >/dev/null
+# And an unrouted one, so the events section is never empty and the guard cannot
+# pass by filtering the whole zone away.
+FM_HOME=$HOME29B "$BRIDGE" note -q --id gap-ev-plain --project orca \
+  --title "an event nobody owes, which belongs to history alone" >/dev/null
 
 FM_HOME=$HOME29B "$RENDER" --state > "$TMP_ROOT/gap-state.json"
 board_of "$HOME29B" > "$TMP_ROOT/gap-board.html"
@@ -2313,6 +2330,20 @@ if gap["state"] != "resolved" or gap["ended"]:
              % (gap["state"], gap["outcome"]))
 if "item-gap-ask" not in board:
     sys.exit("the live ask is not on the board, so the fixture proves nothing")
+# The overlapping case has to be in the fixture too, or the partition test above
+# is only re-proving that the fold's zones happen not to intersect today.
+for key, queue in (("gap-ev-cap", "asks"), ("gap-ev-co", "cocaptain_asks")):
+    routed = doc["items"][key]
+    if routed["kind"] != "event" or key not in doc[queue]:
+        sys.exit("the fixture no longer holds an event on the %s queue (%s is "
+                 "%r), so this guard no longer covers an item that two sections "
+                 "both want" % (queue, key, routed["kind"]))
+    if key not in doc["zones"]["events"]:
+        sys.exit("%s is no longer in the events zone, so the two sections no "
+                 "longer overlap and this guard covers nothing" % key)
+if "item-gap-ev-plain" not in history:
+    sys.exit("the unrouted event is not on history, so the events section could "
+             "have passed this guard by rendering nothing at all")
 sys.exit(0)
 GAP
 pass "every board-kind item lands on exactly one of the two pages"

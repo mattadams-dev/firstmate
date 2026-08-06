@@ -365,7 +365,8 @@ Three facts from that record shape what the board promises:
   Re-queueing the same decision replaces the entry rather than sending twice, which is what makes the lost tick harmless.
 - A ruling typed into the annotation box and **not** queued is destroyed by the redraw, silently. The board says so.
 - Lavish reloads the hosted frame itself when the file changes, and the frame - sandboxed without `allow-same-origin` - cannot see whether an annotation card is open.
-  So **the board never reloads itself**: its freshness bar reports the gap and offers a button, for the case Lavish's own reload does not cover.
+  So **neither page ever reloads itself**: the freshness bar reports the gap and offers a button, for the case Lavish's own reload does not cover.
+  Both pages run the poll, so both carry the bar - a page that turned its freshness dot orange with no bar beside it would signal a state it could neither explain nor let the reader act on.
 
 Recommender attribution rides inside an answer option as a muted `rec:` chip, never as a colour state, so a recommendation can never be mistaken for something the captain selected.
 Green means queued on that card and nothing else.
