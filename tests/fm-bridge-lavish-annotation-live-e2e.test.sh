@@ -65,6 +65,28 @@ if ! grep -qF "$PINNED" "$LAVISH_DIST/cli.mjs" 2>/dev/null; then
 fi
 pass "the installed lavish-axi still excludes exactly the controls the board avoids"
 
+# THE QUEUE API IS THE OTHER VENDOR FACT THE BOARD RULES THROUGH, and v2 depends
+# on it far more than v1 did: every clicked ruling goes through queuePrompt, and
+# queueKey is what makes a change of mind replace an answer instead of sending a
+# second one. Both are pinned against the installed binary here.
+#
+# It is checked HERE rather than in the browser below, and that is a limitation
+# worth stating: Lavish sandboxes the artifact frame without allow-same-origin,
+# so the hosting page cannot reach in and `chrome-devtools-axi eval` would be
+# reading the wrong document. Measuring the API's real behaviour needs a CDP
+# attach to the frame's own target - the procedure is in section 3 of
+# docs/verification/bridge-board-v2.md, and that record is what this pin
+# protects: if these names leave the binary, the measurement behind them is
+# stale and the board's whole queue path is unproven.
+for symbol in queuePrompt queueKey sendQueuedPrompts; do
+  grep -qF "$symbol" "$LAVISH_DIST/cli.mjs" 2>/dev/null \
+    || fail "lavish-axi $LAVISH_VERSION no longer carries '$symbol', which the board's
+  queue path is built on. Every clicked ruling goes through window.lavish.queuePrompt,
+  and queueKey is what stops a change of mind sending two answers. Re-measure
+  section 3 of docs/verification/bridge-board-v2.md before trusting either."
+done
+pass "the installed lavish-axi still carries the queue API and its replace-by-key option"
+
 # --- 2. a real browser, a real session, a real ask row ----------------------
 
 command -v chrome-devtools-axi >/dev/null 2>&1 \
@@ -153,7 +175,7 @@ page_can_answer() {  # <snapshot>
     *) return 1 ;;
   esac
   case "$1" in
-    *'"O1: A: retire it"'*) return 0 ;;
+    *'"A: retire it"'*) return 0 ;;
   esac
   return 1
 }
@@ -185,7 +207,7 @@ attempt=0
 while [ "$attempt" -lt 45 ]; do
   current=$(snap)
   case "$current" in
-    *'"O1: A: retire it"'*) revealed=1; break ;;
+    *'"A: retire it"'*) revealed=1; break ;;
   esac
   reveal_line=$(printf '%s\n' "$current" | grep -oE 'uid=[^ ]+ button "Show anyway"' | head -1)
   if [ -n "$reveal_line" ]; then
@@ -197,48 +219,56 @@ done
 [ "$revealed" -eq 1 ] \
   || could_not_observe "whether the board's ask rows can be annotated"
 
-# Three different worlds, three different readings. "No card opened" alone
-# cannot tell them apart, and reporting the wrong one sends the next reader
-# after the wrong thing entirely.
-option_line=$(snap | grep -E 'uid=[^ ]+ [A-Za-z]+ "O1: A: retire it"' | head -1)
+# THE ANSWER OPTION IS A CONTROL NOW, DELIBERATELY, and the live guard has to
+# check the new contract rather than the old one. v1 rendered options as inert
+# spans so they stayed annotatable; the captain then could not select one to
+# queue a ruling, and a decision travelled by terminal instead. v2 makes them
+# buttons that queue - which spends their annotatability, on purpose.
+#
+# So what this guard asserts here is the SHAPE, against the vendor: the option
+# is a native control, which is what makes it clickable rather than annotated.
+option_line=$(snap | grep -E 'uid=[^ ]+ [A-Za-z]+ "A: retire it"' | head -1)
 [ -n "$option_line" ] \
   || fail "the hosted board never rendered the ask's answer option at all, so this guard proves nothing"
 case "$option_line" in
-  *' button "'*|*' textbox "'*|*' combobox "'*|*' checkbox "'*)
-    fail "the board renders its answer option as a native control:
+  *' button "'*) : ;;
+  *) fail "the board renders its answer option as something other than a native control:
   $option_line
-  Lavish skips controls when deciding what may be annotated, so this option -
-  on an ask the captain has to rule on - cannot be annotated at all." ;;
+  v2 queues a ruling from an option CLICK, and Lavish only lets a click through
+  on a control - anything else is annotated instead, which is the failure that
+  sent a decision to the terminal. Re-measure docs/verification/bridge-board-v2.md." ;;
 esac
-annotation_card_opened "$(uid_in "$option_line")"
-case "$?" in
-  0) : ;;
-  2) could_not_observe "whether an answer option can be annotated" ;;
-  *) fail "lavish-axi $LAVISH_VERSION opened no annotation card on the board's answer option.
-  The board's only input path is annotation, so this is the captain being unable
-  to answer an ask - re-measure docs/verification/bridge-hosted-input.md." ;;
-esac
-dismiss_card
-pass "a real hosted session opens an annotation card on a real ask's answer option"
+pass "the hosted board renders its answer options as controls, so a click can queue a ruling"
 
-# The ref has to be annotatable too: it is what an annotation carries to say
-# WHICH ask was ruled on.
+# AND THE FREE-TEXT PATH STAYS OPEN, which is the half that fails silently. If
+# the ref or the title ever drifts inside a control, the card still LOOKS right
+# and a ruling annotated on it arrives naming nothing.
 #
-# The LAST one on the page, deliberately. The ref appears twice: once in the
-# asks index, inside the anchor that jumps to the card, and once on the card
-# itself. The index one is inside a `data-lavish-action` link and is therefore
-# NOT annotatable - that attribute is exactly the "let this click navigate"
-# exemption, and it is the right trade for a link. The card is where a ruling is
-# placed, and the card comes after the index in document order.
+# The ref, first: it is what an annotation carries to say WHICH ask was ruled on.
 ref_line=$(snap | grep -E 'uid=[^ ]+ [A-Za-z]+ "O1"' | tail -1)
 [ -n "$ref_line" ] || fail "the hosted board rendered no visible ref for the ask"
 annotation_card_opened "$(uid_in "$ref_line")"
 case "$?" in
   0) : ;;
   2) could_not_observe "whether an ask's visible ref can be annotated" ;;
-  *) fail "lavish-axi $LAVISH_VERSION opened no annotation card on the ask's visible ref" ;;
+  *) fail "lavish-axi $LAVISH_VERSION opened no annotation card on the ask's visible ref.
+  A free-text ruling placed on this card would arrive unable to name its ask -
+  re-measure docs/verification/bridge-board-v2.md." ;;
 esac
 dismiss_card
 pass "the ask's visible ref is annotatable, so an annotation can name what it ruled on"
+
+# And the title, which is where a reader actually places a free-text ruling.
+title_line=$(snap | grep -E 'uid=[^ ]+ [A-Za-z]+ "an ask to annotate"' | tail -1)
+[ -n "$title_line" ] || fail "the hosted board rendered no visible title for the ask"
+annotation_card_opened "$(uid_in "$title_line")"
+case "$?" in
+  0) : ;;
+  2) could_not_observe "whether an ask's title can be annotated" ;;
+  *) fail "lavish-axi $LAVISH_VERSION opened no annotation card on the ask's title, so
+  there is nothing left on the card to place a free-text ruling on." ;;
+esac
+dismiss_card
+pass "the ask's title is annotatable, so a ruling the buttons cannot say still has somewhere to go"
 
 echo "all live Lavish annotation guards passed against lavish-axi $LAVISH_VERSION"

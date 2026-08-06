@@ -326,6 +326,38 @@ FM_HOME=$HOME4 "$BRIDGE" ask --project orca --title "no answer form" >/dev/null 
   && fail "asks: an ask was accepted with no answer form"
 pass "an ask is refused without an answer form"
 
+# THE ZONE LABEL MUST STATE THE SORT THE CODE USES. Its predecessor said
+# "oldest first" over a severity-first ordering, so a reader who trusted it took
+# the top row for the longest-waiting ask when a 5h critical was sitting above a
+# 27h routine item. A false claim about its own ordering, on the surface whose
+# whole job is collecting rulings, is worth a guard: the ordering is deliberate,
+# the label was the defect, and nothing but a test keeps the two together.
+python3 - "$TMP_ROOT/mode-board.html" "$TMP_ROOT/mode-state.json" <<'SORTLABEL' \
+  || fail "sort label: see the report"
+import json, re, sys
+html = open(sys.argv[1]).read()
+doc = json.load(open(sys.argv[2]))
+note = re.search(r'<h2>Your decisions<span class="note">(.*?)</span></h2>', html, re.S)
+if note is None:
+    sys.exit("the decisions zone carries no label at all")
+label = note.group(1)
+
+# What the fold actually does, read off the queue rather than off the renderer.
+ranked = [(doc["items"][k]["severity"], -(doc["items"][k]["age_seconds"] or 0))
+          for k in doc["asks"]]
+if ranked != sorted(ranked, key=lambda pair: ({"critical":0,"high":1,"normal":2,"low":3}
+                                              .get(pair[0], 4), pair[1])):
+    sys.exit("the ask queue is not ordered by severity then age, so this guard "
+             "is checking the label against the wrong claim")
+if "severity first" not in label:
+    sys.exit("the label does not say the queue is ordered by severity: %r" % label)
+if re.search(r"\boldest first\b", label):
+    sys.exit("the label claims oldest-first over a severity-first sort, which is "
+             "the exact false claim this guard exists for: %r" % label)
+sys.exit(0)
+SORTLABEL
+pass "the decisions zone label states the ordering the fold actually uses"
+
 # --- 6. an ask that has been waiting says so --------------------------------
 #
 # The captain's evidence: eight captain-kind items queued, two already ruled and

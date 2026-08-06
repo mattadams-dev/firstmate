@@ -1343,6 +1343,17 @@ footer .row { margin:.3rem 0; overflow-x:auto; white-space:nowrap; }
 .hrow .proj { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .hrow .what { min-width:0; overflow-wrap:anywhere; }
 .hrow .ends { white-space:nowrap; display:flex; gap:.3rem; flex-wrap:wrap; justify-content:flex-end; }
+/* A group label inside a section - "landed", "discarded", "open, and not
+   waiting on you". It sat as ordinary dim prose and read as a stray word
+   dropped between two rows; a label the reader skims past is a group boundary
+   they do not see, which on this page means reading a discarded row as a
+   landed one. */
+.grouplabel {
+  margin:1.1rem 0 .3rem; font-size:.7rem; text-transform:uppercase;
+  letter-spacing:.11em; color:var(--tn-muted); font-weight:600;
+  border-top:1px solid var(--tn-line); padding-top:.5rem;
+}
+.grouplabel:first-of-type { border-top:0; margin-top:.2rem; }
 .hitem { border-bottom:1px solid rgba(59,66,97,.4); padding:.15rem 0 .5rem; }
 .hitem details.ctxd { margin:0 0 0 .2rem; }
 .hbody { color:var(--tn-dim); font-size:.85rem; overflow-wrap:anywhere; }
@@ -2348,15 +2359,22 @@ def render_board(doc, env):
     add('<div class="wrap">')
     add(problem_banners(doc))
 
-    add("<section><h2>Your decisions")
+    # THE LABEL STATES THE SORT THE CODE ACTUALLY USES, on one line, so the
+    # guard that holds the two together can read it. Its predecessor said
+    # "oldest first" over a severity-first ordering - a false claim about its
+    # own ordering, on the surface whose entire job is collecting rulings, where
+    # a reader who trusts it takes the top row for the oldest outstanding ask.
+    # Severity first is the right ordering for a surface triaged from; the label
+    # was the defect.
+    add("<section>")
     if asks:
-        add('<span class="note">criticals first, then longest waiting '
-            "&middot; pick an answer, press Queue, Send delivers all &middot; "
-            "or annotate the card to say it your way</span></h2>")
+        add('<h2>Your decisions<span class="note">severity first, then longest '
+            "waiting &middot; pick an answer, press Queue, Send delivers all "
+            "&middot; or annotate the card to say it your way</span></h2>")
         for key in asks:
             add(ask_card(items[key], doc["glossary"]))
     else:
-        add("</h2>")
+        add("<h2>Your decisions</h2>")
         add('<p class="allclear">Nothing is waiting on you.</p>')
     add("</section>")
 
@@ -2573,7 +2591,7 @@ def render_history(doc, env):
     shown_any = False
     still_open = elsewhere(zones["criticals"])
     if still_open:
-        add('<p class="zone-note">open, and not waiting on you</p>')
+        add('<p class="grouplabel">open, and not waiting on you</p>')
         for key in still_open:
             add(history_row(items[key], doc))
         shown_any = True
@@ -2584,7 +2602,7 @@ def render_history(doc, env):
         if not shown:
             continue
         shown_any = True
-        add('<p class="zone-note">%s</p>' % esc(label))
+        add('<p class="grouplabel">%s</p>' % esc(label))
         for key in shown:
             add(history_row(items[key], doc))
         hidden = len(zones[group]) - len(shown)
@@ -2622,10 +2640,15 @@ def render_history(doc, env):
                              if sub["project"] == group["project"])
                 bits.append("<b>%s</b> here means %s" % (esc(entry["term"]), esc(means)))
             add('<p class="local-terms">%s</p>' % "; ".join(bits))
+        if open_elsewhere:
+            add('<p class="grouplabel">open, and not waiting on you</p>')
         for key in open_elsewhere:
             add(history_row(items[key], doc))
-        for side in ("landed", "discarded", "unknown"):
+        for side, label in (("landed", "landed"), ("discarded", "discarded"),
+                            ("unknown", "ended, how unknown")):
             shown = group[side][:caps["closed_decisions"]]
+            if shown:
+                add('<p class="grouplabel">%s</p>' % esc(label))
             for key in shown:
                 add(history_row(items[key], doc))
             hidden = len(group[side]) - len(shown)
@@ -2656,14 +2679,21 @@ def render_history(doc, env):
     add("<section><h2>Fleet</h2>")
     add('<p class="zone-note">Every task in the record. Live work is on the '
         "board as a lane; how each closed task ended is here.</p>")
-    rows = elsewhere(zones["fleet_open"])
+    open_rows = elsewhere(zones["fleet_open"])
     closed_shown = {}
     for group in ("fleet_landed", "fleet_discarded", "fleet_unknown"):
         closed_shown[group] = zones[group][:caps["fleet_closed"]]
-        rows += closed_shown[group]
-    if rows:
-        for key in rows:
-            add(history_row(items[key], doc))
+    groups = [("still going", open_rows),
+              ("landed", closed_shown["fleet_landed"]),
+              ("discarded", closed_shown["fleet_discarded"]),
+              ("ended, how unknown", closed_shown["fleet_unknown"])]
+    if any(rows for _, rows in groups):
+        for label, rows in groups:
+            if not rows:
+                continue
+            add('<p class="grouplabel">%s</p>' % esc(label))
+            for key in rows:
+                add(history_row(items[key], doc))
     else:
         add('<p class="empty">No tasks in the record.</p>')
     for group, label in (("fleet_landed", "landed"),

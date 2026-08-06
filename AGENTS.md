@@ -347,6 +347,7 @@ The Bridge is the captain's primary surface; this terminal stream is your record
 Append at the moment of the event, in the turn that is already happening, as a replacement for the equivalent stream prose - never as a separate bookkeeping turn:
 
 - `bin/fm-bridge.sh ask --project P --title T --answer "A: ..." --answer "B: ..."` for a decision the captain owes.
+  An answer may end with `[rec: worker]`, `[rec: fm]`, or `[rec: worker+fm]` naming who recommends it; more than one option may carry one, and the board shows the disagreement rather than resolving it.
 - `bin/fm-bridge.sh critical --project P --title T --answer ...` for security, data loss, fleet blocked, or an outward-facing anomaly.
 - `bin/fm-bridge.sh note --project P --title T [--pointer URL]` for a notable event.
 - `bin/fm-bridge.sh handling --id ID` when you take an item, and `bin/fm-bridge.sh resolve --id ID --pointer URL` the moment it is answered or lands.

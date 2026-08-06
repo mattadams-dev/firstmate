@@ -136,6 +136,30 @@ A second ask queues its own entry rather than replacing the first:
 One entry per ask, always the latest, and distinct asks do not collide.
 **The board ships the queue path; the annotation-prefill fallback was not needed and is not implemented.**
 
+### The link symptom, measured separately
+
+`fm-lavish-links-unclickable` records two symptoms and explicitly forbids crediting one fix for both.
+They are separate defects with separate roots, and this section is the evidence for the link half only.
+
+Left-clicking an anchor in the hosted board, with a bubble-phase listener reading `event.defaultPrevented`:
+
+```json
+{"href": "history.html", "hasLavishAction": true, "defaultPreventedAtBubble": false}
+```
+
+and the frame then went where it was pointed:
+
+```json
+{"url": "/artifact/<id>/history.html", "title": "Bridge - history", "backLink": true}
+```
+
+So `data-lavish-action` is Lavish's own pass-through and it works: left-click is not prevented, the navigation happens, and the history page's `← board` link completes the round trip.
+Every anchor carries it because they all go through one `link()` helper, which `tests/fm-bridge.test.sh` enforces.
+
+The **root** of the link symptom is Lavish's capture-phase `preventDefault()` on everything outside its exclusion list.
+The root of the answer-selection symptom is different and is in this repo: v1 rendered options as inert `<span>` elements and the page had no send path at all, by design.
+Nothing was shared between them, so the queue path in section 3 fixes the second and this attribute fixes the first.
+
 ## 4. What a redraw does to a queued ruling
 
 Lavish reloads the hosted frame **itself** when the file changes.
@@ -184,6 +208,29 @@ What must stay outside every control, and is pinned by `tests/fm-bridge.test.sh`
 
 Those three are what a free-text annotation needs in order to name the ask it was placed on.
 The board still renders no free-text input of its own: no `input`, no `textarea`, no `contenteditable`.
+
+## 7. The live guard, and what it covers
+
+`tests/fm-bridge-lavish-annotation-live-e2e.test.sh` is the opt-in guard that re-checks the vendor-dependent half against the **installed** `lavish-axi` and a real hosted session.
+Run it after every `lavish-axi` upgrade: `FM_BRIDGE_LAVISH_LIVE_E2E=1 bash tests/fm-bridge-lavish-annotation-live-e2e.test.sh`, with `CHROME_DEVTOOLS_AXI_BROWSER_URL` pointing at a Chrome with remote debugging.
+
+Result on 2026-08-05 against `lavish-axi` 0.1.43:
+
+```
+lavish-axi 0.1.43 at /home/jamada/.local/lib/node_modules/lavish-axi/dist/cli.mjs
+ok - the installed lavish-axi still excludes exactly the controls the board avoids
+ok - the installed lavish-axi still carries the queue API and its replace-by-key option
+ok - the hosted board renders its answer options as controls, so a click can queue a ruling
+ok - the ask's visible ref is annotatable, so an annotation can name what it ruled on
+ok - the ask's title is annotatable, so a ruling the buttons cannot say still has somewhere to go
+all live Lavish annotation guards passed against lavish-axi 0.1.43
+```
+
+**One limitation, stated rather than papered over.**
+The guard pins `queuePrompt`, `queueKey` and `sendQueuedPrompts` by reading the installed binary, and it does not exercise the queue path in the browser.
+It cannot: the artifact frame is sandboxed without `allow-same-origin`, so the hosting page - which is what `chrome-devtools-axi eval` reaches - is the wrong document.
+The behavioural measurement is section 3 above, taken by attaching to the frame's own CDP target, and the binary pin is what says whether that measurement is still about the version installed.
+If those names leave the binary, the guard fails naming the version rather than passing quietly over a queue path nobody has re-measured.
 
 ## Refreshing these measurements
 
