@@ -2448,57 +2448,78 @@ pass "every board-kind item lands on exactly one of the two pages"
 # guard is about the SHAPE rather than a wall-clock number: a second render must
 # not re-run them. Timing an assertion would be flaky on a loaded machine and
 # would pin the machine rather than the design.
+#
+# THE PROBE HAS TO ANSWER FOR THE GUARD TO MEASURE ANYTHING. Both probes are
+# optional tools: quota-axi is installed on a captain's machine and absent from
+# a CI runner, powershell.exe exists only under WSL. A probe with no reading has
+# nothing to cache - correctly, since a cache entry is a reading - so on a
+# machine with neither tool no cache file appeared and this section measured the
+# machine rather than the design: it failed outright on CI, and the two
+# assertions below it, which only run once a cache is on disk, covered nothing
+# wherever the tool was missing. A stub on PATH makes the probe answer the same
+# way everywhere, so all three assertions run on every machine.
+
+STUB29C="$TMP_ROOT/stub-bin-29c"
+mkdir -p "$STUB29C"
+cat >"$STUB29C/quota-axi" <<'STUB'
+#!/usr/bin/env bash
+printf '%s\n' '{"providers":[{"provider":"stub-provider","status":"ok","windows":[{"label":"5h","percentRemaining":42,"pace":{"status":"steady"}}]}]}'
+STUB
+chmod +x "$STUB29C/quota-axi"
+PATH29C_SAVED=$PATH
+PATH="$STUB29C:$PATH"
+export PATH
 
 HOME29C=$(new_home)
 FM_HOME=$HOME29C "$BRIDGE" ask -q --id cheap --project orca \
   --title "something to render" --answer "A: yes" >/dev/null
 
 board_of "$HOME29C" >/dev/null
-host_cache="$HOME29C/state/.bridge-probe-host"
 quota_cache="$HOME29C/state/.bridge-probe-quota"
-[ -f "$host_cache" ] || [ -f "$quota_cache" ] \
+[ -f "$quota_cache" ] \
   || fail "no probe reading was cached at all, so every render on the watcher's poll pays for a fresh subprocess"
 pass "the subprocess-backed gauges cache their readings beside the board"
 
 # The cached reading is REUSED, not re-taken. A sentinel value proves it: if the
 # second render re-probed, the sentinel would be gone.
-python3 - "$quota_cache" <<'SENTINEL'
+python3 - "$quota_cache" <<'SENTINEL' || fail "the cached reading could not be rewritten, so nothing below it was proven"
 import json, sys
 try:
     record = json.load(open(sys.argv[1]))
-except (OSError, ValueError):
-    sys.exit(0)
+except (OSError, ValueError) as exc:
+    sys.exit("the probe cache is not a readable record: %s" % exc)
 record["value"] = {"providers": [{"name": "sentinel-provider",
                                   "remaining_percent": 77, "pace": "", "status": ""}]}
 json.dump(record, open(sys.argv[1], "w"))
 SENTINEL
-if [ -f "$quota_cache" ]; then
-  case "$(board_of "$HOME29C")" in
-    *sentinel-provider*) : ;;
-    *) fail "the second render ignored the cached reading and probed again, so every render on the watcher's poll pays the subprocess cost" ;;
-  esac
-  pass "a second render reuses the cached reading instead of spawning the probe again"
-fi
+case "$(board_of "$HOME29C")" in
+  *sentinel-provider*) : ;;
+  *) fail "the second render ignored the cached reading and probed again, so every render on the watcher's poll pays the subprocess cost" ;;
+esac
+pass "a second render reuses the cached reading instead of spawning the probe again"
 
 # AND A REUSED READING SAYS SO. A cached number presented as a live one is the
 # capacity lesson with a shorter half-life, so the gauge carries its age as soon
 # as the reading is not from this fold.
-python3 - "$quota_cache" <<'AGE'
+python3 - "$quota_cache" <<'AGE' || fail "the cached reading could not be aged, so nothing below it was proven"
 import json, sys
 try:
     record = json.load(open(sys.argv[1]))
-except (OSError, ValueError):
-    sys.exit(0)
+except (OSError, ValueError) as exc:
+    sys.exit("the probe cache is not a readable record: %s" % exc)
 record["at"] = int(record["at"]) - 120
 json.dump(record, open(sys.argv[1], "w"))
 AGE
-if [ -f "$quota_cache" ]; then
-  case "$(board_of "$HOME29C")" in
-    *"read 2m ago"*) : ;;
-    *) fail "a two-minute-old cached reading renders with no age, so it reads as current" ;;
-  esac
-  pass "a reused reading carries how old it is, so it never reads as taken just now"
-fi
+case "$(board_of "$HOME29C")" in
+  *"read 2m ago"*) : ;;
+  *) fail "a two-minute-old cached reading renders with no age, so it reads as current" ;;
+esac
+pass "a reused reading carries how old it is, so it never reads as taken just now"
+
+# The stub belongs to this section alone: every guard after it reads whatever
+# the machine actually has.
+PATH=$PATH29C_SAVED
+export PATH
 
 # --- 30. the renderer leaves nothing behind --------------------------------
 #
