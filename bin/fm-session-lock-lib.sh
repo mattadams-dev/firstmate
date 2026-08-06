@@ -1,12 +1,32 @@
 #!/usr/bin/env bash
-# Shared session-lock harness identity.
+# Shared session-lock identity.
 #
-# ONE owner of the "which verified-harness process holds this home's session
-# lock, and does the current process descend from that same harness?" decision.
-# bin/fm-lock.sh uses it to acquire and inspect state/.lock;
+# ONE owner of the "does this home's session lock belong to the session asking?"
+# decision. bin/fm-lock.sh uses it to acquire and inspect state/.lock;
 # bin/fm-claude-stop-autoarm.sh uses it to prove a Stop hook fires inside the
 # lock-owning primary session before it may arm or rewake.
 # This file is sourced by scripts and has no side effects on source.
+#
+# THE IDENTITY BASIS IS A SESSION ID, NOT A PROCESS ID, and that is structural
+# rather than a preference. A Claude Code primary is two layers: the interactive
+# CLI is one process, and the harness that runs hooks and tool calls can be a
+# different process on unrelated ancestry behind a detached pty host. The
+# ancestry chain between them is broken BY CONSTRUCTION, so a lock recording
+# either process cannot be recognized from the other however carefully the
+# processes are inspected. Measured in this fleet: the lock held pid 3638271,
+# the captain's own live CLI, while the same session's harness ran as pid 849887
+# under a bg-pty-host - one session, two layers, no zombie and nothing to kill.
+# The session id is the identifier both layers carry, so it is the one that can
+# answer the question. docs/verification/session-identity.md holds the probe.
+#
+# THE REFUSAL BIAS IS UNCHANGED AND MUST STAY UNCHANGED. A session that does not
+# own the lock is still refused; only the BASIS for deciding ownership moved. An
+# unresolvable session id, an absent lock, and a malformed lock are all refusals,
+# never permission. The process helpers below survive because they still answer
+# their own narrower questions - is this pid a live harness, which pid should the
+# lock record - and because a lock that records no session id at all (written
+# before this contract, or by a harness whose session id was not observable) is
+# still judged by the ancestry test rather than being handed a free pass.
 
 # Known harness command names; extend when a new adapter is verified.
 FM_HARNESS_RE='claude|codex|opencode|grok|kimi|^pi$|^pi-signed$'
@@ -145,20 +165,89 @@ fm_harness_pid_alive() {
   fm_harness_process_matches "$comm" "$args"
 }
 
-# True when state dir $1 holds a session lock whose pid is ANY harness ancestor
-# of the current process: this script runs inside the session that owns the
-# home's fleet lock. Membership is the honest test of that question, because the
-# lock owner sits at an unknown depth in a contiguous Claude run - it is the
-# outermost pid when the hook fires inside the session's own nested worker chain,
-# and an inner pid when a harness-named daemon parents the session. A missing
-# lock, a malformed lock, a lock held by a harness outside this ancestry, or an
-# ancestry that cannot be resolved all fail closed.
-fm_session_lock_owned_by_self() {
-  local state=$1 lock_pid pids pid
-  lock_pid=$(cat "$state/.lock" 2>/dev/null || true)
-  case "$lock_pid" in
+# --- session identity ---------------------------------------------------------
+
+# True when $1 has the shape of a session id. Deliberately narrow: a session id
+# is an opaque token, so anything carrying whitespace, a newline, or a shell
+# metacharacter is rejected rather than normalized. That keeps a malformed or
+# forged lock line from being read as a match, and it makes "unreadable" and
+# "does not match" the same refusing answer.
+fm_session_id_valid() {  # <id>
+  case "$1" in
+    '') return 1 ;;
+    *[!A-Za-z0-9._-]*) return 1 ;;
+  esac
+  return 0
+}
+
+# Print THIS session's id, or return 1 when it cannot be established.
+#
+# Precedence, and both sources name the same session on either side of the
+# CLI/harness split:
+#   1. FM_SESSION_ID   - set explicitly by a caller that already read the value
+#                        from an authoritative payload (the Claude Stop hook
+#                        passes its payload's .session_id this way), and by
+#                        tests.
+#   2. CLAUDE_CODE_SESSION_ID - injected by Claude Code into every tool-call and
+#                        hook child. It is NOT present on the harness process's
+#                        own environment, which is why this is read from the
+#                        caller's environment rather than from /proc.
+#
+# Returning 1 is a refusal, not a fallback: a caller that cannot establish who it
+# is must not be treated as the owner of anything.
+fm_session_id_self() {
+  local id=${FM_SESSION_ID:-${CLAUDE_CODE_SESSION_ID:-}}
+  fm_session_id_valid "$id" || return 1
+  printf '%s\n' "$id"
+}
+
+# --- the lock record ----------------------------------------------------------
+#
+# state/.lock is line-addressed and line 1 NEVER changes meaning:
+#   line 1  the harness process id                  (required)
+#   line 2  session=<session-id>                    (optional)
+#
+# Line 1 stays the pid because other readers depend on exactly that line and
+# depend on it for REFUSALS: bin/fm-safe-kill.sh refuses to signal the pid on
+# line 1, and bin/fm-sessionstart-nudge.sh, bin/fm-trace-context-lib.sh, and
+# bin/fm-session-start.sh's Pi extension check all read line 1 alone. Moving or
+# reformatting it would quietly turn those refusals into permission, which is the
+# one direction this contract may never move.
+
+# Print the harness pid recorded in state dir $1's lock, or return 1.
+fm_session_lock_pid() {  # <state-dir>
+  local pid
+  { IFS= read -r pid < "$1/.lock"; } 2>/dev/null || return 1
+  case "$pid" in
     ''|*[!0-9]*) return 1 ;;
   esac
+  printf '%s\n' "$pid"
+}
+
+# Print the session id recorded in state dir $1's lock, or return 1 when the lock
+# records none. An absent session line is a real, distinguishable state - a lock
+# written before this contract, or by a harness whose session id was not
+# observable - and it is reported as such rather than as an empty match.
+fm_session_lock_session() {  # <state-dir>
+  local id
+  id=$(sed -n '2s/^session=//p' "$1/.lock" 2>/dev/null) || return 1
+  fm_session_id_valid "$id" || return 1
+  printf '%s\n' "$id"
+}
+
+# True when state dir $1 holds a session lock whose pid is ANY harness ancestor
+# of the current process. Membership is the honest test of that question, because
+# the lock owner sits at an unknown depth in a contiguous Claude run - it is the
+# outermost pid when the hook fires inside the session's own nested worker chain,
+# and an inner pid when a harness-named daemon parents the session.
+#
+# This is now the LEGACY basis, reached only for a lock that records no session
+# id. It is kept rather than dropped because dropping it would refuse every
+# session whose lock predates this contract, and a guard that refuses a
+# legitimate session is disabled by the next person under time pressure.
+fm_session_lock_ancestry_owned_by_self() {
+  local state=$1 lock_pid pids pid
+  lock_pid=$(fm_session_lock_pid "$state") || return 1
   pids=$(fm_harness_ancestry_pids) || return 1
   while IFS= read -r pid; do
     [ "$pid" = "$lock_pid" ] && return 0
@@ -166,4 +255,25 @@ fm_session_lock_owned_by_self() {
 $pids
 EOF
   return 1
+}
+
+# True when the caller runs inside the session that owns state dir $1's lock.
+#
+# When the lock records a session id, that id alone decides: this session owns
+# the lock exactly when the two ids match, whatever process is asking. That is
+# what survives the CLI/harness split. When the lock records no session id, the
+# legacy ancestry test above answers instead, unchanged.
+#
+# Every uncertainty refuses: a missing lock, a malformed lock, a lock whose
+# session line cannot be read, a caller whose own session id cannot be
+# established, and a lock naming a different session.
+fm_session_lock_owned_by_self() {  # <state-dir>
+  local state=$1 lock_session self_session
+  fm_session_lock_pid "$state" >/dev/null || return 1
+  if lock_session=$(fm_session_lock_session "$state"); then
+    self_session=$(fm_session_id_self) || return 1
+    [ "$self_session" = "$lock_session" ]
+    return
+  fi
+  fm_session_lock_ancestry_owned_by_self "$state"
 }

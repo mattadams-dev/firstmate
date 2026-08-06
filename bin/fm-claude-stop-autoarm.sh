@@ -10,11 +10,20 @@
 #   - Scope: only a genuine primary checkout (plain checkout or validly marked
 #     secondmate home) with AGENTS.md, bin/, and the effective state dir - the
 #     exact fm-turnend-guard.sh scope. Child crew/scout worktrees stay inert.
-#   - Identity: only when THIS session's harness ancestor holds state/.lock.
-#     When an existing numeric owner fails the shared harness-liveness predicate,
-#     the hook delegates guarded recovery to bin/fm-lock.sh and then re-verifies
-#     ownership. A live owner, missing lock, malformed lock, or unresolved
-#     ancestry remains inert, so a competing session never arms or rewakes.
+#   - Identity: only when THIS session owns state/.lock, decided by session id
+#     (bin/fm-session-lock-lib.sh). When the recorded owner's pid fails the
+#     shared harness-liveness predicate, the hook delegates guarded recovery to
+#     bin/fm-lock.sh and then re-verifies ownership. A live owner naming another
+#     session, a missing lock, a malformed lock, or an unestablishable own
+#     session id all still refuse, so a competing session never arms or rewakes.
+#   - Recorded refusal: an identity refusal is an OUTCOME and is written as one.
+#     It records epoch outcome "refused" and, once per episode, the failure
+#     notice. Exiting 0 in silence here is what made the turn-end guard's
+#     bounded fail-open unreachable: the guard advances on a fresh epoch and
+#     keys its escape on a verified failure, so a refusal that wrote nothing
+#     starved the very backstop built to survive an unavailable auto-arm. An
+#     exit that changes nothing observable is indistinguishable from an exit
+#     that never ran.
 #   - AFK: while state/.afk exists the away daemon owns the watcher and triage;
 #     this hook exits 0 and NEVER rewakes the primary (checked again at
 #     translation time so a mid-cycle AFK transition is honored).
@@ -79,58 +88,6 @@ esac
 # shellcheck source=bin/fm-session-lock-lib.sh
 . "$SCRIPT_DIR/fm-session-lock-lib.sh"
 
-# Consume the Stop payload once. The decisions below are state-based; the
-# payload is read so a slow writer can never wedge on a full pipe.
-cat >/dev/null 2>&1 || true
-
-# --- scope: genuine primary checkout only -----------------------------------
-fm_primary_scope_matches "$FM_ROOT" "$STATE" || exit 0
-
-# --- identity: only the lock-owning session's hooks may arm ------------------
-# A prior session may have died after leaving its numeric harness pid in .lock.
-# Use the shared liveness predicate to recognize only that stale-owner case.
-# Defer the mutating claim until after the unchanged AFK and need gates, so an
-# idle or away home remains byte-for-byte inert. Missing or malformed locks are
-# uncertainty rather than stale-owner evidence and remain inert.
-RECOVER_SESSION_LOCK=0
-if ! fm_session_lock_owned_by_self "$STATE"; then
-  LOCK_PID=$(cat "$STATE/.lock" 2>/dev/null || true)
-  case "$LOCK_PID" in
-    ''|*[!0-9]*) exit 0 ;;
-  esac
-  fm_harness_pid_alive "$LOCK_PID" && exit 0
-  RECOVER_SESSION_LOCK=1
-fi
-
-# --- AFK: the away daemon owns the watcher and triage; never rewake ----------
-[ -e "$STATE/.afk" ] && exit 0
-
-# --- need: in-flight work or an X-mode relay poll ----------------------------
-need_supervision() {
-  fm_supervision_needed "$STATE" "$GRACE"
-}
-need_supervision || exit 0
-
-# --- stale session-lock recovery ---------------------------------------------
-# Delegate the claim to fm-lock.sh so its live-owner refusal and write semantics
-# remain the single acquisition owner, then re-verify current-session identity
-# before touching any auto-arm state.
-if [ "$RECOVER_SESSION_LOCK" -eq 1 ]; then
-  "$SCRIPT_DIR/fm-lock.sh" >/dev/null 2>&1 || exit 0
-  fm_session_lock_owned_by_self "$STATE" || exit 0
-fi
-
-# --- single-flight owner claim ------------------------------------------------
-# Claude runs one background process per firing with no dedupe. Exactly one
-# owner foregrounds the arm and translates its close; every other firing exits
-# 0 so one watcher cycle maps to at most one exit-2 rewake.
-fm_lock_try_acquire "$OWNER_LOCK" || exit 0
-if ! fm_lock_set_role "$OWNER_LOCK" autoarm; then
-  fm_lock_release "$OWNER_LOCK"
-  exit 0
-fi
-trap 'fm_lock_release "$OWNER_LOCK"' EXIT
-
 write_epoch() {  # <outcome>
   local outcome=$1 seq tmp
   seq=$(sed -n 's/^epoch=\([0-9][0-9]*\) .*/\1/p' "$EPOCH" 2>/dev/null || true)
@@ -144,6 +101,106 @@ write_epoch() {  # <outcome>
     && mv -f "$tmp" "$EPOCH" 2>/dev/null
   rm -f "$tmp" 2>/dev/null || true
 }
+
+# Consume the Stop payload once. The decisions below are state-based apart from
+# the session id, which the payload is the authoritative source of; it is read
+# whole so a slow writer can never wedge on a full pipe.
+PAYLOAD=$(cat 2>/dev/null || true)
+
+# This session's id, from the Stop payload first and the injected environment
+# second. Both name the same session; the payload is preferred because it is
+# authoritative even where the environment is not propagated to hooks. An
+# unresolvable id is left empty, and the shared identity contract then refuses.
+if [ -n "$PAYLOAD" ] && command -v jq >/dev/null 2>&1; then
+  PAYLOAD_SESSION=$(printf '%s' "$PAYLOAD" | jq -r '
+    if (type == "object") and ((.session_id | type) == "string") then .session_id else empty end
+  ' 2>/dev/null || true)
+  if fm_session_id_valid "${PAYLOAD_SESSION:-}"; then
+    export FM_SESSION_ID="$PAYLOAD_SESSION"
+  fi
+fi
+
+# --- scope: genuine primary checkout only -----------------------------------
+fm_primary_scope_matches "$FM_ROOT" "$STATE" || exit 0
+
+# --- identity: only the lock-owning session's hooks may arm ------------------
+# A prior session may have died after leaving its harness pid in .lock. Use the
+# shared liveness predicate to recognize only that stale-owner case.
+#
+# Classify here but act later: the mutating claim AND the refusal record both
+# wait for the unchanged AFK and need gates below, so an idle or away home stays
+# byte-for-byte inert. A refusal only blocks the operator when supervision is
+# actually needed, and that is exactly when it must be recorded.
+RECOVER_SESSION_LOCK=0
+REFUSAL=
+if ! fm_session_lock_owned_by_self "$STATE"; then
+  LOCK_PID=$(fm_session_lock_pid "$STATE") || LOCK_PID=
+  LOCK_SESSION=$(fm_session_lock_session "$STATE") || LOCK_SESSION=
+  if [ -z "$LOCK_PID" ]; then
+    REFUSAL="this home's session lock is missing or malformed, so no session can be proven to own it"
+  elif fm_harness_pid_alive "$LOCK_PID"; then
+    if [ -n "$LOCK_SESSION" ]; then
+      REFUSAL="this home's session lock is held by session $LOCK_SESSION (live harness pid $LOCK_PID) and this session is not it"
+    else
+      REFUSAL="this home's session lock is held by live harness pid $LOCK_PID, records no session, and this session is not in its ancestry"
+    fi
+  else
+    RECOVER_SESSION_LOCK=1
+  fi
+fi
+
+# --- AFK: the away daemon owns the watcher and triage; never rewake ----------
+[ -e "$STATE/.afk" ] && exit 0
+
+# --- need: in-flight work or an X-mode relay poll ----------------------------
+need_supervision() {
+  fm_supervision_needed "$STATE" "$GRACE"
+}
+need_supervision || exit 0
+
+# --- recorded refusal ---------------------------------------------------------
+# Supervision is needed and this session may not provide it. Refusing is correct
+# and stays correct; recording the refusal is what keeps the guard's bounded
+# escape reachable instead of theoretical. No owner lock is claimed: holding it
+# would tell the turn-end guard that recovery is under way, which is the one
+# thing a refusal must never claim.
+if [ -n "$REFUSAL" ]; then
+  write_epoch refused
+  if [ ! -e "$FAILURE_NOTICE" ]; then
+    {
+      printf 'firstmate watcher auto-arm REFUSED - %s.\n' "$REFUSAL"
+      printf 'Supervision is needed here but this session may not arm it, so the home is unsupervised until the lock owner returns or its session lock is reacquired. This refusal is deliberate: firstmate never arms, rewakes, or ends a session on behalf of a session it cannot prove it is.\n'
+    } >&2
+    : > "$FAILURE_NOTICE" 2>/dev/null || true
+  fi
+  exit 0
+fi
+
+# --- stale session-lock recovery ---------------------------------------------
+# Delegate the claim to fm-lock.sh so its live-owner refusal and write semantics
+# remain the single acquisition owner, then re-verify current-session identity
+# before touching any auto-arm state.
+if [ "$RECOVER_SESSION_LOCK" -eq 1 ]; then
+  if ! "$SCRIPT_DIR/fm-lock.sh" >/dev/null 2>&1; then
+    write_epoch refused
+    exit 0
+  fi
+  if ! fm_session_lock_owned_by_self "$STATE"; then
+    write_epoch refused
+    exit 0
+  fi
+fi
+
+# --- single-flight owner claim ------------------------------------------------
+# Claude runs one background process per firing with no dedupe. Exactly one
+# owner foregrounds the arm and translates its close; every other firing exits
+# 0 so one watcher cycle maps to at most one exit-2 rewake.
+fm_lock_try_acquire "$OWNER_LOCK" || exit 0
+if ! fm_lock_set_role "$OWNER_LOCK" autoarm; then
+  fm_lock_release "$OWNER_LOCK"
+  exit 0
+fi
+trap 'fm_lock_release "$OWNER_LOCK"' EXIT
 
 write_epoch arming
 
