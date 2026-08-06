@@ -88,7 +88,7 @@ Content that already has an owner elsewhere carries no resident tax at all and r
 That is the larger lever by a wide margin: removing `AGENTS.md`'s duplicated operational-home tree returned 4,228 tokens per call, against 77 for the section 7 extraction.
 Look for a duplicate before you look for something to extract.
 
-`docs/verification/agents-md-diet.md` holds the measurements behind this rule, including why a fresh-session birth-weight reading is an upper bound on a conversion's saving rather than the achieved figure.
+[`docs/verification/agents-md-diet.md`](../../../docs/verification/agents-md-diet.md) holds the measurements behind this rule, including why a fresh-session birth-weight reading is an upper bound on a conversion's saving rather than the achieved figure.
 
 When in doubt, write the fact into the skill or doc first by patching that owner's existing language, and add only the one-line trigger to `AGENTS.md`.
 
