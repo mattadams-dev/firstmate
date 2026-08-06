@@ -309,8 +309,46 @@ NEW_WORKER_PID=$(cat "$STATE_ROOT/worker.pid")
 pass "worker identity binds the canonical configured code root"
 
 CRASHED_WORKER_PID=$NEW_WORKER_PID
-kill -KILL "$CRASHED_WORKER_PID"
+# The whole tree is stopped here, supervisor first, because the world this case
+# stages is a crash that nothing recovered.
+#
+# What ensure starts on Linux is worker_supervise_linux, not the worker: it
+# cleans up the dead child's records and respawns a successor within 0.1s of any
+# non-zero exit. Killing only the recorded child therefore left that successor
+# republishing worker.pid, worker.identity and the heartbeat while this fixture
+# was still writing the stale ownership record it means to test. The successor
+# then kept the heartbeat fresh underneath the forged record, ensure found a
+# ready worker with matching identity and returned without replacing anything,
+# and worker.pid still held the pid this fixture itself had written there - which
+# the assertion below read as the worker adopting an unrelated pid. That is the
+# CI red, and it is summonable on demand from this side: a delay inserted between
+# the kill and the staging below reproduces it every time, while delaying the
+# worker's respawn never produces it - it only trips the separate case that owns
+# the crash-recovery contract, which is that instrument working correctly.
+#
+# Killing the supervisor uncatchably and first also makes the next assertion mean
+# what it says. With a live supervisor the lock it finds is usually one the
+# successor re-created, because the supervisor removes the dead child's ownership
+# records before respawning; with no supervisor left, the lock present here is
+# the one the crashed child never got to release.
+CRASHED_SUPERVISOR_PID=$(ps -o ppid= -p "$CRASHED_WORKER_PID" 2>/dev/null | tr -d ' ' || true)
+fm_remote_job_fixture_worker_pid "$CRASHED_SUPERVISOR_PID" "$FIXTURE_WORKER" \
+  || fail "fixture precondition lost: the recorded worker child has no live supervisor to stop first"
+kill -KILL "$CRASHED_SUPERVISOR_PID" 2>/dev/null || true
+wait "$CRASHED_SUPERVISOR_PID" 2>/dev/null || true
+kill -KILL "$CRASHED_WORKER_PID" 2>/dev/null || true
 wait "$CRASHED_WORKER_PID" 2>/dev/null || true
+for _ in $(seq 1 100); do
+  if ! fm_remote_job_fixture_worker_pid "$CRASHED_SUPERVISOR_PID" "$FIXTURE_WORKER" &&
+    ! fm_remote_job_fixture_worker_pid "$CRASHED_WORKER_PID" "$FIXTURE_WORKER"; then
+    break
+  fi
+  sleep 0.05
+done
+if fm_remote_job_fixture_worker_pid "$CRASHED_SUPERVISOR_PID" "$FIXTURE_WORKER" ||
+  fm_remote_job_fixture_worker_pid "$CRASHED_WORKER_PID" "$FIXTURE_WORKER"; then
+  fail "fixture precondition lost: the crashed worker tree did not stop"
+fi
 assert_present "$STATE_ROOT/worker.lock" "an unclean exit did not retain the worker ownership lock"
 sleep 20 &
 OTHER_PID=$!
