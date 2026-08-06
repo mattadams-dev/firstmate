@@ -1,0 +1,127 @@
+# CI backstop: what protects `main` now that strict is off
+
+On 2026-08-05 this repository's `main` protection changed `required_status_checks.strict` from `true` to `false`.
+Everything else stayed as it was: the same 12 required contexts, admin enforcement on, force pushes and deletions blocked.
+Checks still have to pass; a branch merely no longer has to be up to date with `main` first.
+
+This document owns what that traded away, what now catches the difference, and what a reader of a red `main` is expected to do.
+
+## What was removed, and what replaced it
+
+Strict meant every pull request was re-validated against the current `main` before it could merge.
+That caught a semantic conflict between two independently-green pull requests **before** it landed: a conflict that merges cleanly as text but breaks behavior once both changes are present.
+
+Nothing prevents that conflict now.
+The replacement is **detection plus revert**, not prevention: the conflict lands, the `main` CI run that follows the merge fails, and the merge is reverted.
+
+Naming the trade exactly, because a protection removed without naming its replacement is how a guard dies quietly:
+
+| | Strict, before | Now |
+| --- | --- | --- |
+| Semantic conflict between two green PRs | prevented before merge | detected after merge, then reverted |
+| Cost per landed PR | 2 pre-merge matrices, about 19 min | 1 pre-merge matrix, about 9.5 min |
+| Runs that can throw a blocking false red | 2 | 1 |
+| `main` can be broken | no | yes, until a revert lands |
+
+The exact protection state before the change was captured verbatim in the fleet's private task record, so the change is precisely reversible.
+
+## Why not a merge queue
+
+A merge queue is the purpose-built fix for this, and it is **unavailable on this repository**.
+GitHub gates it on organisation ownership: merge queues are available in public repositories owned by an organisation, or in private repositories owned by organisations on GitHub Enterprise Cloud.
+This repository is owned by a user account, so neither path applies.
+
+Two further facts, recorded so the idea is not re-proposed on the assumption that it would have been cheaper:
+
+- A queue would not have lowered the measured pre-merge cost. A pull request must pass every required check *before* it can be queued, and the queue then runs them again on the merge group. That is two pre-merge matrices, which is what strict was already costing.
+- Both required workflows trigger only on `push` and `pull_request`. A queue needs `merge_group`, and `PR must be raised via no-mistakes` reads the pull request body, which a `merge_group` event does not carry, so that required context could not report at all without being redesigned.
+
+## What the `main` CI run does catch
+
+[`.github/workflows/ci.yml`](../.github/workflows/ci.yml) triggers on every push to `main` and runs the same 12 required contexts.
+
+- **Latency is measured, not assumed.** The five most recent `main` push runs took 8m16s to 10m05s, mean about 9.4 minutes.
+- **No detection is lost to a following merge.** `ci.yml` declares no `concurrency` group, so back-to-back merges each get their own run and none is cancelled by its successor.
+
+So any semantic conflict that one of the 12 contexts actually exercises is detected, roughly nine to ten minutes after it lands.
+
+## What it does not catch
+
+Three separate gaps, and only the first is the obvious one.
+
+**1. It cannot prevent anything.**
+`main` carries the breakage from the merge until a revert lands.
+
+**2. It only sees what the suite exercises.**
+A conflict that no test, lint rule, or repo invariant covers is never detected at all.
+A green `main` run means nothing in the suite disagreed, not that `main` is correct.
+
+**3. Nothing surfaces a red `main` to a human.**
+This is the load-bearing gap, and it is a mechanism fact rather than an opinion: no script under `bin/` and no skill queries the GitHub Actions runs API at all.
+The only merge-related poll, `bin/fm-pr-poll.sh`, emits exactly one `merged` line for a merged pull request and stays silent otherwise; the task then tears down.
+After a merge completes, nothing in this fleet looks at that project's CI again.
+
+## Who actually notices, and how long that takes
+
+The exposure window is **unbounded**, and the first reader is likely to be the wrong person holding the wrong explanation.
+
+- **A human opens GitHub.** No bound on when.
+- **The next lane discovers it, and misattributes it.** Task worktrees branch from the current default branch, so a pull request opened after a bad merge inherits the breakage and its own CI goes red. The lane sees a red on its own pull request and reasonably reads it as its own fault. That costs a human decision, and it can send a worker chasing a defect it did not cause.
+
+This compounds with the known order-sensitive flake in the portable serial lane.
+A reader of a red check must now separate three possibilities rather than two: their own change, the flake, or a `main` that was already broken before they started.
+Nothing in the red itself tells them which.
+
+## Revert procedure
+
+Every task pull request lands as a squash - `bin/fm-pr-merge.sh` defaults to `--squash` - so one bad merge is exactly one commit on `main`, and the revert is tractable.
+
+**1. Identify the offending merge.**
+The failing `main` push run's head SHA is the squash commit of the pull request that broke it.
+
+```
+gh-axi api "repos/<owner>/<repo>/actions/workflows/ci.yml/runs?branch=main&event=push&per_page=5" \
+  --jq '.workflow_runs[] | "\(.run_number) \(.head_sha) \(.conclusion) \(.display_title)"'
+```
+
+**2. Do not use `gh-axi pr revert <n>` here.**
+It exists, and on this repository it produces a pull request that cannot merge.
+A revert pull request it creates is authored by the token's user, and `PR must be raised via no-mistakes` is one of the 12 required contexts.
+That check passes only when the pull request body carries the no-mistakes signature, and it skips only `github-actions[bot]` and `dependabot[bot]` authors.
+Admin enforcement is on, so nobody can bypass it.
+The revert pull request would sit open and unmergeable.
+
+**3. Dispatch the revert as an ordinary `no-mistakes` ship task.**
+Brief it as a revert of one named commit.
+The pipeline then produces a properly signed pull request that can pass all 12 contexts and merge, at the cost of one full pipeline plus about 9.5 minutes of CI - the same as any other change.
+
+**4. The reverted lane's work is not lost.**
+`delete_branch_on_merge` is false, so the branch survives the revert.
+Re-dispatch that lane as a new task that starts from the reverted `main` and resolves the conflict.
+Do not reopen the merged pull request.
+
+**5. Validate the revert on `main`, not only on its own pull request.**
+The revert's own run proves the revert builds.
+Treat `main` as recovered only when the `main` push run that follows the revert is green, because another merge can land between the two.
+
+## Surfacing: a red `main` gets a Bridge line
+
+**Decision: yes, and it is `critical`.**
+
+With strict off, the `main` run is the only thing that catches a semantic conflict at all.
+A red `main` blocks the fleet in the ordinary sense of that word: every lane that starts afterwards inherits it, and every lane already running gets a red on its next push.
+Leaving that to be found by whichever worker pushes next is exactly the failure of an instrument that knows something and reports it where nobody reads.
+
+**When the check happens matters.**
+A merged-pull-request wake arrives at merge time, and the `main` run for that merge has not concluded yet - it needs about 9.4 minutes.
+Reading it at that moment returns "in progress", which is a third outcome and must never be reported as green.
+The check therefore belongs to the next fleet-wide review, by which time the run has concluded.
+
+**Deliberately not built:** no new watcher, poll, script, or state file.
+This is a procedure step on wakes that already happen, because the fleet already receives a merged-pull-request wake and already performs a periodic fleet-wide review.
+
+## Maintaining this file
+
+Keep this file to what protects `main`, what that protection cannot see, and what a reader of a red `main` does about it.
+Update the measured latency figures when the CI shape changes, and re-state the trade table if any part of the protection changes again.
+If a mechanism is ever added that actively surfaces a red `main`, replace the "nothing surfaces it" finding rather than leaving both claims in the file.

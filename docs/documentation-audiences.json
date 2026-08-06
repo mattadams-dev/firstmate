@@ -229,6 +229,10 @@
       "audience": "maintainer-architecture"
     },
     {
+      "path": "docs/ci-backstop.md",
+      "audience": "maintainer-architecture"
+    },
+    {
       "path": "docs/cmux-backend.md",
       "audience": "operator-current"
     },
