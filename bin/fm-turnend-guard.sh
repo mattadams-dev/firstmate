@@ -152,6 +152,10 @@ if fm_watcher_healthy "$STATE" "$WATCH" "$GRACE" "$FM_HOME"; then
   exit 2
 fi
 
+autoarm_epoch_outcome() {
+  sed -n 's/^.*outcome=\([a-z][a-z-]*\) .*$/\1/p' "$STATE/.claude-autoarm-epoch" 2>/dev/null || true
+}
+
 block_stop() {
   local afk x_mode reason rule outcome
   afk=0
@@ -178,12 +182,18 @@ block_stop() {
       # session does not own the home - which no amount of repairing the hook
       # will change. Reporting the second as the first sends the operator after
       # the wrong defect, and that is what happened on 2026-08-05.
-      outcome=$(sed -n 's/^.*outcome=\([a-z][a-z-]*\) .*$/\1/p' "$STATE/.claude-autoarm-epoch" 2>/dev/null || true)
-      if [ "$outcome" = refused ]; then
-        printf '●  The Stop-owned auto-arm REFUSED this home: this session does not own the home session lock, so it may not arm supervision here. Reacquire the lock or hand the home back to its owning session; repairing the hook will not help.\n'
-      else
-        printf '●  The Stop-owned auto-arm did not claim this home either, so recovery is NOT already under way.\n'
-      fi
+      outcome=$(autoarm_epoch_outcome)
+      case "$outcome" in
+        refused)
+          printf '●  The Stop-owned auto-arm REFUSED this home: this session does not own the home session lock, so it may not arm supervision here. Reacquire the lock or hand the home back to its owning session; repairing the hook will not help.\n'
+          ;;
+        acquire-failed)
+          printf '●  The Stop-owned auto-arm could not ACQUIRE this home: the recorded session-lock owner failed the liveness check and reclaiming the lock failed, so it may not arm supervision here. Reacquisition was already attempted and failed - diagnose why bin/fm-lock.sh cannot write or verify state/.lock instead of retrying it by hand.\n'
+          ;;
+        *)
+          printf '●  The Stop-owned auto-arm did not claim this home either, so recovery is NOT already under way.\n'
+          ;;
+      esac
     fi
     printf '●  %s\n' "$reason"
     printf '●%s\n' "$rule"
@@ -203,7 +213,7 @@ budget_account_current_epoch() {
   local current_epoch outcome old_session old_count old_epoch tmp initialized
   fm_lock_try_acquire "$BUDGET_LOCK" || return 1
   current_epoch=$(sed -n 's/^epoch=\([0-9][0-9]*\) .*/\1/p' "$STATE/.claude-autoarm-epoch" 2>/dev/null || true)
-  outcome=$(sed -n 's/^.*outcome=\([a-z][a-z-]*\) .*$/\1/p' "$STATE/.claude-autoarm-epoch" 2>/dev/null || true)
+  outcome=$(autoarm_epoch_outcome)
   initialized=0
   COUNT=0
   if [ -f "$BUDGET_FILE" ]; then
@@ -257,7 +267,7 @@ autoarm_owns_recovery() {
     [ ! -e "$FAILURE_NOTICE" ] || budget_account_current_epoch || true
     return 0
   fi
-  outcome=$(sed -n 's/^.*outcome=\([a-z][a-z-]*\) .*$/\1/p' "$STATE/.claude-autoarm-epoch" 2>/dev/null || true)
+  outcome=$(autoarm_epoch_outcome)
   case "$outcome" in
     rewake)
       age=$(fm_path_age "$STATE/.claude-autoarm-epoch")
@@ -339,13 +349,15 @@ terminal_fail_open() {
 }
 
 # A verified failure episode is one the auto-arm itself recorded: it either
-# exhausted its attempts (failed/failed-suppressed) or established that it may
-# not act at all (refused). "refused" belongs here because a refusal is an
-# outcome - the auto-arm verified that it must not arm, which is a verification
-# and not an absence. Leaving it out is what made this escape unreachable during
-# the 2026-08-05 deadlock: the refusing branch wrote nothing, so the episode was
-# never verified, so the bounded fail-open never progressed and the block became
-# unbounded in practice (docs/verification/session-identity.md).
+# exhausted its attempts (failed/failed-suppressed), established that it may not
+# act at all (refused), or established that it could not take an unowned home
+# (acquire-failed). The two withheld outcomes belong here because a withheld
+# outcome is an outcome - the auto-arm verified that it must not or could not
+# arm, which is a verification and not an absence. Leaving them out is what made
+# this escape unreachable during the 2026-08-05 deadlock: the refusing branch
+# wrote nothing, so the episode was never verified, so the bounded fail-open
+# never progressed and the block became unbounded in practice
+# (docs/verification/session-identity.md).
 #
 # This does NOT loosen the identity gate. The auto-arm still refuses to arm, and
 # reaching the fail-open still costs the full block budget, a one-per-episode
@@ -354,9 +366,9 @@ failure_episode_verified() {
   local outcome
   [ ! -e "$STATE/.afk" ] || return 1
   [ -e "$FAILURE_NOTICE" ] || return 1
-  outcome=$(sed -n 's/^.*outcome=\([a-z][a-z-]*\) .*$/\1/p' "$STATE/.claude-autoarm-epoch" 2>/dev/null || true)
+  outcome=$(autoarm_epoch_outcome)
   case "$outcome" in
-    failed|failed-suppressed|refused) return 0 ;;
+    failed|failed-suppressed|refused|acquire-failed) return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -392,7 +404,27 @@ if [ "$terminal_status" -eq 0 ]; then
   else
     NEED_DESC="X-mode relay polling active"
   fi
-  printf '{"systemMessage":"FIRSTMATE SUPERVISION IS GENUINELY DOWN: %s, the Stop-owned auto-arm exhausted its bounded retries and one failure notice, no watcher or automatic continuation exists, and the block budget is exhausted. Keep this session attended and diagnose the automatic Stop-hook and watcher startup before relying on unattended supervision."}\n' "$NEED_DESC"
+  # This is the LAST thing the operator sees before the session is allowed to
+  # end blind, so it must describe the world that was actually observed. A
+  # refusal and a failed acquisition are not exhausted retries, and sending the
+  # operator to diagnose a Stop hook that is working is the same conflation the
+  # block_stop banner above was branched to eliminate.
+  case "$(autoarm_epoch_outcome)" in
+    refused)
+      CAUSE_DESC="the Stop-owned auto-arm REFUSED this home because this session does not own the home session lock, and raised its one failure notice"
+      ACTION_DESC="Keep this session attended. Repairing the Stop hook will not change this: hand the home back to its owning session, or reacquire its session lock, before relying on unattended supervision."
+      ;;
+    acquire-failed)
+      CAUSE_DESC="the Stop-owned auto-arm could not ACQUIRE this home after the recorded session-lock owner failed the liveness check, and raised its one failure notice"
+      ACTION_DESC="Keep this session attended. Reacquisition was already attempted and failed, so do not simply retry it: diagnose why bin/fm-lock.sh cannot write or verify state/.lock before relying on unattended supervision."
+      ;;
+    *)
+      CAUSE_DESC="the Stop-owned auto-arm exhausted its bounded retries and one failure notice"
+      ACTION_DESC="Keep this session attended and diagnose the automatic Stop-hook and watcher startup before relying on unattended supervision."
+      ;;
+  esac
+  printf '{"systemMessage":"FIRSTMATE SUPERVISION IS GENUINELY DOWN: %s, %s, no watcher or automatic continuation exists, and the block budget is exhausted. %s"}\n' \
+    "$NEED_DESC" "$CAUSE_DESC" "$ACTION_DESC"
   exit 0
 fi
 [ "$terminal_status" -eq 2 ] && exit 0

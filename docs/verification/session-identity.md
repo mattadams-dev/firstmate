@@ -56,6 +56,11 @@ Firstmate launches Codex, Kimi, and the other harnesses from inside a Claude too
 `bin/fm-lock.sh` therefore trusts the environment source only when the harness it resolved is genuinely Claude Code, and records no session id otherwise.
 That is a provenance question about a variable, not an ownership decision, and an unresolvable answer records nothing and lands on the unchanged legacy basis.
 
+That decision is keyed on the resolved harness NAME, never on an occurrence of the string in the arguments.
+For a bare-interpreter harness the name is read from the script path it is running - the first non-option word after `argv[0]` - so `node .../opencode --model claude-sonnet-...` resolves to `opencode` and records nothing, while `node .../claude/versions/2.1.223/cli.js` resolves to `claude` and records its own session.
+Harness DETECTION for a bare interpreter still scans the whole argument string, because narrowing it would stop recognizing harnesses that are already recognized; only the Claude classification is tightened.
+An interpreter option that takes a separate path value can make the script-path read miss, and that direction only ever loses the classification, never invents it.
+
 Two consequences follow, and both are load-bearing:
 
 - `bin/fm-lock.sh` runs as an ordinary tool call, so it reads the session id from `CLAUDE_CODE_SESSION_ID` in its own environment.
@@ -106,6 +111,26 @@ One silent exit defeated both the primary path and its backstop, because the bac
 An exit that changes nothing observable is indistinguishable from an exit that never ran.
 The identity refusal therefore writes a `refused` epoch and one operator notice per episode, and the guard accepts `refused` as a verified failure episode so its bounded, alarmed fail-open remains reachable.
 
+### Two withheld outcomes, because they are two observed worlds
+
+A refusal and a failed acquisition are not the same event, and reporting one as the other sends the operator after the wrong defect.
+
+- `refused` - another session owns this home, proven by a live lock holder naming a different session (or by a lock nothing can be proven from). The hook is working; repairing it changes nothing.
+- `acquire-failed` - the recorded owner failed the harness-liveness check, so nobody owns this home, and reclaiming the lock through `bin/fm-lock.sh` still failed or left ownership unproven. Telling the operator to "reacquire the lock" here names the step that was just attempted and failed.
+
+Both are verified failure episodes for `failure_episode_verified`, and both raise the one-per-episode notice, so the bounded escape is reachable on either path rather than starved under a new name.
+The `block_stop` banner and the terminal fail-open `systemMessage` both branch on the recorded outcome, so the last message before a session is allowed to end blind describes the world that was actually observed rather than exhausted retries that never ran.
+
+### The record belongs to the home, so it may not clobber a fresher one
+
+`state/.claude-autoarm-epoch` and `state/.claude-autoarm-failure-notified` are the HOME's, shared by every session whose Stop fires there, and a session recording a withheld outcome deliberately holds no owner lock.
+An unconditional write therefore fails in the mirror direction: session A owns the home and records a fresh `rewake`; session B's Stop refuses and overwrites it; A's own `autoarm_owns_recovery` then fails, A's turn is blocked, and A is told to hand back a home it already owns.
+B's notice also suppresses A's block-budget reset.
+That is not a more permissive path - it is a legitimate session made worse off, which breaks the refusal bias just as surely.
+
+A withheld outcome is therefore declined when the current epoch is a NON-withheld outcome that is still fresh by the guard's own `EPOCH_FRESH` window, and declining leaves the home's shared auto-arm state byte-for-byte unchanged and still exits 0.
+Withheld-over-withheld and withheld-over-stale must still record, and that half is load-bearing: the bounded escape advances on fresh epochs, so a refusal that could not replace a refusal would make the escape unreachable again.
+
 ## Both mutation directions
 
 Guard-class code fails in two directions, so both are mutated.
@@ -113,7 +138,8 @@ A mutant that weakens the identity comparison must break its own test, and a mut
 A guard that refuses everything is not safe; it is the same failure one mirror over, because it is disabled by the next person under time pressure.
 
 Every mutant below was applied one at a time to a clean tree, with each test run in its own shell and the tree restored before the next.
-The table was re-measured in full against the final branch state on 2026-08-05, so no row records a verdict from an earlier revision.
+All 19 rows were re-measured in full against the final branch state on 2026-08-05, so no row records a verdict from an earlier revision.
+Each suite halts at its first failing assertion, so a run observes only the first fixture a mutant kills; where a row names more than one, the extras were measured on their own.
 `tests/fm-session-identity.test.sh` owns these fixtures unless another suite is named.
 
 Weakening - the identity check admits something it must refuse:
@@ -127,6 +153,14 @@ Weakening - the identity check admits something it must refuse:
 | W5 | `bin/fm-claude-stop-autoarm.sh` | the identity refusal exits 0 without writing its epoch | `test_identity_refusal_is_recorded` |
 | W6 | `bin/fm-turnend-guard.sh` | drop `refused` from the verified failure episode | `test_recorded_refusal_reaches_the_bounded_escape` |
 | W7 | `bin/fm-lock.sh` | trust an inherited `CLAUDE_CODE_SESSION_ID` on any harness | `test_lock_ignores_an_inherited_session_id_on_another_harness` |
+| W8 | `bin/fm-session-lock-lib.sh` | classify a bare interpreter as Claude Code from any `claude` substring in its argv | `test_lock_ignores_a_claude_model_flag_on_a_bare_interpreter` |
+| W9 | `bin/fm-claude-stop-autoarm.sh` | let a withheld outcome clobber a fresher non-withheld epoch | `test_refusal_does_not_clobber_a_fresher_owner_epoch` |
+| W10 | `bin/fm-claude-stop-autoarm.sh` | record the recovery-failure branches as `refused` again | `test_recovery_failure_records_a_distinct_outcome` |
+| W11 | `bin/fm-claude-stop-autoarm.sh` | the recovery-failure branches write their epoch but no failure notice | `test_recovery_failure_records_a_distinct_outcome` |
+| W12 | `bin/fm-turnend-guard.sh` | drop `acquire-failed` from the verified failure episode | `test_recovery_failure_reaches_the_bounded_escape` |
+
+W9 is a weakening in the mirror direction, and it is filed here rather than under over-refusal on purpose: the mutant makes the auto-arm write MORE than it observed, and the session it then penalizes is the legitimate owner.
+Which side of the table a mutant sits on is decided by what the code does wrong, not by who ends up worse off.
 
 Over-refusal - the identity check refuses something it must admit:
 
@@ -137,6 +171,11 @@ Over-refusal - the identity check refuses something it must admit:
 | R3 | `bin/fm-lock.sh` | refuse to acquire at all when no session id is observable | `test_lock_without_a_session_id_stays_on_the_pid_basis` |
 | R4 | `bin/fm-lock.sh` | refuse a session's own lock whenever the recorded pid is live | `test_lock_is_reacquired_by_its_own_session` |
 | R5 | `bin/fm-claude-stop-autoarm.sh` | refuse before ownership is tested at all | `tests/fm-claude-stop-autoarm.test.sh`, nested-ancestry arm |
+| R6 | `bin/fm-claude-stop-autoarm.sh` | decline every withheld record whenever any epoch already exists | `test_refusal_still_records_over_a_refused_or_stale_epoch` |
+| R7 | `bin/fm-session-lock-lib.sh` | read the bare interpreter's own argv[0] as its script path | `test_lock_records_a_node_launched_claude_install` |
+
+R6 is the mirror of W9 and is the reason the two are separate fixtures: a rule that never clobbers is not safe either, because withheld-over-withheld is what advances the bounded escape.
+A refusal that cannot replace a refusal restores the 2026-08-05 deadlock by a different route.
 
 R5 is killed by the auto-arm suite rather than by this one, and that is the right owner: "a legitimate owner still arms" is the auto-arm's own contract, and duplicating its fixture here would give the two copies room to drift.
 

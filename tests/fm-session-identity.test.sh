@@ -198,9 +198,15 @@ run_lock() {  # <home> <session-id> [arg]
 }
 
 test_lock_records_pid_then_session() {
-  local home="$TMP_ROOT/lock-record" out
+  local home="$TMP_ROOT/lock-record" out fakebin
   mkdir -p "$home/state"
-  out=$(run_lock "$home" sess-aaa) || fail "acquiring a free lock failed: $out"
+  # The real fm-lock.sh needs a harness ancestor to resolve, and needs that
+  # ancestor to read as Claude Code before it will record a session line at all.
+  # Both are properties of whatever process happens to run this suite, so they
+  # are supplied deterministically here - CI's runners have neither.
+  fakebin=$(fm_fakebin "$home")
+  write_fake_ps "$fakebin" 654321
+  out=$(PATH="$fakebin:$PATH" run_lock "$home" sess-aaa) || fail "acquiring a free lock failed: $out"
   [ "$(sed -n 2p "$home/state/.lock")" = "session=sess-aaa" ] \
     || fail "the lock did not record the session on line 2: got '$(sed -n 2p "$home/state/.lock")'"
   case "$(sed -n 1p "$home/state/.lock")" in
@@ -260,12 +266,18 @@ test_lock_refuses_a_different_live_session() {
 }
 
 test_lock_without_a_session_id_stays_on_the_pid_basis() {
-  local home="$TMP_ROOT/lock-no-session" out
+  local home="$TMP_ROOT/lock-no-session" out fakebin
   mkdir -p "$home/state"
-  out=$(run_lock "$home" '') || fail "a harness publishing no session id could not acquire the lock: $out"
+  # Same reason as above: the ancestry the real fm-lock.sh walks is supplied
+  # rather than borrowed from whatever process runs this suite.
+  fakebin=$(fm_fakebin "$home")
+  write_fake_ps "$fakebin" 654321
+  out=$(PATH="$fakebin:$PATH" run_lock "$home" '') \
+    || fail "a harness publishing no session id could not acquire the lock: $out"
   [ "$(wc -l < "$home/state/.lock")" -eq 1 ] \
     || fail "a lock written without a session id gained a session line anyway"
-  [ "$(run_lock "$home" '' status)" != "lock: unreadable" ] || fail "status could not read a pid-only lock"
+  [ "$(PATH="$fakebin:$PATH" run_lock "$home" '' status)" != "lock: unreadable" ] \
+    || fail "status could not read a pid-only lock"
   pass "lock: a harness publishing no session id still acquires, on the unchanged pid basis"
 }
 
@@ -302,6 +314,64 @@ SH
   [ "$(wc -l < "$home/state/.lock")" -eq 1 ] \
     || fail "a non-Claude primary recorded an inherited session id: $(sed -n 2p "$home/state/.lock")"
   pass "lock: a non-Claude primary does not record an inherited Claude session id"
+}
+
+# A bare-interpreter harness whose ARGUMENTS mention Claude. The provenance test
+# is keyed on the harness script path, not on any occurrence of the string, so a
+# `--model claude-...` flag must not make an OpenCode primary record the Claude
+# session id it inherited from the tool call that launched it - while a genuine
+# node-launched Claude Code install must still be recognized as one.
+write_interpreter_ps() {  # <fakebin> <argv-string>
+  local fakebin=$1 argv=$2
+  cat > "$fakebin/ps" <<SH
+#!/usr/bin/env bash
+set -u
+field= pid=
+while [ "\$#" -gt 0 ]; do
+  case "\$1" in
+    -o) field=\$2; shift 2 ;;
+    -p) pid=\$2; shift 2 ;;
+    *) shift ;;
+  esac
+done
+case "\$pid:\$field" in
+  888:comm=) printf '%s\n' node ;;
+  888:args=) printf '%s\n' '$argv' ;;
+  888:ppid=) printf '%s\n' 1 ;;
+  *:comm=) printf '%s\n' bash ;;
+  *:args=) printf '%s\n' 'bash /repo/bin/fm-lock.sh' ;;
+  *:ppid=) printf '%s\n' 888 ;;
+esac
+SH
+  chmod +x "$fakebin/ps"
+}
+
+test_lock_ignores_a_claude_model_flag_on_a_bare_interpreter() {
+  local home="$TMP_ROOT/lock-model-flag" fakebin out
+  mkdir -p "$home/state"
+  fakebin=$(fm_fakebin "$home")
+  write_interpreter_ps "$fakebin" \
+    '/usr/bin/node /opt/opencode/bin/opencode --model claude-sonnet-4-20250514'
+  out=$(PATH="$fakebin:$PATH" run_lock "$home" someone-elses-session) \
+    || fail "a node-launched OpenCode primary could not acquire its lock: $out"
+  [ "$(wc -l < "$home/state/.lock")" -eq 1 ] \
+    || fail "a --model claude-... flag made an OpenCode primary record an inherited Claude session id: $(sed -n 2p "$home/state/.lock")"
+  pass "lock: a Claude model flag on a bare-interpreter harness does not make it Claude Code"
+}
+
+test_lock_records_a_node_launched_claude_install() {
+  local home="$TMP_ROOT/lock-node-claude" fakebin out
+  mkdir -p "$home/state"
+  fakebin=$(fm_fakebin "$home")
+  # The mirror direction: tightening the provenance test must not stop a real
+  # node-launched Claude Code from recording its own session.
+  write_interpreter_ps "$fakebin" \
+    '/usr/bin/node /home/u/.local/share/claude/versions/2.1.223/cli.js --resume'
+  out=$(PATH="$fakebin:$PATH" run_lock "$home" sess-node) \
+    || fail "a node-launched Claude Code primary could not acquire its lock: $out"
+  [ "$(sed -n 2p "$home/state/.lock")" = "session=sess-node" ] \
+    || fail "a node-launched Claude Code primary recorded no session: got '$(sed -n 2p "$home/state/.lock")'"
+  pass "lock: a node-launched Claude Code install still records its own session id"
 }
 
 # --- line 1 stays a pid: bin/fm-safe-kill.sh ----------------------------------
@@ -408,6 +478,128 @@ test_refusal_record_waits_for_the_need_gate() {
   pass "refusal: an idle home records nothing, because its refusal withholds nothing"
 }
 
+# --- the refusal record is the HOME's, so it may not clobber a fresher one ----
+#
+# Both directions again, and deliberately in separate tests. The epoch ledger and
+# the failure notice are shared by every session whose Stop fires in this home,
+# and a refusing session holds no owner lock, so the two failures are:
+#
+#   CLOBBER  - a bystander's refusal overwrites the OWNER's fresh record, which
+#              then blocks the owner's own turn and tells it to hand back a home
+#              it already owns. Not more permissive, but just as much a break of
+#              the refusal bias, arriving from the mirror direction.
+#   SILENCE  - a refusal that owes a record fails to write one, which starves the
+#              guard's bounded escape exactly as the 2026-08-05 deadlock did.
+
+test_refusal_does_not_clobber_a_fresher_owner_epoch() {
+  local dir out status other fakebin before after
+  dir=$(install_autoarm_home "$TMP_ROOT/refusal-no-clobber")
+  bash -c 'sleep 30; :' &
+  other=$!
+  fakebin=$(fm_fakebin "$dir")
+  write_fake_ps "$fakebin" "$other"
+  printf '%s\nsession=owner-aaa\n' "$other" > "$dir/state/.lock"
+  # The OWNER's own auto-arm has just recorded a fresh rewake for this event
+  # epoch; a bystander session's Stop then fires into the same home.
+  printf 'epoch=41 owner_pid=%s outcome=rewake updated_at=%s\n' "$other" "$(date +%s)" \
+    > "$dir/state/.claude-autoarm-epoch"
+  before=$(cksum < "$dir/state/.claude-autoarm-epoch")
+  out=$(PATH="$fakebin:$PATH" run_autoarm "$dir" intruder-bbb); status=$?
+  kill "$other" 2>/dev/null || true
+  wait "$other" 2>/dev/null || true
+  after=$(cksum < "$dir/state/.claude-autoarm-epoch")
+  expect_code 0 "$status" "a declined refusal must still exit 0"
+  [ "$before" = "$after" ] \
+    || fail "a bystander refusal overwrote the owner's fresher epoch, which blocks the OWNER's next turn: now $(cat "$dir/state/.claude-autoarm-epoch")"
+  # The notice matters as much as the epoch: it is what suppresses the owner's
+  # block-budget reset in bin/fm-turnend-guard.sh.
+  [ ! -e "$dir/state/.claude-autoarm-failure-notified" ] \
+    || fail "a bystander refusal raised the notice that suppresses the owner's budget reset"
+  [ ! -e "$dir/state/arm-ran" ] || fail "the hook armed supervision for a session it does not own"
+  pass "refusal: a bystander refusal declines to clobber the owner's fresher non-refused epoch"
+}
+
+test_refusal_still_records_over_a_refused_or_stale_epoch() {
+  local dir out status other fakebin seq
+  dir=$(install_autoarm_home "$TMP_ROOT/refusal-records-over")
+  bash -c 'sleep 30; :' &
+  other=$!
+  fakebin=$(fm_fakebin "$dir")
+  write_fake_ps "$fakebin" "$other"
+  printf '%s\nsession=owner-aaa\n' "$other" > "$dir/state/.lock"
+  # Refusal over an EQUALLY-refusing epoch. This is the load-bearing half: the
+  # guard's bounded escape advances on fresh epochs, so a refusal that could not
+  # replace a refusal would make that escape unreachable again.
+  printf 'epoch=7 owner_pid=1 outcome=refused updated_at=%s\n' "$(date +%s)" \
+    > "$dir/state/.claude-autoarm-epoch"
+  out=$(PATH="$fakebin:$PATH" run_autoarm "$dir" intruder-bbb); status=$?
+  expect_code 0 "$status" "a recorded refusal must not force a continuation"
+  seq=$(sed -n 's/^epoch=\([0-9][0-9]*\) .*/\1/p' "$dir/state/.claude-autoarm-epoch")
+  [ "$seq" = 8 ] \
+    || fail "a refusal did not advance an equally-refusing epoch: $(cat "$dir/state/.claude-autoarm-epoch")"
+  grep -q 'outcome=refused' "$dir/state/.claude-autoarm-epoch" \
+    || fail "refusal-over-refusal lost the outcome: $(cat "$dir/state/.claude-autoarm-epoch")"
+  # Refusal over a STALE non-refused epoch. Staleness is exactly what makes the
+  # other session's record no longer current, so the refusal owes its own again.
+  rm -f "$dir/state/.claude-autoarm-failure-notified"
+  printf 'epoch=20 owner_pid=1 outcome=rewake updated_at=1\n' \
+    > "$dir/state/.claude-autoarm-epoch"
+  touch -t 202001010000 "$dir/state/.claude-autoarm-epoch"
+  out=$(PATH="$fakebin:$PATH" run_autoarm "$dir" intruder-bbb); status=$?
+  kill "$other" 2>/dev/null || true
+  wait "$other" 2>/dev/null || true
+  expect_code 0 "$status" "a recorded refusal must not force a continuation"
+  grep -q 'outcome=refused' "$dir/state/.claude-autoarm-epoch" \
+    || fail "a refusal did not record over a STALE non-refused epoch: $(cat "$dir/state/.claude-autoarm-epoch")"
+  [ -e "$dir/state/.claude-autoarm-failure-notified" ] \
+    || fail "a refusal over a stale epoch raised no operator notice"
+  [ ! -e "$dir/state/arm-ran" ] || fail "the hook armed supervision for a session it does not own"
+  pass "refusal: a refusal still records over an equally-refusing or stale epoch"
+}
+
+# --- a failed ACQUISITION is a different observed world from a refusal --------
+
+test_recovery_failure_records_a_distinct_outcome() {
+  local dir out status fakebin
+  dir=$(install_autoarm_home "$TMP_ROOT/acquire-failed")
+  fakebin=$(fm_fakebin "$dir")
+  # No harness anywhere in the ancestry, so the delegated bin/fm-lock.sh cannot
+  # resolve one and the reacquisition fails. The recorded owner is demonstrably
+  # dead, so this is NOT "another session owns this home": it is an unowned home
+  # this session could not take, and telling the operator to reacquire the lock
+  # would send them after something that was just attempted and failed.
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+set -u
+field=
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -o) field=$2; shift 2 ;;
+    -p) shift 2 ;;
+    *) shift ;;
+  esac
+done
+case "$field" in
+  comm=) printf '%s\n' bash ;;
+  args=) printf '%s\n' 'bash /repo/bin/fm-lock.sh' ;;
+  ppid=) printf '%s\n' 1 ;;
+esac
+SH
+  chmod +x "$fakebin/ps"
+  printf '9999999\nsession=dead-owner\n' > "$dir/state/.lock"
+  out=$(PATH="$fakebin:$PATH" run_autoarm "$dir" sess-bbb); status=$?
+  expect_code 0 "$status" "a failed acquisition must not force a continuation"
+  [ ! -e "$dir/state/arm-ran" ] || fail "the hook armed after failing to acquire the home"
+  grep -q 'outcome=acquire-failed' "$dir/state/.claude-autoarm-epoch" 2>/dev/null \
+    || fail "a failed acquisition was not recorded distinctly from a refusal: $(cat "$dir/state/.claude-autoarm-epoch" 2>/dev/null || echo '<no epoch at all>')"
+  # Without the notice the guard's failure_episode_verified never passes, so the
+  # bounded escape is starved exactly as it was before the recorded refusal.
+  [ -e "$dir/state/.claude-autoarm-failure-notified" ] \
+    || fail "a failed acquisition raised no operator notice, so the bounded escape stays starved"
+  assert_contains "$out" 'ACQUIRE' "the notice must name what was actually observed"
+  pass "acquisition failure: recorded as its own outcome with its own notice, not as a refusal"
+}
+
 # --- the recorded refusal keeps the guard's escape reachable ------------------
 #
 # The captain's acceptance fixture: prove the refusal branch RECORDS its refusal
@@ -462,9 +654,52 @@ test_recorded_refusal_reaches_the_bounded_escape() {
   [ "$escaped" -ne 0 ] || fail "a recorded refusal never reached the bounded escape across five turns"
   [ "$escaped" -gt 1 ] || fail "the escape fired on the first turn; the block budget was not spent at all"
   assert_contains "$out" 'SUPERVISION IS GENUINELY DOWN' "the escape must announce itself loudly"
+  # The LAST message before the session is allowed to end blind must describe
+  # what was observed. Nothing was retried and the hook is not broken here.
+  assert_contains "$out" 'REFUSED this home' "the terminal message must name the refusal it observed"
+  assert_not_contains "$out" 'exhausted its bounded retries' \
+    "the terminal message blamed retries that never ran"
+  assert_not_contains "$out" 'diagnose the automatic Stop-hook' \
+    "the terminal message sent the operator after a hook that is working"
   [ -e "$dir/state/.claude-autoarm-failure-alarmed" ] \
     || fail "the escape fired without arming the alarm that bounds it to one per episode"
   pass "recorded refusal: a refused epoch spends the block budget and then reaches the bounded escape"
+}
+
+# Stand in for the auto-arm that could not TAKE an unowned home: one fresh
+# acquire-failed epoch per Stop event, distinct from the refusal above.
+write_acquire_failed_epoch() {  # <dir> <seq>
+  printf 'epoch=%s owner_pid=1 outcome=acquire-failed updated_at=%s\n' "$2" "$(date +%s)" \
+    > "$1/state/.claude-autoarm-epoch"
+  : > "$1/state/.claude-autoarm-failure-notified"
+}
+
+test_recovery_failure_reaches_the_bounded_escape() {
+  local dir seq out status escaped=0
+  dir=$(install_guard_home "$TMP_ROOT/escape-acquire-failed")
+  for seq in 1 2 3 4 5; do
+    write_acquire_failed_epoch "$dir" "$seq"
+    out=$(run_guard "$dir"); status=$?
+    if [ "$status" -eq 0 ]; then
+      escaped=$seq
+      break
+    fi
+    [ "$status" -eq 2 ] || fail "turn $seq: unexpected guard status $status"
+    assert_contains "$out" 'could not ACQUIRE' \
+      "turn $seq: the block must report a failed acquisition, not an absent auto-arm"
+    assert_not_contains "$out" 'REFUSED' \
+      "turn $seq: a failed acquisition must not be reported as another session owning the home"
+  done
+  [ "$escaped" -ne 0 ] \
+    || fail "a recorded acquisition failure never reached the bounded escape across five turns"
+  [ "$escaped" -gt 1 ] || fail "the escape fired on the first turn; the block budget was not spent at all"
+  assert_contains "$out" 'SUPERVISION IS GENUINELY DOWN' "the escape must announce itself loudly"
+  assert_contains "$out" 'could not ACQUIRE' "the terminal message must describe the world that was observed"
+  assert_not_contains "$out" 'exhausted its bounded retries' \
+    "the terminal message blamed retries that never ran"
+  [ -e "$dir/state/.claude-autoarm-failure-alarmed" ] \
+    || fail "the escape fired without arming the alarm that bounds it to one per episode"
+  pass "acquisition failure: an acquire-failed epoch spends the block budget and then reaches the bounded escape"
 }
 
 test_silent_refusal_freezes_the_escape() {
@@ -501,8 +736,14 @@ test_lock_is_reacquired_by_its_own_session
 test_lock_refuses_a_different_live_session
 test_lock_without_a_session_id_stays_on_the_pid_basis
 test_lock_ignores_an_inherited_session_id_on_another_harness
+test_lock_ignores_a_claude_model_flag_on_a_bare_interpreter
+test_lock_records_a_node_launched_claude_install
 test_safe_kill_still_refuses_the_lock_holder
 test_identity_refusal_is_recorded
 test_refusal_record_waits_for_the_need_gate
+test_refusal_does_not_clobber_a_fresher_owner_epoch
+test_refusal_still_records_over_a_refused_or_stale_epoch
+test_recovery_failure_records_a_distinct_outcome
 test_recorded_refusal_reaches_the_bounded_escape
+test_recovery_failure_reaches_the_bounded_escape
 test_silent_refusal_freezes_the_escape

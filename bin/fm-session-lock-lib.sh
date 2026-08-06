@@ -57,6 +57,32 @@ fm_harness_path_name() {  # <path>
   return 1
 }
 
+# Print the script path a bare interpreter is running, given its full argument
+# string $1: the first non-option word after argv[0]. Returns 1 when there is
+# none.
+#
+# An interpreter option that takes a separate path value (node --require x.js)
+# can make this report that value instead of the script. That mis-read only ever
+# loses the Claude classification, never invents it, so it lands on the
+# unchanged legacy basis rather than on a guess.
+fm_interpreter_script_path() {  # <args>
+  local word i=1
+  local -a words=()
+  # read -ra splits on whitespace WITHOUT globbing; a plain `for word in $args`
+  # would let a command line containing * expand against the cwd.
+  read -ra words <<< "$1"
+  while [ "$i" -lt "${#words[@]}" ]; do
+    word=${words[$i]}
+    i=$((i + 1))
+    case "$word" in
+      -*) continue ;;
+    esac
+    printf '%s' "$word"
+    return 0
+  done
+  return 1
+}
+
 # True when the process described by command name $1 and full argument string $2
 # is a verified harness. Sets FM_HARNESS_IS_CLAUDE for the ancestry walk.
 #
@@ -90,10 +116,25 @@ fm_harness_process_matches() {  # <comm> <args>
     return 0
   fi
   # Bare interpreter (e.g. node): match the harness name in its script path.
+  #
+  # Harness detection stays on the whole argument string, because an interpreter
+  # can carry its harness anywhere in argv and narrowing it would stop
+  # recognizing harnesses this already recognizes. The CLAUDE decision does not:
+  # it is keyed on the resolved SCRIPT PATH alone. FM_HARNESS_IS_CLAUDE gates
+  # whether an inherited CLAUDE_CODE_SESSION_ID may be recorded on this home's
+  # lock (bin/fm-lock.sh), so a command line that merely mentions Claude - a
+  # `node .../opencode --model claude-sonnet-...` primary launched from inside a
+  # Claude tool call - must not be read as Claude Code. That is the exact
+  # wrong-record-waiting-for-a-consumer hazard this provenance test exists to
+  # prevent, and an unresolvable answer records no session and lands on the
+  # unchanged legacy basis.
   case "$comm" in
     *node*|*python*)
       if printf '%s' "$args" | grep -qE "$FM_HARNESS_RE"; then
-        case "$args" in *claude*) FM_HARNESS_IS_CLAUDE=1 ;; esac
+        if name=$(fm_harness_path_name "$(fm_interpreter_script_path "$args")") \
+          && [ "$name" = claude ]; then
+          FM_HARNESS_IS_CLAUDE=1
+        fi
         return 0
       fi
       ;;

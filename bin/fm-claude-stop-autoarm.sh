@@ -18,12 +18,19 @@
 #     session id all still refuse, so a competing session never arms or rewakes.
 #   - Recorded refusal: an identity refusal is an OUTCOME and is written as one.
 #     It records epoch outcome "refused" and, once per episode, the failure
-#     notice. Exiting 0 in silence here is what made the turn-end guard's
-#     bounded fail-open unreachable: the guard advances on a fresh epoch and
-#     keys its escape on a verified failure, so a refusal that wrote nothing
-#     starved the very backstop built to survive an unavailable auto-arm. An
-#     exit that changes nothing observable is indistinguishable from an exit
-#     that never ran.
+#     notice. A failed ACQUISITION of an unowned home records "acquire-failed"
+#     instead, because those are different observed worlds; both are verified
+#     failure episodes for the guard. Exiting 0 in silence here is what made the
+#     turn-end guard's bounded fail-open unreachable: the guard advances on a
+#     fresh epoch and keys its escape on a verified failure, so a refusal that
+#     wrote nothing starved the very backstop built to survive an unavailable
+#     auto-arm. An exit that changes nothing observable is indistinguishable
+#     from an exit that never ran.
+#   - A withheld outcome never clobbers a fresher one: the epoch ledger and the
+#     failure notice belong to the HOME, so a bystander session's refusal must
+#     not overwrite a fresh non-withheld epoch left by the session that owns it.
+#     Doing so blocks the OWNER's turn and tells it to hand back a home it
+#     already owns, which breaks the refusal bias from the other direction.
 #   - AFK: while state/.afk exists the away daemon owns the watcher and triage;
 #     this hook exits 0 and NEVER rewakes the primary (checked again at
 #     translation time so a mid-cycle AFK transition is honored).
@@ -78,6 +85,12 @@ case "$AUTOARM_ATTEMPTS" in
   1|2|3) : ;;
   *) AUTOARM_ATTEMPTS=2 ;;
 esac
+# The SAME freshness window the turn-end guard judges epoch recency by
+# (bin/fm-turnend-guard.sh EPOCH_FRESH). It is read here so a withheld-outcome
+# record can tell "the owner's epoch is still current" from "nothing current
+# exists", using the reader's own definition of current rather than a second one.
+EPOCH_FRESH=${FM_CLAUDE_AUTOARM_EPOCH_FRESH:-15}
+case "$EPOCH_FRESH" in ''|*[!0-9]*|0) EPOCH_FRESH=15 ;; esac
 
 # shellcheck source=bin/fm-primary-scope-lib.sh
 . "$SCRIPT_DIR/fm-primary-scope-lib.sh"
@@ -100,6 +113,55 @@ write_epoch() {  # <outcome>
     "$seq" "${BASHPID:-$$}" "$outcome" "$(date +%s)" > "$tmp" 2>/dev/null \
     && mv -f "$tmp" "$EPOCH" 2>/dev/null
   rm -f "$tmp" 2>/dev/null || true
+}
+
+epoch_outcome() {
+  sed -n 's/^.*outcome=\([a-z][a-z-]*\) .*$/\1/p' "$EPOCH" 2>/dev/null || true
+}
+
+# May a WITHHELD-supervision outcome (refused, acquire-failed) be recorded now?
+#
+# The epoch ledger and the failure notice are the HOME's, shared by every
+# session whose Stop fires here, and a withheld outcome is written by a session
+# that deliberately holds no owner lock. So a bystander must never overwrite a
+# fresher record left by the session that does own the home: doing so fails
+# autoarm_owns_recovery for the owner, blocks the OWNER's turn, and tells it to
+# hand back a home it already owns - the mirror image of the permissiveness this
+# gate exists to prevent, and just as much a break of the refusal bias.
+#
+# A record is therefore withheld only against a NON-withheld outcome that is
+# still fresh by the guard's own window. Everything else records normally, and
+# withheld-over-withheld especially must: the bounded escape advances on fresh
+# epochs, so a refusal that could not replace an equally-refusing epoch would
+# make that escape unreachable again.
+withheld_outcome_may_record() {
+  local outcome age
+  [ -e "$EPOCH" ] || return 0
+  outcome=$(epoch_outcome)
+  case "$outcome" in
+    refused|acquire-failed) return 0 ;;
+  esac
+  age=$(fm_path_age "$EPOCH")
+  case "$age" in
+    ''|*[!0-9]*) return 0 ;;
+  esac
+  [ "$age" -lt "$EPOCH_FRESH" ] && return 1
+  return 0
+}
+
+# Record one withheld-supervision outcome $1 and, once per episode, the operator
+# notice built from the remaining arguments. Declining leaves the home's shared
+# auto-arm state byte-for-byte unchanged, including the notice, because that
+# notice also suppresses the legitimate owner's block-budget reset.
+record_withheld_outcome() {  # <outcome> <notice-line>...
+  local outcome=$1
+  shift
+  withheld_outcome_may_record || return 0
+  write_epoch "$outcome"
+  if [ ! -e "$FAILURE_NOTICE" ]; then
+    printf '%s\n' "$@" >&2
+    : > "$FAILURE_NOTICE" 2>/dev/null || true
+  fi
 }
 
 # Consume the Stop payload once. The decisions below are state-based apart from
@@ -165,14 +227,9 @@ need_supervision || exit 0
 # would tell the turn-end guard that recovery is under way, which is the one
 # thing a refusal must never claim.
 if [ -n "$REFUSAL" ]; then
-  write_epoch refused
-  if [ ! -e "$FAILURE_NOTICE" ]; then
-    {
-      printf 'firstmate watcher auto-arm REFUSED - %s.\n' "$REFUSAL"
-      printf 'Supervision is needed here but this session may not arm it, so the home is unsupervised until the lock owner returns or its session lock is reacquired. This refusal is deliberate: firstmate never arms, rewakes, or ends a session on behalf of a session it cannot prove it is.\n'
-    } >&2
-    : > "$FAILURE_NOTICE" 2>/dev/null || true
-  fi
+  record_withheld_outcome refused \
+    "$(printf 'firstmate watcher auto-arm REFUSED - %s.' "$REFUSAL")" \
+    'Supervision is needed here but this session may not arm it, so the home is unsupervised until the lock owner returns or its session lock is reacquired. This refusal is deliberate: firstmate never arms, rewakes, or ends a session on behalf of a session it cannot prove it is.'
   exit 0
 fi
 
@@ -180,13 +237,25 @@ fi
 # Delegate the claim to fm-lock.sh so its live-owner refusal and write semantics
 # remain the single acquisition owner, then re-verify current-session identity
 # before touching any auto-arm state.
+#
+# A failed acquisition is recorded as acquire-failed, NOT as refused: another
+# session owning this home and this session being unable to take an unowned home
+# are different observed worlds, and reporting the second as the first sends the
+# operator to reacquire a lock whose acquisition just failed. Both outcomes are
+# accepted by the guard's failure_episode_verified and both raise the
+# one-per-episode notice, so the bounded escape stays reachable on either path
+# rather than being starved under a new name.
 if [ "$RECOVER_SESSION_LOCK" -eq 1 ]; then
   if ! "$SCRIPT_DIR/fm-lock.sh" >/dev/null 2>&1; then
-    write_epoch refused
+    record_withheld_outcome acquire-failed \
+      'firstmate watcher auto-arm could not ACQUIRE this home - the recorded session-lock owner failed the harness-liveness check, and reacquiring the lock through bin/fm-lock.sh failed.' \
+      'Supervision is needed here but this session could not take the home, so it stays unsupervised. The reacquisition was already attempted and failed: investigate why bin/fm-lock.sh cannot write or verify state/.lock rather than retrying it by hand.'
     exit 0
   fi
   if ! fm_session_lock_owned_by_self "$STATE"; then
-    write_epoch refused
+    record_withheld_outcome acquire-failed \
+      'firstmate watcher auto-arm could not ACQUIRE this home - the session lock was reclaimed, but this session still cannot prove it owns the lock afterwards.' \
+      'Supervision is needed here but this session could not take the home, so it stays unsupervised. The reacquisition was already attempted and failed: investigate why bin/fm-lock.sh cannot write or verify state/.lock rather than retrying it by hand.'
     exit 0
   fi
 fi
