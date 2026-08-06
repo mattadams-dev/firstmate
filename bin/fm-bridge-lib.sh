@@ -151,6 +151,21 @@ fm_bridge_board_path() {
   printf '%s' "$(fm_bridge_dir)/bridge.html"
 }
 
+# The canonical rendered history path, DERIVED FROM THE BOARD'S DIRECTORY.
+#
+# The board links to history with a relative href, so the two files have to sit
+# in one directory for that link to resolve - including when FM_BRIDGE_BOARD
+# points the board somewhere else entirely. Deriving it here rather than
+# composing a second path from fm_bridge_dir is what makes an override move
+# both pages together instead of quietly breaking the link between them.
+fm_bridge_history_path() {
+  if [ -n "${FM_BRIDGE_HISTORY:-}" ]; then
+    printf '%s' "$FM_BRIDGE_HISTORY"
+    return 0
+  fi
+  printf '%s/history.html' "$(dirname "$(fm_bridge_board_path)")"
+}
+
 fm_bridge_now() {
   if [ -n "${FM_BRIDGE_NOW:-}" ]; then
     printf '%s' "$FM_BRIDGE_NOW"

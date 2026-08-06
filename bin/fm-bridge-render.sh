@@ -6,13 +6,31 @@
 #   fm-bridge-render.sh --state --id ID    the same fold, narrowed to one item
 #   fm-bridge-render.sh --lifecycle ID     typed answer to "what happened to ID?"
 #   fm-bridge-render.sh --html             the HTML board, on stdout
-#   fm-bridge-render.sh --write            render the board to its canonical path
+#   fm-bridge-render.sh --history          the HTML history page, on stdout
+#   fm-bridge-render.sh --write            render both pages to their canonical paths
 #   fm-bridge-render.sh --tick             the supervision-cycle entry point
 #   fm-bridge-render.sh --path             print the canonical board path
+#   fm-bridge-render.sh --history-path     print the canonical history path
 #   fm-bridge-render.sh --ledger-path      print the canonical ledger path
 #
 # --out PATH sends any output shape to a file instead of stdout, and --verbose
 # (-v) makes --tick report whether it re-rendered the board or left it alone.
+#
+# TWO PAGES, ONE SURFACE
+# The board is the captain's ACTION surface: open asks, the co-captain line,
+# lanes in flight, admission. Nothing else - resolved, landed, discarded,
+# events, tallies and legends are absent from it rather than collapsed, because
+# a collapsed section is still a row of chrome above the next decision. All of
+# that lives on the history page, which is a second output of the same fold and
+# is written in the same pass, so the two can never be readings of different
+# records. docs/verification/bridge-board-v2.md states the six rendering laws
+# in full and is the durable home of that contract.
+#
+# The board also draws live readings the ledger does not carry - lanes in
+# flight, and the admission denominators. Those are collected BESIDE the fold
+# and handed to the renderer as a second document; they never enter `--state`,
+# which stays a pure function of the ledger for the linter, the co-captain's
+# audit and every lifecycle query.
 #
 # ONE FOLD, MANY CONSUMERS
 # The fold is not logic buried in a renderer. It is a published interface with
@@ -71,7 +89,7 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE_DIR="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 STAMP="$STATE_DIR/.bridge-render"
 
-usage() { sed -n '2,58p' "$0" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,76p' "$0" | sed 's/^# \{0,1\}//'; }
 
 die() { printf 'fm-bridge-render: %s\n' "$1" >&2; exit 1; }
 
@@ -114,7 +132,14 @@ import hashlib
 import html as _html
 import json
 import os
+import re
 import sys
+
+# The two rendered pages, by the basenames the board and the history page link
+# each other with. Overridden from argv so an override that moves the board
+# moves the link with it - see fm_bridge_history_path in bin/fm-bridge-lib.sh.
+BOARD_FILENAME = "bridge.html"
+HISTORY_FILENAME = "history.html"
 
 # `steering` is the second producer's kind (see docs/bridge.md "Second
 # producer"). It is substrate, not a captain-facing zone: it never renders as a
@@ -320,6 +345,49 @@ def _answers(value):
         return [_text(v) for v in value if _text(v) != ""]
     text = _text(value)
     return [text] if text else []
+
+
+# RECOMMENDER ATTRIBUTION, in the answer text itself.
+#
+# An answer form may end with a `[rec: worker]`, `[rec: fm]` or
+# `[rec: worker+fm]` marker naming who recommends it. The fold splits it out so
+# every consumer reads one parse, and the board renders it as a muted chip.
+#
+# MORE THAN ONE ANSWER MAY CARRY ONE, AND NOTHING HERE COLLAPSES THAT. When the
+# worker and firstmate recommend different options, the disagreement is the
+# single most useful thing on the card - the captain is being asked precisely
+# because two readings exist. A fold that picked a winner would delete the
+# reason the question reached them.
+#
+# The recommender token is preserved VERBATIM, whatever it says. This fold never
+# defaults an unrecognized value into a known bucket, and a recommender is no
+# exception: an unfamiliar name renders as itself rather than being dropped.
+REC_MARKER = re.compile(r"\s*[\[(]\s*rec:\s*([^\])]+?)\s*[\])]\s*$", re.IGNORECASE)
+# The option's own label - the letter the captain quotes back. Written by the
+# writer as "A: ...", and where a form carries none the fold supplies the
+# position, because a queued ruling has to name something.
+ANSWER_LABEL = re.compile(r"^\s*([A-Za-z0-9]{1,3})\s*[:.)]\s+")
+
+
+def _answer_forms(answers):
+    """Answer strings, split into label, body and recommender."""
+    forms = []
+    for position, answer in enumerate(answers):
+        text = _text(answer)
+        rec = ""
+        marked = REC_MARKER.search(text)
+        if marked:
+            rec = marked.group(1).strip()
+            text = text[:marked.start()].rstrip()
+        labelled = ANSWER_LABEL.match(text)
+        if labelled:
+            label = labelled.group(1)
+            body = text[labelled.end():].strip()
+        else:
+            label = chr(ord("A") + position) if position < 26 else str(position + 1)
+            body = text
+        forms.append({"label": label, "body": body, "text": text, "rec": rec})
+    return forms
 
 
 def _epoch(stamp):
@@ -573,6 +641,10 @@ def fold(ledger_path, folded_at):
                 item["pointer_gap"] = " and ".join(closed_by)
         if not item["project"]:
             item["project"] = "fleet"
+        # Parsed once, here, so the board, the history page and any other
+        # consumer read one split rather than each writing a second parser of
+        # the same string.
+        item["answer_forms"] = _answer_forms(item["answers"])
 
     # Stable per-project display prefixes. A project's prefix is the shortest
     # uppercase prefix of its slug that is unique among the projects that
@@ -1043,7 +1115,7 @@ CSS = """
   --tn-orange:#ff9e64; --tn-red:#f7768e; --tn-cyan:#7dcfff;
   --tn-dim:color-mix(in srgb, var(--tn-fg) 70%, var(--tn-muted));
 }
-* { box-sizing:border-box; }
+* { box-sizing:border-box; min-width:0; }
 body {
   margin:0; padding:0 0 4rem; background:var(--tn-deep); color:var(--tn-fg);
   font:15px/1.55 ui-sans-serif,-apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
@@ -1052,12 +1124,198 @@ code, .mono { font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; 
 .wrap { max-width:1080px; margin:0 auto; padding:0 1.25rem; }
 a { color:var(--tn-cyan); }
 
-header.top { border-bottom:1px solid var(--tn-line); background:var(--tn-bg); padding:1.4rem 0 1rem; }
-h1 { margin:0; font-size:1.5rem; letter-spacing:.02em; }
-h1 .sub { color:var(--tn-dim); font-weight:400; font-size:.85rem; margin-left:.6rem; }
-.fresh { margin-top:.5rem; font-size:.82rem; color:var(--tn-dim); }
-.fresh .clock { color:var(--tn-fg); }
+/* THE HEADER IS THE WHOLE BUDGET ABOVE THE FIRST DECISION. Law 2 is a length
+   rule, and length above the fold is what it costs: every row of chrome here
+   pushes the first ask down, and the acceptance test measures exactly that.
+   So the header carries the fold clock and one counts line, and nothing else -
+   the tally rows, the legend, and the two-axis note all moved to history. */
+header.top { border-bottom:1px solid var(--tn-line); background:var(--tn-bg); padding:1.1rem 0 .9rem; }
+.toprow { display:flex; flex-wrap:wrap; align-items:baseline; gap:.7rem; }
+h1 { margin:0; font-size:1.4rem; letter-spacing:.02em; }
+h1 .sub { color:var(--tn-dim); font-weight:400; font-size:.82rem; margin-left:.55rem; }
+.fresh { margin-left:auto; display:flex; align-items:center; gap:.45rem; font-size:.8rem; color:var(--tn-dim); }
+.dot { width:.55rem; height:.55rem; border-radius:50%; background:var(--tn-green); display:inline-block; flex:none; }
+.dot.stale { background:var(--tn-orange); }
+.countline { margin-top:.45rem; font-size:.82rem; color:var(--tn-dim); }
+.countline b.you { color:var(--tn-red); }
+.countline b.co { color:var(--tn-purple); }
+.countline b.fm { color:var(--tn-blue); }
+.countline .sep { margin:0 .5rem; color:var(--tn-muted); }
 
+section { margin:1.6rem 0 0; }
+h2 {
+  font-size:.78rem; text-transform:uppercase; letter-spacing:.13em;
+  color:var(--tn-dim); margin:0 0 .55rem; font-weight:600;
+}
+h2 .note { text-transform:none; letter-spacing:0; font-weight:400; color:var(--tn-muted); margin-left:.5rem; }
+
+/* --- an ask card -------------------------------------------------------- */
+.ask {
+  background:var(--tn-panel); border:1px solid var(--tn-line);
+  border-left:3px solid var(--tn-red); border-radius:.5rem;
+  padding:.7rem .9rem .65rem; margin:0 0 .55rem;
+}
+.askhead { display:flex; align-items:baseline; gap:.6rem; flex-wrap:wrap; }
+.ref { font-family:ui-monospace,Menlo,monospace; font-size:.8rem; color:var(--tn-red); font-weight:700; flex:none; }
+.proj { font-size:.72rem; color:var(--tn-muted); flex:none; }
+.age { margin-left:auto; font-size:.75rem; color:var(--tn-muted); flex:none; }
+.ask.aging .age { color:var(--tn-orange); }
+/* ONE LINE, CLAMPED (Law 5). A title is a summary; the detail that decides the
+   ruling is in the context dropdown, and the whole record is in the ledger. */
+.asktitle {
+  margin:.15rem 0 .5rem; font-size:.95rem; line-height:1.4;
+  display:-webkit-box; -webkit-line-clamp:1; -webkit-box-orient:vertical; overflow:hidden;
+}
+.answers { display:flex; flex-wrap:wrap; gap:.4rem; align-items:center; }
+.ansbtn {
+  font:inherit; font-size:.8rem; line-height:1.3; padding:.3rem .65rem; border-radius:.4rem;
+  background:var(--tn-bg); color:var(--tn-fg); border:1px solid var(--tn-line); cursor:pointer;
+  max-width:100%; text-align:left;
+}
+.ansbtn:hover { border-color:var(--tn-cyan); }
+.ansbtn.selected { border-color:var(--tn-fg); background:rgba(192,202,245,.08); }
+/* GREEN MEANS QUEUED, AND NOTHING ELSE ON THIS CARD. A recommendation is a
+   muted chip inside the option, never a colour state, so a rec can never be
+   mistaken for something the captain chose. */
+.ansbtn.queued { border-color:var(--tn-green); background:rgba(158,206,106,.12); color:var(--tn-green); }
+.ansbtn.queued::before { content:"\\2713 "; }
+.qbtn {
+  font:inherit; font-size:.78rem; margin-top:.45rem; padding:.3rem .7rem; border-radius:.4rem;
+  border:1px solid var(--tn-green); background:transparent; color:var(--tn-green); cursor:pointer;
+}
+.qbtn:hover { background:rgba(158,206,106,.12); }
+.qbtn[hidden] { display:none; }
+.rectag {
+  font-size:.68rem; color:var(--tn-dim); border:1px solid var(--tn-line); border-radius:.3rem;
+  padding:.05rem .35rem; margin-left:.35rem; vertical-align:.08em; white-space:nowrap;
+}
+.qnote { display:block; font-size:.74rem; color:var(--tn-green); margin-top:.45rem; }
+.qnote.warn { color:var(--tn-orange); }
+.qnote[hidden] { display:none; }
+details.ctxd { margin-top:.5rem; font-size:.83rem; }
+details.ctxd summary { cursor:pointer; color:var(--tn-cyan); font-size:.78rem; user-select:none; }
+details.ctxd summary:hover { text-decoration:underline; }
+details.ctxd .ctxbody {
+  margin:.4rem 0 .1rem; color:var(--tn-dim); border-left:2px solid var(--tn-line);
+  padding-left:.7rem; overflow-wrap:anywhere;
+}
+.chip {
+  font-size:.68rem; letter-spacing:.06em; text-transform:uppercase;
+  border-radius:.25rem; padding:.1rem .4rem; border:1px solid currentColor;
+  white-space:nowrap; flex:none;
+}
+.chip.critical { color:var(--tn-red); }
+.chip.aging { color:var(--tn-orange); }
+.chip.odd { color:var(--tn-orange); }
+.chip.needs-captain { color:var(--tn-red); }
+.chip.needs-cocaptain { color:var(--tn-purple); }
+.chip.fm-handling { color:var(--tn-blue); }
+.chip.resolved { color:var(--tn-green); }
+.chip.landed { color:var(--tn-green); }
+.chip.discarded { color:var(--tn-orange); }
+.chip.unknown { color:var(--tn-orange); }
+.chip.sev { color:var(--tn-dim); }
+.chip.was { color:var(--tn-muted); }
+
+/* --- co-captain --------------------------------------------------------- */
+.corow {
+  display:flex; align-items:baseline; gap:.6rem; background:var(--tn-panel);
+  border:1px solid var(--tn-line); border-left:3px solid var(--tn-purple);
+  border-radius:.5rem; padding:.5rem .9rem; font-size:.85rem; margin:0 0 .4rem;
+}
+.corow .ref { color:var(--tn-purple); }
+.corow .t { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.corow .who { margin-left:auto; flex:none; font-size:.75rem; color:var(--tn-muted); }
+
+/* --- lanes -------------------------------------------------------------- */
+.lanes { display:grid; grid-template-columns:1fr; gap:.55rem; }
+.lanegroup { background:var(--tn-panel); border:1px solid var(--tn-line); border-radius:.5rem; padding:.6rem .9rem; }
+.lghead { display:flex; align-items:baseline; gap:.6rem; margin-bottom:.35rem; flex-wrap:wrap; }
+.lghead .p { font-weight:600; font-size:.9rem; color:var(--tn-blue); }
+.lghead .n { font-size:.78rem; color:var(--tn-muted); }
+/* Explicit grid tracks, every one intrinsic or minmax(0,...), so no cell can
+   be pushed over its neighbour at any width - the collision two browser layout
+   audits caught on flex rows in the v1 board. */
+.lane {
+  display:grid; grid-template-columns:minmax(0,1.4fr) minmax(0,.9fr) minmax(0,.5fr) auto;
+  gap:.6rem; align-items:baseline; font-size:.83rem; padding:.18rem 0;
+  border-top:1px dashed color-mix(in srgb, var(--tn-line) 55%, transparent);
+}
+.lane:first-of-type { border-top:0; }
+.lane .nm { font-family:ui-monospace,Menlo,monospace; font-size:.78rem; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.lane .ph { color:var(--tn-dim); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.lane .la { color:var(--tn-muted); font-size:.76rem; }
+.hd { width:.5rem; height:.5rem; border-radius:50%; display:inline-block; background:var(--tn-green); }
+.hd.warn { background:var(--tn-orange); }
+.hd.unknown { background:var(--tn-muted); }
+.idle { color:var(--tn-muted); font-size:.83rem; }
+.mergeline {
+  margin-top:.5rem; font-size:.8rem; color:var(--tn-dim);
+  border-top:1px solid var(--tn-line); padding-top:.45rem; overflow-wrap:anywhere;
+}
+
+/* --- admission ---------------------------------------------------------- */
+.adm { display:flex; flex-wrap:wrap; gap:.55rem; align-items:stretch; }
+.gauge { flex:1 1 10rem; background:var(--tn-panel); border:1px solid var(--tn-line); border-radius:.5rem; padding:.5rem .8rem; font-size:.8rem; }
+.gauge .lbl { color:var(--tn-muted); font-size:.72rem; text-transform:uppercase; letter-spacing:.08em; }
+.gauge .val { font-size:1rem; margin-top:.1rem; }
+.gauge .sub { color:var(--tn-muted); font-size:.74rem; overflow-wrap:anywhere; }
+.gauge.ok .val { color:var(--tn-green); }
+.gauge.warn .val { color:var(--tn-orange); }
+/* An unreadable denominator is its own state, never a reassuring one and never
+   an alarm: the gauge says it could not read, in muted text, and the verdict
+   below names it as an unknown it could not account for. */
+.gauge.unknown .val { color:var(--tn-muted); }
+.verdict {
+  flex:1 1 100%; border:1px solid var(--tn-green); background:rgba(158,206,106,.07);
+  border-radius:.5rem; padding:.6rem .9rem; font-size:.95rem; color:var(--tn-green);
+  overflow-wrap:anywhere;
+}
+.verdict.hold { border-color:var(--tn-orange); background:rgba(255,158,100,.07); color:var(--tn-orange); }
+.verdict.unknown { border-color:var(--tn-muted); background:rgba(86,95,137,.12); color:var(--tn-dim); }
+.verdict b { letter-spacing:.04em; }
+
+/* --- the stale bar ------------------------------------------------------ */
+/* IN NORMAL FLOW, like everything else on this page. Chrome that travels with
+   a scrolling page ends up over the rows it announces - two browser layout
+   audits proved it on the v1 board - so nothing here is fixed, absolute, or
+   sticky, and the rule is kept by having nothing viewport-fixed to place. */
+.stalebar {
+  display:flex; align-items:center; gap:.7rem; flex-wrap:wrap;
+  background:rgba(255,158,100,.09); border:1px solid var(--tn-orange);
+  border-radius:.5rem; padding:.5rem .9rem; font-size:.85rem; color:var(--tn-orange);
+  margin:.8rem 0 0;
+}
+.stalebar[hidden] { display:none; }
+.stalebar button {
+  font:inherit; font-size:.78rem; padding:.25rem .6rem; border-radius:.4rem;
+  border:1px solid var(--tn-orange); background:transparent; color:var(--tn-orange); cursor:pointer;
+}
+.stalebar .why { margin-left:auto; font-size:.75rem; }
+
+footer {
+  margin-top:1.6rem; padding-top:.7rem; border-top:1px solid var(--tn-line);
+  font-size:.78rem; color:var(--tn-muted);
+}
+footer .cols { display:flex; flex-wrap:wrap; gap:1.2rem; }
+footer code { color:var(--tn-cyan); }
+footer .row { margin:.3rem 0; overflow-x:auto; white-space:nowrap; }
+.promises { margin:.9rem 0 0; padding-left:.6rem; border-left:2px solid var(--tn-blue);
+            color:var(--tn-dim); font-size:.8rem; line-height:1.5; }
+.promises div { margin:.25rem 0; }
+.promises b { color:var(--tn-fg); }
+
+.banner {
+  border:1px solid var(--tn-orange); color:var(--tn-orange); background:rgba(255,158,100,.08);
+  border-radius:.5rem; padding:.7rem .9rem; margin:1rem 0 0; font-size:.85rem;
+}
+.banner code { color:var(--tn-orange); }
+.empty { color:var(--tn-muted); font-size:.85rem; font-style:italic; }
+.allclear { color:var(--tn-green); font-size:.9rem; }
+.overflow { margin-top:.55rem; font-size:.8rem; color:var(--tn-orange); }
+
+/* --- history page ------------------------------------------------------- */
+.backlink { margin:0 0 .8rem; font-size:.82rem; }
 .tallies { display:flex; flex-wrap:wrap; gap:.5rem; margin-top:.75rem; }
 .tally {
   border:1px solid var(--tn-line); border-radius:.4rem; padding:.3rem .6rem;
@@ -1073,181 +1331,20 @@ h1 .sub { color:var(--tn-dim); font-weight:400; font-size:.85rem; margin-left:.6
 .tally.ok  { border-color:var(--tn-green); } .tally.ok b { color:var(--tn-green); }
 .tally.warn{ border-color:var(--tn-orange); } .tally.warn b { color:var(--tn-orange); }
 .tally.co  { border-color:var(--tn-purple); } .tally.co b { color:var(--tn-purple); }
-ol.asks.co li a:hover { background:rgba(187,154,247,.07); }
-
-section { margin:2rem 0 0; }
-h2 {
-  font-size:.78rem; text-transform:uppercase; letter-spacing:.13em;
-  color:var(--tn-dim); margin:0 0 .1rem; font-weight:600;
-}
 .zone-note { color:var(--tn-muted); font-size:.78rem; margin:0 0 .8rem; }
-
-.card {
-  background:var(--tn-panel); border:1px solid var(--tn-line);
-  border-left:3px solid var(--tn-line); border-radius:.5rem;
-  padding:.8rem .95rem; margin:0 0 .6rem;
-}
-.card.needs-captain   { border-left-color:var(--tn-red); }
-.card.needs-cocaptain { border-left-color:var(--tn-purple); }
-.card.fm-handling   { border-left-color:var(--tn-blue); }
-.card.resolved      { border-left-color:var(--tn-green); opacity:.72; }
-.card.odd           { border-left-color:var(--tn-orange); }
-.card.pinned { background:linear-gradient(90deg,rgba(247,118,142,.09),transparent 60%); }
-
-.head { display:flex; gap:.55rem; align-items:baseline; flex-wrap:wrap; }
-.ref {
-  color:var(--tn-dim); font-weight:700; font-family:ui-monospace,monospace;
-  font-size:.85rem; flex:none;
-}
-.title { font-weight:600; min-width:0; overflow-wrap:anywhere; }
-.chip {
-  font-size:.68rem; letter-spacing:.06em; text-transform:uppercase;
-  border-radius:.25rem; padding:.1rem .4rem; border:1px solid currentColor;
-  white-space:nowrap; flex:none;
-}
-.chip.needs-captain   { color:var(--tn-red); }
-.chip.needs-cocaptain { color:var(--tn-purple); }
-.chip.fm-handling   { color:var(--tn-blue); }
-.chip.resolved      { color:var(--tn-green); }
-.chip.odd           { color:var(--tn-orange); }
-/* The outcome axis. Green for work that landed matches the resolved accent's
-   meaning of a good ending; orange keeps its single meaning of something to
-   look at, which covers both a discard and an ending nobody could determine. */
-.chip.landed        { color:var(--tn-green); }
-.chip.discarded     { color:var(--tn-orange); }
-.chip.unknown       { color:var(--tn-orange); }
-.chip.sev           { color:var(--tn-dim); }
-.meta { color:var(--tn-dim); font-size:.76rem; margin-top:.3rem; }
-.meta .sep { color:var(--tn-line); margin:0 .35rem; }
-.body { margin-top:.4rem; color:var(--tn-dim); font-size:.88rem; overflow-wrap:anywhere; }
-.pointer { margin-top:.4rem; font-size:.82rem; overflow-wrap:anywhere; }
-.pointer .lbl { color:var(--tn-muted); margin-right:.35rem; }
-
-/* The answer options are deliberately NOT controls. Lavish excludes native
-   controls, and everything inside them, from its annotation capture - so an
-   option rendered as a control would be the one element on an ask row the
-   captain cannot annotate, on the surface whose whole input path is
-   annotation. Measured, both directions:
-   docs/verification/bridge-hosted-input.md. */
-/* Listed, not offered. A bordered box in a row reads as a button even when it
-   is inert, and a button on this board would promise a send the page does not
-   have. One option per line, marked like a quotation, reads as "these are the
-   choices" - which is what they are. */
-.answers { margin-top:.6rem; display:flex; flex-direction:column; gap:.2rem; align-items:flex-start; }
-.answers .lbl { color:var(--tn-muted); font-size:.74rem; }
-.answers .ans {
-  font-size:.82rem; color:var(--tn-fg); padding-left:.55rem;
-  border-left:2px solid var(--tn-line); overflow-wrap:anywhere;
-}
-
-.checkline { margin-top:.5rem; font-size:.76rem; color:var(--tn-muted); overflow-x:auto; }
-.checkline code { color:var(--tn-cyan); }
-
-table.strip { width:100%; border-collapse:collapse; font-size:.85rem; }
-table.strip th {
-  text-align:left; font-size:.7rem; text-transform:uppercase; letter-spacing:.09em;
-  color:var(--tn-muted); font-weight:600; padding:.3rem .5rem; border-bottom:1px solid var(--tn-line);
-}
-table.strip td { padding:.42rem .5rem; border-bottom:1px solid rgba(59,66,97,.45); vertical-align:top; }
-table.strip td.st { white-space:nowrap; width:1%; }
-/* Why a row was discarded, on the row itself. The strip is scannable, so this
-   stays small and secondary - but it is on the board, because the board is
-   where the disposition is read. */
-/* Secondary text under a row. It is DIM by default because a note is an
-   ordinary field on every write command, and only the override accent below
-   may claim the reader's alarm - one meaning per accent, and orange already
-   means something is off. */
-table.strip .why, ul.events .why {
-  margin-top:.25rem; font-size:.76rem; line-height:1.45; color:var(--tn-dim);
-  overflow-wrap:anywhere;
-}
-table.strip .why.override, ul.events .why.override { color:var(--tn-orange); }
-.chip.was { color:var(--tn-muted); }
-.stripwrap { overflow-x:auto; border:1px solid var(--tn-line); border-radius:.5rem; background:var(--tn-panel); }
-
-ul.events { list-style:none; margin:0; padding:0; }
-/* Same shape as the asks rows, and the same reason: a fixed timestamp cell
-   beside free text with no wrap is how the collision the audit caught happens.
-   Grid tracks make it unreachable here too. */
-ul.events li {
-  display:grid; grid-template-columns:max-content minmax(0,1fr);
-  gap:.6rem; padding:.4rem 0; border-bottom:1px solid rgba(59,66,97,.4);
-  font-size:.88rem; align-items:baseline;
-}
-ul.events li .when { color:var(--tn-muted); font-size:.74rem; font-family:ui-monospace,monospace; white-space:nowrap; }
-ul.events li .what { min-width:0; overflow-wrap:anywhere; }
-.overflow { margin-top:.55rem; font-size:.8rem; color:var(--tn-orange); }
-
-.glossary { border:1px dashed var(--tn-line); border-radius:.5rem; padding:.7rem .9rem; background:var(--tn-bg); }
-.glossary dl { margin:0; }
-.glossary dt { font-weight:600; color:var(--tn-fg); font-size:.85rem; margin-top:.5rem; }
-.glossary dt:first-child { margin-top:0; }
-.glossary dd { margin:.15rem 0 0 0; font-size:.83rem; color:var(--tn-dim); }
-.glossary .collide { color:var(--tn-orange); font-size:.72rem; text-transform:uppercase; letter-spacing:.07em; margin-left:.4rem; }
-/* The project heading and the terms line under it need real separation: a
-   hairline gap let their text boxes collide, which a browser layout audit
-   flagged as overlapping text at 1024px. Explicit line-height and margins,
-   not inline styles, so the spacing is stated once and stays checkable. */
-h3.projhead {
-  margin:1.6rem 0 .55rem; font-size:.95rem; font-weight:600; line-height:1.45;
-  color:var(--tn-fg); overflow-wrap:anywhere;
-}
-h3.projhead .refs {
-  color:var(--tn-muted); font-weight:400; font-size:.8rem; white-space:nowrap;
-}
-.local-terms { margin:0 0 .8rem; font-size:.79rem; line-height:1.5; color:var(--tn-dim); border-left:2px solid var(--tn-line); padding-left:.6rem; }
-
-/* NOTHING ON THIS PAGE IS OUT OF FLOW. That is a hard rule, and it was earned:
-   chrome that travels with a vertically scrolling page ends up over the content
-   it announces - every row passes behind it, and an anchor jump parks its
-   target underneath it. A browser layout audit proved exactly that, twice, on
-   rows in two different zones; the row was never the problem, the bar above it
-   was.
-   The answer used to be a reserved right-hand gutter that fixed chrome could
-   live in without covering anything. With the ruling composer gone, that whole
-   column existed to hold one number, so the gutter went with it and the count
-   sits in the page's own header beside the other tallies, in normal flow. It
-   is the FIRST thing on the page and it links to the asks index, so an ask is
-   one click from anywhere - and unlike anything viewport-fixed, it cannot come
-   to cover a row. The rule that made the gutter necessary is kept by leaving
-   nothing viewport-fixed to place at all. */
-
-ol.asks { list-style:none; margin:0; padding:0; counter-reset:ask; }
-ol.asks li { border-bottom:1px solid rgba(59,66,97,.4); }
-/* Explicit grid tracks rather than flex with min-widths. A flex row whose
-   items cannot shrink lets its text boxes collide once a cell's content
-   outgrows its share, which a browser layout audit caught here as overlapping
-   text. Every track is either intrinsic or minmax(0, ...), so no cell can be
-   pushed over its neighbour at any width. */
-ol.asks li a {
-  display:grid;
-  grid-template-columns:minmax(2.4rem,max-content) minmax(0,7rem) minmax(0,1fr) max-content;
+.hrow {
+  display:grid; grid-template-columns:minmax(2.4rem,max-content) minmax(0,7rem) minmax(0,1fr) max-content;
   gap:.7rem; align-items:baseline; padding:.45rem .2rem;
-  text-decoration:none; color:var(--tn-fg);
+  border-bottom:1px solid rgba(59,66,97,.4); font-size:.87rem;
 }
-ol.asks li a:hover { background:rgba(122,162,247,.07); }
-ol.asks .ref { min-width:0; }
-ol.asks .proj {
-  color:var(--tn-dim); font-size:.78rem;
-  min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
-}
-ol.asks .what { min-width:0; overflow-wrap:anywhere; }
-ol.asks .age { color:var(--tn-muted); font-size:.78rem; font-family:ui-monospace,monospace; white-space:nowrap; }
-ol.asks li.aging .age { color:var(--tn-orange); }
-.card.aging { box-shadow:inset 3px 0 0 var(--tn-orange); }
-.chip.aging { color:var(--tn-orange); }
-.allclear { color:var(--tn-green); font-size:.9rem; }
-/* The input path, stated where the asks are. Blue: this is firstmate's side of
-   the surface talking, not an ask and not a warning. */
-.howto {
-  margin:.2rem 0 .9rem; font-size:.82rem; line-height:1.5; color:var(--tn-dim);
-  border-left:2px solid var(--tn-blue); padding-left:.6rem;
-}
-
-a.tally { text-decoration:none; }
-a.tally:hover { outline:1px solid var(--tn-red); }
-.tally .since { display:block; color:var(--tn-muted); font-size:.7rem; margin-top:.1rem; }
-
+.hrow .ref { color:var(--tn-dim); }
+.hrow .proj { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.hrow .what { min-width:0; overflow-wrap:anywhere; }
+.hrow .ends { white-space:nowrap; display:flex; gap:.3rem; flex-wrap:wrap; justify-content:flex-end; }
+.hitem { border-bottom:1px solid rgba(59,66,97,.4); padding:.15rem 0 .5rem; }
+.hitem details.ctxd { margin:0 0 0 .2rem; }
+.hbody { color:var(--tn-dim); font-size:.85rem; overflow-wrap:anywhere; }
+.hbody .lbl { color:var(--tn-muted); margin-right:.35rem; }
 .legend { display:flex; flex-wrap:wrap; gap:.9rem; font-size:.76rem; color:var(--tn-dim); margin-top:.6rem; }
 .legend span::before {
   content:""; display:inline-block; width:.6rem; height:.6rem; border-radius:.15rem;
@@ -1256,21 +1353,20 @@ a.tally:hover { outline:1px solid var(--tn-red); }
 .legend .l-red{color:var(--tn-red);} .legend .l-blue{color:var(--tn-blue);}
 .legend .l-green{color:var(--tn-green);} .legend .l-orange{color:var(--tn-orange);}
 .legend .l-purple{color:var(--tn-purple);} .legend .l-cyan{color:var(--tn-cyan);}
-
-footer { margin-top:2.5rem; border-top:1px solid var(--tn-line); padding-top:1rem;
-         font-size:.78rem; color:var(--tn-muted); }
-.promises { margin:0 0 1rem; padding-left:.6rem; border-left:2px solid var(--tn-blue);
-            color:var(--tn-dim); font-size:.8rem; line-height:1.5; }
-.promises div { margin:.25rem 0; }
-.promises b { color:var(--tn-fg); }
-footer code { color:var(--tn-cyan); }
-footer .row { margin:.3rem 0; overflow-x:auto; white-space:nowrap; }
-.banner {
-  border:1px solid var(--tn-orange); color:var(--tn-orange); background:rgba(255,158,100,.08);
-  border-radius:.5rem; padding:.7rem .9rem; margin:1rem 0 0; font-size:.85rem;
+.glossary { border:1px dashed var(--tn-line); border-radius:.5rem; padding:.7rem .9rem; background:var(--tn-bg); }
+.glossary dl { margin:0; }
+.glossary dt { font-weight:600; color:var(--tn-fg); font-size:.85rem; margin-top:.5rem; }
+.glossary dt:first-child { margin-top:0; }
+.glossary dd { margin:.15rem 0 0 0; font-size:.83rem; color:var(--tn-dim); }
+.glossary .collide { color:var(--tn-orange); font-size:.72rem; text-transform:uppercase; letter-spacing:.07em; margin-left:.4rem; }
+h3.projhead {
+  margin:1.6rem 0 .55rem; font-size:.95rem; font-weight:600; line-height:1.45;
+  color:var(--tn-fg); overflow-wrap:anywhere;
 }
-.banner code { color:var(--tn-orange); }
-.empty { color:var(--tn-muted); font-size:.85rem; font-style:italic; }
+h3.projhead .refs { color:var(--tn-muted); font-weight:400; font-size:.8rem; white-space:nowrap; }
+.local-terms { margin:0 0 .8rem; font-size:.79rem; line-height:1.5; color:var(--tn-dim); border-left:2px solid var(--tn-line); padding-left:.6rem; }
+.checkline { margin-top:.5rem; font-size:.76rem; color:var(--tn-muted); overflow-x:auto; }
+.checkline code { color:var(--tn-cyan); }
 """
 
 
@@ -1352,182 +1448,988 @@ def sev_chip(item):
     return '<span class="chip %s">%s</span>' % (cls, esc(item["severity"]))
 
 
-def meta_line(item):
-    bits = ["owner %s" % esc(item["owner"])]
-    if item["phase"]:
-        bits.append("phase %s" % esc(item["phase"]))
-    if item["ts"]:
-        bits.append(esc(item["ts"]))
-    if item["updates"] > 1:
-        bits.append("%d updates" % item["updates"])
-    if item["truncated"]:
-        bits.append("record truncated at write time")
-    return '<div class="meta">%s</div>' % '<span class="sep">|</span>'.join(bits)
+# --- the live readings the board draws beside the ledger --------------------
+#
+# LAW 6: every value on the page is derived at fold time from an existing record
+# or a live reading. Nothing hand-written, no constants - that is the capacity
+# lesson, where a number typed into a document went on being quoted long after
+# the machine it described had changed.
+#
+# These readings are NOT part of the fold and never enter the state document.
+# `--state` is a pure function of the ledger, read by the linter, the
+# co-captain's audit and every lifecycle query; making it shell out to a quota
+# CLI would put a subprocess behind every one of those. So the board collects
+# them separately, embeds what it drew, and says when it could not read one.
+#
+# WHERE A READING CANNOT BE TAKEN, THE ANSWER IS "COULD NOT READ", NEVER A
+# REASSURING DEFAULT AND NEVER AN ALARM. An admission verdict that treats an
+# unreadable denominator as headroom is the missing-alarm failure; one that
+# treats it as exhaustion is the false alarm. They are the same defect, and the
+# only honest third value is the one that names the gap.
+
+# How long the watcher's beacon may go untouched before this page stops
+# treating its per-lane health verdicts as current. A rule, not a rendered
+# value: past it, lane health reads `unknown` rather than inheriting a stale
+# green from records nobody is maintaining.
+WATCHER_BEACON_MAX_AGE = 600
+
+# The admission floor, in MiB. It is the ONE capacity number the captain states
+# as a rule rather than a reading ("do not start heavy work below 2 GiB
+# available"), and the ceiling it is compared against is read live every time.
+ADMISSION_FLOOR_MIB = 2048
+
+PROBE_TIMEOUT = 8
 
 
-def pointer_line(item):
-    if not item["pointer"]:
-        if item["pointer_gap"]:
-            return ('<div class="pointer"><span class="lbl">outcome</span>'
-                    '<span style="color:var(--tn-orange)">%s, with no pointer to '
-                    'where it went - see record hygiene</span></div>'
-                    % esc(item["pointer_gap"]))
-        return ""
-    target = item["pointer"]
-    if target.startswith("http://") or target.startswith("https://"):
-        shown = link(target)
-    else:
-        shown = '<code>%s</code>' % esc(target)
-    return '<div class="pointer"><span class="lbl">outcome</span>%s</div>' % shown
+def _run(argv, timeout=PROBE_TIMEOUT):
+    """A probe, or an honest reason there is no reading. Never raises."""
+    import subprocess
+    try:
+        done = subprocess.run(argv, stdout=subprocess.PIPE,
+                              stderr=subprocess.DEVNULL, timeout=timeout)
+    except FileNotFoundError:
+        return None, "%s is not installed here" % argv[0]
+    except subprocess.TimeoutExpired:
+        return None, "%s did not answer within %ds" % (argv[0], timeout)
+    except OSError as exc:
+        return None, "%s could not be run: %s" % (argv[0], exc)
+    if done.returncode != 0:
+        return None, "%s exited %d" % (argv[0], done.returncode)
+    return done.stdout.decode("utf-8", "replace"), ""
 
 
-def answer_forms(item):
-    """The mandatory answer forms: the options the captain is choosing between.
+def _meminfo():
+    """Available and total memory, in MiB, from the kernel's own accounting.
 
-    They are shown, not offered as controls. The board has no send of its own -
-    the captain rules by annotating the row in Lavish and sending from the
-    conversation panel - so an option that looked clickable would be promising
-    an egress this page does not have.
-
-    Every option therefore renders as a plain element, which is also what keeps
-    it annotatable: Lavish's annotation layer skips native controls and
-    everything inside them, so a <button> option would be the one part of an ask
-    the captain could not annotate (docs/verification/bridge-hosted-input.md).
+    /proc/meminfo rather than `free -m`: it is the same numbers without a
+    subprocess, and MemAvailable is the kernel's estimate of what a new
+    allocation can actually have - which is the question the floor asks.
     """
-    # The same conjunction the ask queues use, for the same reason: a form is
-    # offered when someone owes a decision AND the work is still live. Nobody
-    # can rule on work that ended, and nobody needs to rule on what is settled.
-    if owed_by(item) == "resolved" or ended(item) or not item["answers"]:
+    fields = {}
+    try:
+        with open("/proc/meminfo", "r", encoding="utf-8", errors="replace") as handle:
+            for line in handle:
+                name, _, rest = line.partition(":")
+                value = rest.strip().split(" ")[0]
+                if value.isdigit():
+                    fields[name] = int(value) // 1024
+    except OSError as exc:
+        return None, "the kernel's memory accounting could not be read: %s" % exc
+    if "MemAvailable" not in fields or "MemTotal" not in fields:
+        return None, "the kernel reported no MemAvailable figure"
+    return {"available_mib": fields["MemAvailable"],
+            "total_mib": fields["MemTotal"]}, ""
+
+
+def _host_memory():
+    """The memory of the machine underneath, when there is one to ask.
+
+    Under WSL the kernel above reports the VM's allocation, not the Windows
+    host's, and the two answer different questions. Where no host probe exists
+    the gauge says so rather than reusing the VM's numbers under a host label.
+    """
+    import shutil
+    probe = shutil.which("powershell.exe")
+    if not probe:
+        return None, "no host probe on this machine - the readings above are the whole machine"
+    text, why = _run([probe, "-NoProfile", "-NonInteractive", "-Command",
+                      "$m=Get-CimInstance Win32_OperatingSystem;"
+                      "'{0} {1}' -f $m.FreePhysicalMemory,$m.TotalVisibleMemorySize"])
+    if text is None:
+        return None, why
+    parts = text.split()
+    if len(parts) < 2 or not parts[0].strip().isdigit() or not parts[1].strip().isdigit():
+        return None, "the host probe answered in a shape this page cannot read"
+    free_mib = int(parts[0]) // 1024
+    total_mib = int(parts[1]) // 1024
+    return {"free_mib": free_mib, "total_mib": total_mib,
+            "used_mib": total_mib - free_mib}, ""
+
+
+def _quota():
+    """Provider headroom and pace, from the one tool that owns that reading.
+
+    quota-axi is data-only and is the single owner of how a model window relates
+    to its bounding account window. This page summarises what it returns and
+    never re-derives it; where it cannot be read, the gauge says so.
+    """
+    text, why = _run(["quota-axi", "--json"])
+    if text is None:
+        return None, why
+    try:
+        parsed = json.loads(text)
+    except ValueError as exc:
+        return None, "quota-axi returned something this page could not parse: %s" % exc
+    providers = []
+    for entry in parsed.get("providers", []) or []:
+        windows = entry.get("windows") or []
+        tightest = None
+        for window in windows:
+            remaining = window.get("percentRemaining")
+            if not isinstance(remaining, (int, float)):
+                continue
+            if tightest is None or remaining < tightest.get("percentRemaining", 101):
+                tightest = window
+        row = {"name": _text(entry.get("provider") or entry.get("label")),
+               "status": _text(entry.get("status") or "")}
+        if tightest is not None:
+            row["window"] = _text(tightest.get("label") or tightest.get("id"))
+            row["remaining_percent"] = tightest.get("percentRemaining")
+            pace = tightest.get("pace") or {}
+            row["pace"] = _text(pace.get("status") or "")
+        providers.append(row)
+    if not providers:
+        return None, "quota-axi reported no providers"
+    return {"providers": providers}, ""
+
+
+def _watcher_live(state_dir, now_epoch):
+    """Whether the fleet's own health records are being maintained right now.
+
+    Lane health is the WATCHER's verdict, read from the markers it writes, not
+    a second opinion computed here - two readers of one fact drift. Which means
+    the absence of a warning marker is only good news while something is
+    actually maintaining them, so this is checked first and a lapsed beacon
+    makes every lane read `unknown` rather than green.
+    """
+    beacon = os.path.join(state_dir, ".last-watcher-beat")
+    try:
+        age = now_epoch - int(os.path.getmtime(beacon))
+    except (OSError, TypeError):
+        return False, "no supervision beacon"
+    if age > WATCHER_BEACON_MAX_AGE:
+        return False, "supervision has not checked in for %s" % _age_label(age)
+    return True, ""
+
+
+def _meta_fields(path):
+    fields = {}
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as handle:
+            for line in handle:
+                name, sep, value = line.strip().partition("=")
+                if sep:
+                    fields[name] = value
+    except OSError:
+        return None
+    return fields
+
+
+def _last_status(path):
+    """The last supervisor-actionable line a lane reported, and when.
+
+    Status appends are sparse events by contract, so this is what the lane last
+    SAID, and the column says so. It is not a claim that nothing has happened
+    since - only the lane's own last word, with its age.
+    """
+    try:
+        stamp = int(os.path.getmtime(path))
+        with open(path, "r", encoding="utf-8", errors="replace") as handle:
+            lines = [line.strip() for line in handle if line.strip()]
+    except OSError:
+        return "", None
+    if not lines:
+        return "", stamp
+    return lines[-1], stamp
+
+
+def _registry_projects(fm_home):
+    """Every project the fleet is carrying, so an idle one says idle.
+
+    A project with no lanes is omitted from state/ entirely, and omitting it
+    from the strip would make "no lanes" and "no such project" look identical.
+    """
+    path = os.path.join(fm_home, "data", "projects.md")
+    slugs = []
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as handle:
+            for line in handle:
+                line = line.strip()
+                if not line.startswith("- "):
+                    continue
+                slug = line[2:].split(" ")[0].strip()
+                if slug and slug not in slugs:
+                    slugs.append(slug)
+    except OSError:
+        return []
+    return slugs
+
+
+def collect_env(fm_home, state_dir, folded_at):
+    """The live half of the board: lanes in flight, and the admission gauges.
+
+    Collected once, beside the fold and never inside it, then handed to the
+    renderer as data. Every field that could not be read carries the reason it
+    could not, because a board that silently drops a gauge and a board whose
+    gauge reads zero are the same page to whoever is reading it.
+    """
+    now_epoch = _epoch(folded_at) or 0
+    live, why_not = _watcher_live(state_dir, now_epoch)
+
+    lanes = {}
+    warned = set()
+    try:
+        names = sorted(os.listdir(state_dir))
+    except OSError:
+        names = []
+    for name in names:
+        # The watcher's own per-lane verdicts, keyed by the window with its
+        # separators flattened - the same key bin/fm-watch.sh writes them under.
+        for prefix in (".stale-since-", ".wedge-escalations-"):
+            if name.startswith(prefix):
+                warned.add(name[len(prefix):])
+    for name in names:
+        if not name.endswith(".meta"):
+            continue
+        task = name[:-len(".meta")]
+        fields = _meta_fields(os.path.join(state_dir, name))
+        if fields is None:
+            continue
+        # A persistent secondmate is not a work item and never becomes a lane.
+        if fields.get("kind") == "secondmate":
+            continue
+        project = os.path.basename(fields.get("project", "").rstrip("/")) or "fleet"
+        line, stamp = _last_status(os.path.join(state_dir, task + ".status"))
+        state_word, _, note = line.partition(":")
+        note = note.strip()
+        if state_word and note and state_word != "working":
+            phase = "%s: %s" % (state_word, note)
+        else:
+            phase = note or state_word or "no word yet"
+        age = None if stamp is None else max(0, now_epoch - stamp)
+        key = fields.get("window", "")
+        for bad in ":/.":
+            key = key.replace(bad, "_")
+        if not live:
+            health = "unknown"
+        elif key and key in warned:
+            health = "warn"
+        else:
+            health = "ok"
+        lanes.setdefault(project, []).append({
+            "id": task,
+            "phase": phase,
+            "reported_label": "no word yet" if age is None else _age_label(age),
+            "reported_seconds": age,
+            "health": health,
+            "pr": fields.get("pr", ""),
+        })
+
+    projects = []
+    for slug in _registry_projects(fm_home):
+        projects.append({"project": slug, "lanes": lanes.pop(slug, [])})
+    # A lane whose project is not in the registry is still a lane. It is listed
+    # rather than dropped, because an unregistered project is a gap to see.
+    for slug in sorted(lanes):
+        projects.append({"project": slug, "lanes": lanes[slug]})
+
+    memory, memory_why = _meminfo()
+    host, host_why = _host_memory()
+    quota, quota_why = _quota()
+    return {
+        "collected_at": folded_at,
+        "lanes": {
+            "projects": projects,
+            "count": sum(len(entry["lanes"]) for entry in projects),
+            "health_readable": live,
+            "health_unreadable_because": why_not,
+        },
+        "admission": {
+            "floor_mib": ADMISSION_FLOOR_MIB,
+            "memory": memory, "memory_unreadable_because": memory_why,
+            "host": host, "host_unreadable_because": host_why,
+            "quota": quota, "quota_unreadable_because": quota_why,
+        },
+    }
+
+
+# --- board ------------------------------------------------------------------
+#
+# Everything below draws. It is handed the state document and the environment
+# document, and nothing else - it has no ledger path and never opens a file.
+
+# THE SIX RENDERING LAWS, transcribed from the captain-approved mockup and
+# stated in full in docs/verification/bridge-board-v2.md. They are the contract
+# this renderer implements, and each is marked at the code that keeps it:
+#
+#   Law 1  the default view renders open asks, the co-captain line, lanes and
+#          admission. Nothing else. History is a separate view.
+#   Law 2  board length scales with open asks and nothing else.
+#   Law 3  an open critical is an ask card with a critical chip, sorted first.
+#          A resolved critical does not render. There is no pinned section.
+#   Law 4  an ask covered by a standing word is never asked.
+#   Law 5  a card carries ref, project, age, a clamped one-line title, answers,
+#          and a collapsed context dropdown.
+#   Law 6  every value is derived at fold time from a record or a live reading.
+
+SCRIPT = r"""
+(function () {
+  "use strict";
+
+  // ---- select, then queue -------------------------------------------------
+  //
+  // Two states, and the card shows the difference. Clicking an option only sets
+  // local SELECTED state; a per-card Queue button is the only thing that calls
+  // queuePrompt, exactly once. Queueing from an option click would send a
+  // ruling the captain is still in the middle of changing their mind about.
+  //
+  // queueKey is the ask's ref, so a re-queue REPLACES the prior unsent entry
+  // for that ask instead of adding a second one: one entry per ask, always the
+  // latest, and Send to Agent delivers them all.
+  //
+  // NOTHING HERE EVER CLAIMS A SEND IT DID NOT OBSERVE. If the API is missing
+  // or throws, the option does not turn green and the card says plainly that
+  // the ruling has not gone anywhere - a green tick over a dropped ruling is
+  // the exact failure this surface exists to prevent.
+  function queueRuling(prompt, options) {
+    var api = window.lavish && window.lavish.queuePrompt;
+    if (typeof api !== "function") { return "absent"; }
+    try { api.call(window.lavish, prompt, options); } catch (err) { return "failed"; }
+    return "queued";
+  }
+
+  var cards = document.querySelectorAll(".ask");
+  Array.prototype.forEach.call(cards, function (card) {
+    var ref = card.getAttribute("data-ask-ref") || "";
+    var id = card.getAttribute("data-ask-id") || "";
+    var note = card.querySelector(".qnote");
+    var qbtn = card.querySelector(".qbtn");
+    var options = card.querySelectorAll(".ansbtn");
+
+    function selected() { return card.querySelector(".ansbtn.selected"); }
+    function queued() { return card.querySelector(".ansbtn.queued"); }
+
+    function say(text, warn) {
+      if (!note) { return; }
+      note.hidden = !text;
+      note.textContent = text || "";
+      if (warn) { note.classList.add("warn"); } else { note.classList.remove("warn"); }
+    }
+
+    function sync() {
+      var sel = selected(), qd = queued();
+      if (qbtn) {
+        qbtn.hidden = !(sel && sel !== qd);
+        qbtn.textContent = qd ? "Update queued answer" : "Queue answer";
+      }
+    }
+
+    Array.prototype.forEach.call(options, function (btn) {
+      btn.addEventListener("click", function () {
+        var was = btn.classList.contains("selected");
+        Array.prototype.forEach.call(options, function (other) {
+          other.classList.remove("selected");
+        });
+        if (!was) { btn.classList.add("selected"); }
+        sync();
+      });
+    });
+
+    if (qbtn) {
+      qbtn.addEventListener("click", function () {
+        var sel = selected();
+        if (!sel) { return; }
+        var label = sel.getAttribute("data-answer-label") || "";
+        var body = sel.getAttribute("data-answer-text") || "";
+        var verdict = queueRuling(ref + ": " + label, {
+          queueKey: ref,
+          tag: "ruling",
+          text: ref + ": " + label + " - " + body,
+          element: card,
+          data: { ref: ref, id: id, answer: label, text: body }
+        });
+        if (verdict === "queued") {
+          Array.prototype.forEach.call(options, function (other) {
+            other.classList.remove("queued");
+          });
+          sel.classList.add("queued");
+          say("queued: " + label + " - one entry per ask; re-queueing replaces it; "
+              + "Send to Agent delivers every queued ruling", false);
+        } else if (verdict === "absent") {
+          say("this copy of the board has no send path, so nothing was queued - "
+              + "rule by annotating this card, or tell firstmate directly", true);
+        } else {
+          say("queueing failed, so nothing was sent - rule by annotating this "
+              + "card, or tell firstmate directly", true);
+        }
+        sync();
+      });
+    }
+
+    sync();
+  });
+
+  // ---- freshness ----------------------------------------------------------
+  //
+  // The page states the fold it was drawn from, ages it live, and polls its own
+  // artifact URL for a newer one. A newer fold on disk means the copy on screen
+  // is not current, and the bar says so with both times.
+  //
+  // AUTO-RELOAD YIELDS TO COMPOSITION, ALWAYS. A redraw destroys an unqueued
+  // annotation - measured - so it happens only when every signal agrees nothing
+  // is in progress, and a signal this page cannot read counts as in progress.
+  // Getting that wrong costs the captain a ruling; not reloading costs a click
+  // on a bar that is already telling them.
+  var meta = document.querySelector('meta[name="fm-folded-at"]');
+  var mine = meta ? meta.getAttribute("content") : "";
+  var ageEl = document.getElementById("fm-fresh-age");
+  var dot = document.getElementById("fm-fresh-dot");
+  var bar = document.getElementById("fm-stale");
+  var barTimes = document.getElementById("fm-stale-times");
+  var reload = document.getElementById("fm-stale-reload");
+  var STALE_GAP = 120;
+
+  function coarse(seconds) {
+    if (seconds < 90) { return seconds + "s"; }
+    if (seconds < 5400) { return Math.round(seconds / 60) + "m"; }
+    if (seconds < 129600) { return Math.round(seconds / 3600) + "h"; }
+    return Math.round(seconds / 86400) + "d";
+  }
+
+  function ageOfMine() {
+    var then = Date.parse(mine);
+    if (isNaN(then)) { return null; }
+    return Math.max(0, Math.round((Date.now() - then) / 1000));
+  }
+
+  function paint() {
+    var age = ageOfMine();
+    if (ageEl && age !== null) { ageEl.textContent = coarse(age) + " ago"; }
+  }
+
+  function composing() {
+    // An unqueued selection is a ruling in progress by definition.
+    if (document.querySelector(".ansbtn.selected:not(.queued)")) { return true; }
+    var active = document.activeElement;
+    if (active) {
+      var tag = (active.tagName || "").toLowerCase();
+      if (tag === "textarea" || tag === "input" || active.isContentEditable) { return true; }
+    }
+    var sel = window.getSelection && window.getSelection();
+    if (sel && !sel.isCollapsed) { return true; }
+    // Lavish's annotation surface, by the hooks it exposes on the hosting
+    // document. Pinned in docs/verification/bridge-board-v2.md against a
+    // measured version; anything unrecognised here counts as composing.
+    if (document.querySelector("[data-lavish-annotation],[data-lavish-card],.lavish-annotation")) {
+      return true;
+    }
+    return false;
+  }
+
+  function showStale(theirs, gap) {
+    if (bar) { bar.hidden = false; }
+    if (barTimes) {
+      barTimes.textContent = "you are viewing " + mine + "; the fold is at " + theirs;
+    }
+    if (dot && gap >= STALE_GAP) { dot.classList.add("stale"); }
+    if (!composing()) { location.reload(); }
+  }
+
+  function poll() {
+    if (!mine || !window.fetch) { return; }
+    fetch(location.href, { cache: "no-store" }).then(function (response) {
+      return response.ok ? response.text() : null;
+    }).then(function (body) {
+      // A failed or unreadable poll says nothing about freshness, so nothing
+      // on the page changes. Unknown is not stale, and it is not fresh either.
+      if (!body) { return; }
+      var found = /<meta name="fm-folded-at" content="([^"]+)"/.exec(body);
+      if (!found) { return; }
+      var theirs = found[1];
+      if (theirs === mine) { return; }
+      var gap = Math.round((Date.parse(theirs) - Date.parse(mine)) / 1000);
+      if (isNaN(gap) || gap <= 0) { return; }
+      showStale(theirs, gap);
+    }).catch(function () { /* unknown, so nothing changes */ });
+  }
+
+  if (reload) { reload.addEventListener("click", function () { location.reload(); }); }
+  paint();
+  setInterval(paint, 15000);
+  setInterval(poll, 30000);
+})();
+"""
+
+
+def page_open(title, doc, extra_meta=""):
+    """Everything above <body>, shared by the two pages this renderer emits."""
+    out = ["<!doctype html>",
+           '<html lang="en"><head><meta charset="utf-8">',
+           '<meta name="viewport" content="width=device-width,initial-scale=1">']
+    # THE FOLD TIME, IN A MACHINE-READABLE PLACE. The freshness poll reads this
+    # out of the copy on disk to answer "is what I am looking at current?"; it
+    # is the one field that has to survive being fetched and string-matched
+    # rather than parsed, so it lives in a meta element of its own.
+    out.append('<meta name="fm-folded-at" content="%s">' % esc(doc["folded_at"]))
+    if extra_meta:
+        out.append(extra_meta)
+    # THE TITLE NAMES THE PAGE AND COUNTS NOTHING. Lavish copies the artifact's
+    # <title> into the HOSTING page at load and does not re-propagate it when
+    # the tick rewrites the board and the frame live-reloads, so a count kept
+    # here would go on reporting the old number after the redraw that changed
+    # it (docs/verification/bridge-hosted-input.md). A count change is the only
+    # event that moves the number and is exactly the event that leaves the tab
+    # stale, so the count lives in rendered content instead.
+    out.append("<title>%s</title>" % esc(title))
+    out.append("<style>%s</style></head><body>" % CSS)
+    return out
+
+
+def rec_chip(rec):
+    """Recommender attribution, and never a colour state.
+
+    Green means queued on this card and nothing else, so a recommendation is a
+    muted chip inside the option - it can never be mistaken for something the
+    captain selected. More than one option may carry one when the seats
+    disagree, and that disagreement is shown rather than resolved: picking a
+    winner here would hide from the captain the one fact they most need.
+    """
+    if not rec:
         return ""
-    label = item["ref"] or item["id"]
-    options = []
-    for answer in item["answers"]:
-        # The ref rides on the option itself. An annotation carries the text of
-        # what it was placed on, so an option that named only its own words
-        # would arrive saying "retire it" with nothing saying which ask.
-        options.append('<span class="ans">%s</span>'
-                       % esc("%s: %s" % (label, answer)))
-    return ('<div class="answers"><span class="lbl">answer</span>%s</div>'
-            % "".join(options))
+    return '<span class="rectag">rec: %s</span>' % esc(rec)
 
 
-def check_line(item):
-    if not item["check"]:
-        return ""
-    return '<div class="checkline">check <code>%s</code></div>' % esc(item["check"])
+def ask_card(item):
+    """One open decision (Law 5).
 
-
-def card(item, pinned=False):
-    classes = ["card", state_class(item)]
-    if pinned:
-        classes.append("pinned")
+    Ref, project, age, a clamped one-line title, the answers, and a collapsed
+    context dropdown holding what is needed to rule. The full record stays in
+    the ledger, and the dropdown adds no height to the board while closed -
+    which is what lets Law 2 hold with a card that still carries enough to
+    decide on.
+    """
+    classes = ["ask"]
     if item.get("aging"):
         classes.append("aging")
-    ref = '<span class="ref">%s</span>' % esc(item["ref"]) if item["ref"] else ""
-    aged = ('<span class="chip aging">waiting %s</span>' % esc(item["age_label"])
-            if item.get("aging") else "")
-    parts = [
-        '<div class="%s" id="item-%s">' % (" ".join(classes), esc(item["id"])),
-        '<div class="head">%s<span class="title">%s</span>%s%s%s</div>'
-        % (ref, esc(item["title"] or item["id"]), chip(item) + outcome_chip(item),
-           sev_chip(item), aged),
-        meta_line(item),
-    ]
+    ref = item["ref"] or item["id"]
+    head = ['<span class="ref">%s</span>' % esc(ref),
+            '<span class="proj">%s</span>' % esc(item["project"])]
+    # Law 3: an open critical is an ask card with a critical chip. It is not a
+    # separate zone, and a resolved one does not render at all.
+    if item["kind"] == "critical":
+        head.append('<span class="chip critical">critical</span>')
+    head.append(sev_chip(item))
+    if item.get("aging"):
+        head.append('<span class="chip aging">waiting %s</span>' % esc(item["age_label"]))
+    head.append('<span class="age">%s</span>' % esc(item["age_label"]))
+
+    parts = ['<div class="%s" id="item-%s" data-ask-ref="%s" data-ask-id="%s">'
+             % (" ".join(classes), esc(item["id"]), esc(ref), esc(item["id"])),
+             '<div class="askhead">%s</div>' % "".join(bit for bit in head if bit),
+             '<div class="asktitle">%s</div>' % esc(item["title"] or item["id"])]
+
+    forms = item.get("answer_forms") or []
+    if forms:
+        options = []
+        for form in forms:
+            # The ref rides on the queued prompt, not on the visible option
+            # text: the option is a control now, so what identifies the ask
+            # travels in the data the button sends rather than in words the
+            # captain has to read twice.
+            options.append(
+                '<button class="ansbtn" data-answer-label="%s" data-answer-text="%s">'
+                "%s%s</button>"
+                % (esc(form["label"]), esc(form["body"]),
+                   esc(form["text"]), rec_chip(form["rec"])))
+        parts.append('<div class="answers">%s</div>' % "".join(options))
+        parts.append('<button class="qbtn" hidden>Queue answer</button>')
+        parts.append('<span class="qnote" hidden></span>')
+
+    context = []
     if item["body"]:
-        parts.append('<div class="body">%s</div>' % esc(item["body"]))
+        context.append(esc(item["body"]))
     if item["note"]:
-        parts.append('<div class="body">%s</div>' % esc(item["note"]))
-    parts.append(pointer_line(item))
-    parts.append(answer_forms(item))
-    parts.append(check_line(item))
+        context.append(esc(item["note"]))
+    if item["pointer"]:
+        target = item["pointer"]
+        if target.startswith("http://") or target.startswith("https://"):
+            context.append(link(target))
+        else:
+            context.append("<code>%s</code>" % esc(target))
+    if item["check"]:
+        context.append("check <code>%s</code>" % esc(item["check"]))
+    if context:
+        parts.append('<details class="ctxd"><summary>context</summary>'
+                     '<div class="ctxbody">%s</div></details>'
+                     % "<br>".join(context))
     parts.append("</div>")
-    return "".join(part for part in parts if part)
+    return "".join(parts)
 
 
-def freshness_html(content_at):
-    """WHEN THIS BOARD'S CONTENT IS FROM, and nothing more.
+def lanes_section(env):
+    """Work in flight, grouped by project, from state/ at fold time.
 
-    It once also carried a `checked` clock that advanced on every supervision
-    tick, so a frozen board and a dead cycle would not look the same. That clock
-    cost a file write every tick, and a write is what makes Lavish reload the
-    hosted page - silently destroying whatever ruling the captain was in the
-    middle of annotating (docs/verification/bridge-hosted-input.md).
-
-    Liveness is not this page's to prove. The watcher's beacon and the guard
-    that reads it own it, they answer it durably, and they cost the captain's
-    open annotation nothing. What is left here is the one time this page can
-    state from its own content: when the ledger it was drawn from last changed.
+    Health is the WATCHER's verdict, read from the markers it maintains rather
+    than recomputed here - and never CPU, which measures whether a process is
+    busy and not whether the work is moving. When nothing is maintaining those
+    markers the dots read unknown rather than inheriting a green nobody is
+    standing behind.
     """
-    return ('<div class="fresh">content as of '
-            '<span class="clock">%s</span></div>' % esc(content_at))
+    lanes = env.get("lanes") or {}
+    groups = lanes.get("projects") or []
+    out = ['<section><h2>Lanes in flight <span class="note">'
+           'from the fleet\'s own records at fold time &middot; health is step '
+           'evidence, never CPU</span></h2>']
+    if not lanes.get("health_readable", True) and lanes.get("health_unreadable_because"):
+        out.append('<p class="zone-note">Lane health is unread: %s. The dots '
+                   "below say unknown rather than green.</p>"
+                   % esc(lanes["health_unreadable_because"]))
+    if not groups:
+        out.append('<p class="empty">No projects and no lanes recorded.</p>')
+        out.append("</section>")
+        return "".join(out)
+    out.append('<div class="lanes">')
+    for group in groups:
+        rows = group["lanes"]
+        out.append('<div class="lanegroup"><div class="lghead">'
+                   '<span class="p">%s</span><span class="n">%d %s</span></div>'
+                   % (esc(group["project"]), len(rows),
+                      "lane" if len(rows) == 1 else "lanes"))
+        if not rows:
+            out.append('<div class="idle">idle - nothing dispatched</div>')
+        merges = []
+        for row in rows:
+            out.append('<div class="lane"><span class="nm">%s</span>'
+                       '<span class="ph">%s</span><span class="la">%s</span>'
+                       '<span class="hd %s" title="%s"></span></div>'
+                       % (esc(row["id"]), esc(row["phase"]),
+                          esc("reported %s" % row["reported_label"]
+                              if row["reported_seconds"] is not None
+                              else row["reported_label"]),
+                          esc(row["health"]),
+                          esc({"ok": "moving", "warn": "supervision has flagged this lane",
+                               "unknown": "health unread"}[row["health"]])))
+            if row["pr"]:
+                merges.append("%s %s" % (esc(row["id"]), link(row["pr"])))
+        # Law 4's other half: an ask covered by a standing word never becomes a
+        # card. Where it landed is a merge-line entry here, so the captain sees
+        # what is riding on their standing word without being asked again.
+        if merges:
+            out.append('<div class="mergeline">merge: %s</div>'
+                       % " &middot; ".join(merges))
+        out.append("</div>")
+    out.append("</div></section>")
+    return "".join(out)
 
 
-def render_html(doc):
+def admission_section(env):
+    """The denominators, read live, and one verdict that accounts for all three.
+
+    An unreadable gauge is never rounded toward comfort or toward alarm. The
+    verdict names what it could not read, so "admissible" and "admissible as
+    far as anything here can tell" are never the same sentence.
+    """
+    adm = env.get("admission") or {}
+    floor = adm.get("floor_mib") or ADMISSION_FLOOR_MIB
+    out = ['<section><h2>Admission <span class="note">the denominators, read at '
+           "fold time</span></h2>", '<div class="adm">']
+
+    memory = adm.get("memory")
+    unknowns = []
+    if memory:
+        headroom_ok = memory["available_mib"] >= floor
+        out.append('<div class="gauge %s"><div class="lbl">Memory headroom</div>'
+                   '<div class="val">%.1f GiB free</div>'
+                   '<div class="sub">of %.1f GiB &middot; floor %.1f GiB</div></div>'
+                   % ("ok" if headroom_ok else "warn",
+                      memory["available_mib"] / 1024.0,
+                      memory["total_mib"] / 1024.0, floor / 1024.0))
+    else:
+        headroom_ok = None
+        unknowns.append("memory headroom")
+        out.append('<div class="gauge unknown"><div class="lbl">Memory headroom</div>'
+                   '<div class="val">could not read</div><div class="sub">%s</div></div>'
+                   % esc(adm.get("memory_unreadable_because", "")))
+
+    host = adm.get("host")
+    if host:
+        out.append('<div class="gauge ok"><div class="lbl">Host memory</div>'
+                   '<div class="val">%.1f / %.1f GiB used</div>'
+                   '<div class="sub">the machine underneath</div></div>'
+                   % (host["used_mib"] / 1024.0, host["total_mib"] / 1024.0))
+    else:
+        out.append('<div class="gauge unknown"><div class="lbl">Host memory</div>'
+                   '<div class="val">not read</div><div class="sub">%s</div></div>'
+                   % esc(adm.get("host_unreadable_because", "")))
+
+    quota = adm.get("quota")
+    if quota:
+        bits = []
+        tight = False
+        for row in quota["providers"]:
+            remaining = row.get("remaining_percent")
+            if isinstance(remaining, (int, float)):
+                bits.append("%s %d%% left%s"
+                            % (row["name"], remaining,
+                               " (%s)" % row["pace"] if row.get("pace") else ""))
+                if remaining < 20:
+                    tight = True
+            elif row.get("status"):
+                bits.append("%s %s" % (row["name"], row["status"]))
+            else:
+                bits.append("%s unread" % row["name"])
+        out.append('<div class="gauge %s"><div class="lbl">Provider headroom</div>'
+                   '<div class="val">%s</div><div class="sub">%s</div></div>'
+                   % ("warn" if tight else "ok", esc(bits[0]),
+                      esc(" · ".join(bits[1:]) if len(bits) > 1 else "quota-axi")))
+    else:
+        tight = False
+        unknowns.append("provider headroom")
+        out.append('<div class="gauge unknown"><div class="lbl">Provider headroom</div>'
+                   '<div class="val">could not read</div><div class="sub">%s</div></div>'
+                   % esc(adm.get("quota_unreadable_because", "")))
+
+    lanes = (env.get("lanes") or {}).get("count", 0)
+    if headroom_ok is False:
+        verdict, cls = ("NEW WORK: HOLD", "hold")
+        why = ("available memory is under the %.1f GiB floor - a spike here has "
+               "killed concurrent runs" % (floor / 1024.0))
+    elif headroom_ok is None:
+        verdict, cls = ("NEW WORK: UNKNOWN", "unknown")
+        why = "the memory floor could not be read, so admissibility is unproven"
+    else:
+        verdict, cls = ("NEW WORK: ADMISSIBLE", "")
+        why = "%d %s in flight" % (lanes, "lane" if lanes == 1 else "lanes")
+        if tight:
+            why += "; a provider window is tight - prefer a routable alternative"
+    if unknowns and headroom_ok is not None:
+        why += "; %s could not be read" % " and ".join(unknowns)
+    out.append('<div class="verdict %s"><b>%s</b> &middot; %s</div>'
+               % (cls, esc(verdict), esc(why)))
+    out.append("</div></section>")
+    return "".join(out)
+
+
+def problem_banners(doc):
+    """The fold's own honesty, which outranks the length rule.
+
+    Law 2 caps what the board spends on routine content; it does not licence
+    hiding a stream the fold could not account for. These render only when
+    something is actually wrong, so an ordinary board never pays for them.
+    """
+    counts = doc["counts"]
+    items = doc["items"]
+    out = []
+    if not doc["conserved"] or counts["malformed"]:
+        out.append('<div class="banner"><b>Ledger records not accounted for.</b> '
+                   "%d non-blank lines, %d folded, %d unreadable. The board can "
+                   "only show what the fold could read."
+                   % (counts["lines_considered"], counts["records"],
+                      counts["malformed"]))
+        for bad in doc["malformed"][:5]:
+            out.append('<div class="row"><code>line %d: %s</code></div>'
+                       % (bad["line"], esc(bad["reason"])))
+        if doc["malformed_omitted"]:
+            out.append("<div>+%d more unreadable lines.</div>" % doc["malformed_omitted"])
+        out.append("</div>")
+    if doc["unobserved_outcomes"]:
+        unresolved = doc["unobserved_outcomes"]
+        out.append('<div class="banner"><b>%d %s written before the outcome axis '
+                   "existed.</b> Nothing in the record says how they ended, so the "
+                   "board says unknown rather than guessing: %s.%s</div>"
+                   % (len(unresolved),
+                      "row was" if len(unresolved) == 1 else "rows were",
+                      ", ".join(esc(items[key]["ref"] or key) for key in unresolved[:8]),
+                      "" if len(unresolved) <= 8 else " +%d more" % (len(unresolved) - 8)))
+    if not doc["ledger"]["present"]:
+        out.append('<div class="banner">No ledger at <code>%s</code> yet. The '
+                   "board is empty because nothing has been written, not because "
+                   "nothing happened.</div>" % esc(doc["ledger"]["path"]))
+    return "".join(out)
+
+
+def render_board(doc, env):
+    """The captain's action surface (Laws 1 and 2).
+
+    Open asks, the co-captain line, lanes, admission. Nothing else - resolved,
+    landed, discarded, events, tallies and legends are ABSENT rather than
+    collapsed, because a collapsed section is still a row of chrome above the
+    next decision. Board length therefore scales with open asks and nothing
+    else, and the first decision is fully visible at 1080px with no scrolling.
+    """
+    items = doc["items"]
+    asks = doc.get("asks", [])
+    cocaptain = doc.get("cocaptain_asks", [])
+    lanes = (env.get("lanes") or {}).get("count", 0)
+    out = page_open("Bridge", doc)
+    add = out.append
+
+    add('<header class="top"><div class="wrap">')
+    add('<div class="toprow">')
+    add('<h1>Bridge<span class="sub">captain\'s action surface &middot; '
+        "generated from the ledger</span></h1>")
+    add('<div class="fresh"><span class="dot" id="fm-fresh-dot"></span>'
+        '<span>fold <span class="mono">%s</span> &middot; '
+        '<span id="fm-fresh-age">just now</span></span></div>'
+        % esc(doc["folded_at"]))
+    add("</div>")
+    # THE COUNTS LINE IS THE WHOLE HEADER SUMMARY. One line, three numbers, and
+    # the way to history. It is rendered content, which is the only surface on
+    # a hosted board that a redraw is guaranteed to refresh.
+    add('<div class="countline">'
+        '<b class="you">%d</b> waiting on you<span class="sep">&middot;</span>'
+        '<b class="co">%d</b> with the co-captain<span class="sep">&middot;</span>'
+        '<b class="fm">%d</b> %s in flight<span class="sep">&middot;</span>%s</div>'
+        % (len(asks), len(cocaptain), lanes,
+           "lane" if lanes == 1 else "lanes",
+           link(HISTORY_FILENAME, "history →", external=False)))
+    add("</div></header>")
+
+    add('<div class="wrap">')
+    add(problem_banners(doc))
+
+    add("<section><h2>Your decisions")
+    if asks:
+        add('<span class="note">criticals first, then longest waiting '
+            "&middot; pick an answer, press Queue, Send delivers all &middot; "
+            "or annotate the card to say it your way</span></h2>")
+        for key in asks:
+            add(ask_card(items[key]))
+    else:
+        add("</h2>")
+        add('<p class="allclear">Nothing is waiting on you.</p>')
+    add("</section>")
+
+    if cocaptain:
+        add('<section><h2>With the co-captain <span class="note">not yours to '
+            "answer - shown so you see where it went</span></h2>")
+        for key in cocaptain:
+            item = items[key]
+            add('<div class="corow" id="item-%s"><span class="ref">%s</span>'
+                '<span class="t">%s</span>'
+                '<span class="who">reads via the record &middot; %s</span></div>'
+                % (esc(item["id"]), esc(item["ref"] or item["id"]),
+                   esc(item["title"] or item["id"]), esc(item["age_label"])))
+        add("</section>")
+
+    add(lanes_section(env))
+    add(admission_section(env))
+
+    add('<div class="stalebar" id="fm-stale" hidden>')
+    add("<span><b>STALE</b> - <span id=\"fm-stale-times\"></span></span>")
+    add('<button id="fm-stale-reload">reload now</button>')
+    add('<span class="why">reloads itself once nothing is part-way through '
+        "being written</span>")
+    add("</div>")
+
+    add("<footer>")
+    add('<div class="cols">')
+    add("<span>%s</span>" % link(HISTORY_FILENAME,
+                                 "history: resolved, landed and events live there",
+                                 external=False))
+    add("<span>record: <code>%s</code></span>" % esc(doc["ledger"]["path"]))
+    add("<span>rule by click, annotation, or terminal relay - all three land "
+        "in the record</span>")
+    add("</div>")
+    # WHAT THIS SURFACE PROMISES, AND WHAT IT DOES NOT. Every line is a measured
+    # verdict rather than a design intention; the measurements and their exact
+    # output are in docs/verification/bridge-hosted-input.md and
+    # docs/verification/bridge-board-v2.md. A reader who trusts the wrong half
+    # loses a ruling and does not find out.
+    add('<div class="promises">')
+    add("<div><b>What this page does, and does not.</b></div>")
+    add("<div>Pick an answer and press Queue, and the ruling waits in the "
+        "conversation panel until you press Send to Agent. Re-queueing the "
+        "same decision replaces what was there, so changing your mind never "
+        "sends two answers.</div>")
+    add("<div>A queued ruling survives this page being redrawn. A ruling still "
+        "sitting in the annotation box does not - this page is rewritten "
+        "whenever the record changes, and an unqueued annotation goes with it, "
+        "not saved anywhere. Queue it, then keep reading.</div>")
+    add("<div>To say it in your own words instead, annotate the card and send "
+        "from the conversation panel.</div>")
+    add("<div>Opened as a plain file with nothing behind it, this page has no "
+        "input path at all. Tell firstmate directly.</div>")
+    add("</div>")
+    add('<div class="row">This page is generated. Edits to it are overwritten '
+        "the next time the record changes; facts belong in the record.</div>")
+    add("</footer></div>")
+
+    # The exact state document this board was drawn from rides along, so the
+    # board can be audited without trusting the renderer, and the live readings
+    # beside it so a gauge can be checked against what was actually read.
+    add('<script type="application/json" id="fm-bridge-state">')
+    add(state_json(doc))
+    add("</script>")
+    add('<script type="application/json" id="fm-bridge-env">')
+    add(state_json(env))
+    add("</script>")
+    add("<script>%s</script>" % SCRIPT)
+    add("</body></html>")
+    return "\n".join(out) + "\n"
+
+
+def history_row(item, doc):
+    """One closed item, in the same one-line form the board uses for an ask."""
+    ends = chip(item) + outcome_chip(item) + sev_chip(item)
+    parts = ['<div class="hitem" id="item-%s">' % esc(item["id"]),
+             '<div class="hrow"><span class="ref">%s</span>'
+             '<span class="proj">%s</span><span class="what">%s</span>'
+             '<span class="ends">%s</span></div>'
+             % (esc(item["ref"] or "-"), esc(item["project"]),
+                esc(item["title"] or item["id"]), ends)]
+    detail = []
+    if item["body"]:
+        detail.append(esc(item["body"]))
+    if item["note"]:
+        detail.append(esc(item["note"]))
+    if item["pointer"]:
+        target = item["pointer"]
+        if target.startswith("http://") or target.startswith("https://"):
+            detail.append('<span class="lbl">outcome</span>' + link(target))
+        else:
+            detail.append('<span class="lbl">outcome</span><code>%s</code>' % esc(target))
+    elif item["pointer_gap"]:
+        detail.append('<span class="lbl">outcome</span>%s, with no pointer to '
+                      "where it went - see record hygiene" % esc(item["pointer_gap"]))
+    if item["answers"]:
+        detail.append("answers offered: %s"
+                      % esc(" | ".join(item["answers"])))
+    detail.append("recorded %s &middot; %d %s"
+                  % (esc(item["ts"] or "at an unrecorded time"), item["updates"],
+                     "update" if item["updates"] == 1 else "updates"))
+    parts.append('<details class="ctxd"><summary>context</summary>'
+                 '<div class="ctxbody hbody">%s</div></details>' % "<br>".join(detail))
+    parts.append("</div>")
+    return "".join(parts)
+
+
+def render_history(doc, env):
+    """Everything the board excludes, on its own page.
+
+    Named history rather than archive: it says what the page is, not a storage
+    action nobody performed. It carries the return link in its header, because
+    the captain must never have to scroll their way back to the decisions.
+    """
     items = doc["items"]
     zones = doc["zones"]
     caps = doc["caps"]
     counts = doc["counts"]
     summary = doc["summary"]
     outcomes = doc["outcomes"]
-    out = []
+    total = counts["board_items"]
+    out = page_open("Bridge - history", doc)
     add = out.append
 
-    add("<!doctype html>")
-    add('<html lang="en"><head><meta charset="utf-8">')
-    add('<meta name="viewport" content="width=device-width,initial-scale=1">')
-    asks = doc.get("asks", [])
-    # THE TITLE NAMES THE BOARD AND COUNTS NOTHING. It used to carry the open-ask
-    # count, on the reasoning that a tab stays visible when the captain has
-    # scrolled away or switched apps. Measured, that reasoning holds only until
-    # the count changes: Lavish copies the artifact's <title> into the HOSTING
-    # page's title at page load and does not re-propagate it when the tick
-    # rewrites the board and the frame live-reloads, so the tab went on
-    # reporting "1 need you" while the page underneath it showed two
-    # (docs/verification/bridge-hosted-input.md). A count change is the only
-    # event that moves the number and is exactly the event that leaves the tab
-    # stale, so the tab was wrong precisely when it mattered.
-    # The count therefore lives in rendered content instead - the header tally
-    # below, drawn from the fold on every render, which a redraw cannot leave
-    # standing because the redraw is what produces it. A tab title Lavish
-    # propagates once may not promise a freshness it cannot keep.
-    add("<title>Bridge</title>")
-    add("<style>%s</style></head><body>" % CSS)
-
     add('<header class="top"><div class="wrap">')
-    add('<h1>Bridge<span class="sub">fleet state, generated from the ledger</span></h1>')
-    add(freshness_html(doc["folded_at"]))
-    # THREE GROUPS, AND TWO OF THEM ADD UP. The ask count is the conjunction -
-    # owed AND still live - and is labelled as its own number rather than being
-    # blended into either axis. Below it each axis partitions the SAME items, so
-    # both rows total `records folded`'s item count and a chip a reader can see
-    # is always a chip they can find in a tally.
-    total = counts["board_items"]
-    add('<div class="tallies">')
-    # THE OPEN-ASK COUNT LIVES HERE, and nowhere else. In normal flow, where it
-    # cannot come to cover a row, and in rendered content, which is the only
-    # surface on a hosted board that a redraw is guaranteed to refresh - the tab
-    # title is not, and that is why it stopped carrying this number. It jumps to
-    # the index rather than only reporting a number, which is the one thing the
-    # retired gutter counter did that a tally does not - and it carries the
-    # longest wait, because "3 waiting" and "3 waiting, oldest 2 days" are
-    # different facts and only the second one is alarming.
-    if asks:
-        # The genuinely longest-waiting ask, not the first row of a
-        # severity-sorted list. Calling the top row "oldest" would be a claim
-        # the ordering does not support.
-        longest = max(asks, key=lambda k: items[k]["age_seconds"] or 0)
-        add('<a class="tally ask" href="#waiting" data-lavish-action '
-            'title="asks: someone owes a decision AND the work is still live">'
-            "<b>%d</b>waiting on you"
-            '<span class="since">longest %s</span></a>'
-            % (len(asks), esc(items[longest]["age_label"])))
-    else:
-        add('<div class="tally ask" title="asks: someone owes a decision AND the '
-            'work is still live"><b>%d</b>waiting on you</div>' % len(asks))
-    if doc["cocaptain_asks"]:
-        add('<div class="tally co"><b>%d</b>with the co-captain</div>'
-            % len(doc["cocaptain_asks"]))
-    add("</div>")
+    add('<div class="toprow"><h1>History<span class="sub">everything the board '
+        "leaves out &middot; generated from the ledger</span></h1>")
+    add('<div class="fresh"><span class="dot" id="fm-fresh-dot"></span>'
+        '<span>fold <span class="mono">%s</span> &middot; '
+        '<span id="fm-fresh-age">just now</span></span></div></div>'
+        % esc(doc["folded_at"]))
+    add('<div class="countline">%s</div>'
+        % link(BOARD_FILENAME, "← board", external=False))
+    add("</div></header>")
+
+    add('<div class="wrap">')
+    add(problem_banners(doc))
+
+    # TWO TALLIES, EACH COUNTING EVERY ITEM, AND THE ASK COUNT APART FROM BOTH.
+    # They live here rather than on the board: a tally is something a reader
+    # consults, not something they act on, and every row of it above the first
+    # decision is length Law 2 does not allow.
+    add('<section><h2>Tallies</h2>')
     add('<div class="tallies"><div class="tallylbl">who owes it, all %d</div>' % total)
     for state, label, cls in (("needs-captain", "needs-captain", "ask"),
                               ("needs-cocaptain", "needs-cocaptain", "co"),
@@ -1550,170 +2452,61 @@ def render_html(doc):
                 % (cls, outcomes.get(outcome, 0), esc(label)))
     add('<div class="tally"><b>%d</b>records folded</div>' % counts["records"])
     add("</div>")
-    add('<p class="zone-note">Two things about every row, kept apart: who owes it, '
-        "and how it ended. Neither answers the other.</p>")
+    add('<p class="zone-note">Two things about every row, kept apart: who owes '
+        "it, and how it ended. Neither answers the other, so each tally counts "
+        "every item and both total the same number.</p>")
     add('<div class="legend">'
-        '<span class="l-red">needs you</span>'
+        '<span class="l-red">needs the captain</span>'
         '<span class="l-purple">needs the co-captain</span>'
         '<span class="l-blue">firstmate has it</span>'
         '<span class="l-green">resolved, or landed</span>'
         '<span class="l-orange">discarded, ended unknown, aging, or otherwise off</span>'
         '<span class="l-cyan">pointer or command</span>'
-        "</div>")
-    add("</div></header>")
-
-    add('<div class="wrap">')
-
-    # Conservation is reported on the surface, not just in the data. A fold that
-    # goes key-blind stops adding up here, in public, on the next tick.
-    if not doc["conserved"] or counts["malformed"]:
-        add('<div class="banner"><b>Ledger records not accounted for.</b> '
-            "%d non-blank lines, %d folded, %d unreadable. "
-            "The board can only show what the fold could read."
-            % (counts["lines_considered"], counts["records"], counts["malformed"]))
-        for bad in doc["malformed"][:5]:
-            add('<div class="row"><code>line %d: %s</code></div>'
-                % (bad["line"], esc(bad["reason"])))
-        if doc["malformed_omitted"]:
-            add("<div>+%d more unreadable lines.</div>" % doc["malformed_omitted"])
-        add("</div>")
-    # Rows the fold could not resolve are NAMED, not quietly filled in. These
-    # were written before the outcome axis existed, so their silence about how
-    # the work ended says nothing at all - and a row nobody can resolve is worth
-    # the captain seeing once rather than acquiring a confident-looking value.
-    if doc["unobserved_outcomes"]:
-        unresolved = doc["unobserved_outcomes"]
-        add('<div class="banner"><b>%d %s written before the outcome axis '
-            "existed.</b> Nothing in the record says how they ended, so the "
-            "board says unknown rather than guessing: %s.%s</div>"
-            % (len(unresolved),
-               "row was" if len(unresolved) == 1 else "rows were",
-               ", ".join(esc(items[key]["ref"] or key) for key in unresolved[:8]),
-               "" if len(unresolved) <= 8 else " +%d more" % (len(unresolved) - 8)))
-    if not doc["ledger"]["present"]:
-        add('<div class="banner">No ledger at <code>%s</code> yet. '
-            "The board is empty because nothing has been written, not because "
-            "nothing happened.</div>" % esc(doc["ledger"]["path"]))
-
-    # THE ASKS INDEX. Everything the captain owes, in one block, before anything
-    # else on the page. It is an index and not a second set of cards on purpose:
-    # each line jumps to the full card in its project section, so nothing has to
-    # be triaged twice, and a reader arriving cold still sees the complete list
-    # of what is waiting without scrolling or reconstructing it.
-    add('<section id="waiting"><h2>Waiting on you</h2>')
-    if asks:
-        add('<p class="zone-note">Every open ask, oldest first. Nothing else on '
-            "this page is an ask.</p>")
-        # WHERE THE RULING GOES. The board had its own composer here once, with
-        # copy and clear and no send - a visible input that could not reach
-        # anybody. It is gone rather than disabled, because the defect was the
-        # affordance itself. Saying where the input actually is costs one line
-        # and turns an implied path into a stated one.
-        add('<p class="howto">To rule: select the ask or the answer you want, '
-            "annotate it, and send from the conversation panel. Queue it before "
-            "you move on - a ruling still open in the annotation box is not "
-            "saved anywhere.</p>")
-        add('<ol class="asks">')
-        for key in asks:
-            item = items[key]
-            add('<li%s><a href="#item-%s" data-lavish-action>'
-                '<span class="ref">%s</span>'
-                '<span class="proj">%s</span>'
-                '<span class="what">%s</span>'
-                '<span class="age">%s</span></a></li>'
-                % (' class="aging"' if item.get("aging") else "",
-                   esc(item["id"]),
-                   esc(item["ref"] or "-"),
-                   esc(item["project"]),
-                   esc(item["title"] or item["id"]),
-                   esc(item["age_label"])))
-        add("</ol>")
-        aging = [k for k in asks if items[k].get("aging")]
-        if aging:
-            add('<div class="overflow">%d of these have been open longer than %s. '
-                "An ask that old is usually one that was already answered and "
-                "never closed - worth checking before ruling again.</div>"
-                % (len(aging), _age_label(doc.get("aging_seconds"))))
-    else:
-        add('<p class="allclear">Nothing is waiting on you. Everything below is '
-            "either being handled or already resolved.</p>")
-    add("</section>")
-
-    # Routed elsewhere, and shown so the captain can see it is routed rather
-    # than wonder. Deliberately BELOW their own asks and out of the open-ask
-    # count in the header: the point of the routing class is that these
-    # never spend captain attention. The co-captain does not read this board at
-    # all - they read the same items out of the ledger through --state - so this
-    # section exists to reassure, not to deliver.
-    cocaptain = doc.get("cocaptain_asks", [])
-    if cocaptain:
-        add('<section id="cocaptain"><h2>With the co-captain</h2>')
-        add('<p class="zone-note">Machine and repo-infrastructure items, routed '
-            "to the dotfiles session through the ledger. Not yours to answer - "
-            "listed so you can see where they went.</p>")
-        add('<ol class="asks co">')
-        for key in cocaptain:
-            item = items[key]
-            add('<li%s><a href="#item-%s" data-lavish-action>'
-                '<span class="ref">%s</span>'
-                '<span class="proj">%s</span><span class="what">%s</span>'
-                '<span class="age">%s</span></a></li>'
-                % (' class="aging"' if item.get("aging") else "",
-                   esc(item["id"]), esc(item["ref"] or "-"), esc(item["project"]),
-                   esc(item["title"] or item["id"]), esc(item["age_label"])))
-        add("</ol>")
-        add('<div class="checkline">the co-captain reads these with '
-            '<code>bin/fm-bridge-render.sh --state | jq -r \'.cocaptain_asks[]\'</code>'
-            "</div>")
-        add("</section>")
+        "</div></section>")
 
     collisions = [g for g in doc["glossary"] if g["collision"]]
     if collisions:
         add("<section><h2>Terms that mean different things by project</h2>")
-        add('<p class="zone-note">Defined here once, and repeated in each project '
-            "section below so you never scroll back.</p>")
+        add('<p class="zone-note">Defined here once, and repeated in each '
+            "project section below so you never scroll back.</p>")
         add('<div class="glossary"><dl>')
         for entry in collisions:
-            add("<dt>%s<span class=\"collide\">collision</span></dt>" % esc(entry["term"]))
+            add('<dt>%s<span class="collide">collision</span></dt>' % esc(entry["term"]))
             for sub in entry["entries"]:
                 add("<dd><b>%s</b>: %s</dd>" % (esc(sub["project"]), esc(sub["means"])))
         add("</dl></div></section>")
 
-    # Zone 1 - pinned criticals.
-    add("<section><h2>Pinned criticals</h2>")
-    add('<p class="zone-note">Security, data loss, fleet blocked, or anything '
-        "outward-facing that looks wrong. These stay pinned until resolved.</p>")
-    if zones["criticals"]:
-        for key in zones["criticals"]:
-            add(card(items[key], pinned=True))
-    else:
-        add('<p class="empty">Nothing pinned.</p>')
-    # Closed criticals, kept apart by how they ended. A reader scanning for what
-    # landed must never have to check whether a row under it was thrown away.
+    add("<section><h2>Criticals that closed</h2>")
+    shown_any = False
     for group, label in (("criticals_landed", "landed"),
                          ("criticals_discarded", "discarded"),
                          ("criticals_unknown", "ended, how unknown")):
         shown = zones[group][:caps["closed_decisions"]]
         if not shown:
             continue
+        shown_any = True
         add('<p class="zone-note">%s</p>' % esc(label))
         for key in shown:
-            add(card(items[key]))
+            add(history_row(items[key], doc))
         hidden = len(zones[group]) - len(shown)
         if hidden > 0:
             add('<div class="overflow">+%d more %s - the record has them: '
-                '<code>%s</code></div>'
+                "<code>%s</code></div>"
                 % (hidden, esc(label), esc(doc["checks"]["raw stream"])))
+    if not shown_any:
+        add('<p class="empty">No critical has closed.</p>')
     add("</section>")
 
-    # Zone 2 - decisions, grouped by project, with per-project refs.
-    add("<section><h2>Decisions</h2>")
-    add('<p class="zone-note">Grouped by project. A ref like <b>O1</b> is unique '
-        "to its project and never renumbers, so a bare number is safe to quote. "
-        "Only the red ones are asks.</p>")
-    if not zones["decisions"]:
-        add('<p class="empty">No decisions on the board.</p>')
+    add("<section><h2>Decisions, by project</h2>")
+    add('<p class="zone-note">A ref like <b>O1</b> is unique to its project and '
+        "never renumbers, so a bare number is safe to quote. Open decisions are "
+        "on the board, not here.</p>")
+    any_group = False
     for group in zones["decisions"]:
+        closed = [side for side in ("landed", "discarded", "unknown") if group[side]]
+        if not closed:
+            continue
+        any_group = True
         add('<h3 class="projhead">%s <span class="refs">refs %s1, %s2, '
             "&hellip;</span></h3>"
             % (esc(group["project"]), esc(group["prefix"]), esc(group["prefix"])))
@@ -1726,128 +2519,55 @@ def render_html(doc):
                              if sub["project"] == group["project"])
                 bits.append("<b>%s</b> here means %s" % (esc(entry["term"]), esc(means)))
             add('<p class="local-terms">%s</p>' % "; ".join(bits))
-        closed = [side for side in ("landed", "discarded", "unknown") if group[side]]
-        if not group["open"] and not closed:
-            add('<p class="empty">Nothing open.</p>')
-        for key in group["open"]:
-            add(card(items[key]))
         for side in ("landed", "discarded", "unknown"):
             shown = group[side][:caps["closed_decisions"]]
             for key in shown:
-                add(card(items[key]))
+                add(history_row(items[key], doc))
             hidden = len(group[side]) - len(shown)
             if hidden > 0:
-                add('<div class="overflow">+%d more %s in %s - the record has them: '
-                    '<code>%s</code></div>'
+                add('<div class="overflow">+%d more %s in %s - the record has '
+                    "them: <code>%s</code></div>"
                     % (hidden, esc(side), esc(group["project"]),
                        esc(doc["checks"]["raw stream"])))
+    if not any_group:
+        add('<p class="empty">No decision has closed.</p>')
     add("</section>")
 
-    # Zone 3 - notable events, capped, overflowing to the record.
     add("<section><h2>Notable events</h2>")
     add('<p class="zone-note">Newest first, capped. Nothing here is an ask.</p>')
     shown_events = zones["events"][:caps["events"]]
     if shown_events:
-        add('<ul class="events">')
         for key in shown_events:
-            item = items[key]
-            # An event whose outcome lives somewhere must SAY where. A notable
-            # event the captain cannot follow through to is a dead end on the
-            # one surface they read.
-            target = item["pointer"]
-            if target.startswith("http://") or target.startswith("https://"):
-                trail = " " + link(target)
-            elif target:
-                trail = ' <code>%s</code>' % esc(target)
-            else:
-                trail = ""
-            # An event that carries a note carries it onto the board. A forced
-            # secondmate retirement lands here rather than on the fleet strip -
-            # a persistent secondmate is not a work item - and it is the most
-            # destructive override in the fleet, so the judgement that
-            # authorized it has to be readable where the captain reads, not
-            # only in the record behind the page.
-            why = ('<div class="why%s">%s</div>'
-                   % (" override" if item["outcome"] in ("discarded", "unknown")
-                      else "", esc(item["note"]))
-                   if item["note"] else "")
-            add('<li><span class="when">%s</span>'
-                '<span class="what">%s%s %s%s</span></li>'
-                % (esc((item["ts"] or "")[:16].replace("T", " ")),
-                   esc(item["title"] or item["id"]),
-                   trail,
-                   chip(item) if owed_by(item) != "resolved" else "",
-                   why))
-        add("</ul>")
+            add(history_row(items[key], doc))
     else:
         add('<p class="empty">No events recorded.</p>')
     hidden = len(zones["events"]) - len(shown_events)
     if hidden > 0:
-        add('<div class="overflow">+%d older events. They are not lost - the record '
-            'has every one: <code>%s</code></div>'
+        add('<div class="overflow">+%d older events. They are not lost - the '
+            "record has every one: <code>%s</code></div>"
             % (hidden, esc(doc["checks"]["raw stream"])))
     add("</section>")
 
-    # Zone 4 - the fleet strip.
     add("<section><h2>Fleet</h2>")
-    add('<p class="zone-note">Every task firstmate is carrying. Red rows are '
-        "waiting on you.</p>")
-    # Live work first and uncapped, then the recent tail of each way work can
-    # end, each capped and each saying how much it is not showing. The tails
-    # never share a list: how a task ended is the one thing a reader of a closed
-    # row is asking, so landed and discarded cannot sit under one heading.
+    add('<p class="zone-note">Every task in the record. Live work is on the '
+        "board as a lane; how each closed task ended is here.</p>")
+    rows = list(zones["fleet_open"])
     closed_shown = {}
     for group in ("fleet_landed", "fleet_discarded", "fleet_unknown"):
         closed_shown[group] = zones[group][:caps["fleet_closed"]]
-    rows = (zones["fleet_open"] + closed_shown["fleet_landed"]
-            + closed_shown["fleet_discarded"] + closed_shown["fleet_unknown"])
+        rows += closed_shown[group]
     if rows:
-        add('<div class="stripwrap"><table class="strip">')
-        add("<tr><th>task</th><th>project</th><th>phase</th>"
-            "<th>who owes it</th><th>how it ended</th><th>where it is</th></tr>")
         for key in rows:
-            item = items[key]
-            target = item["pointer"]
-            if target.startswith("http"):
-                where = link(target)
-            elif target:
-                where = "<code>%s</code>" % esc(target)
-            else:
-                where = '<span style="color:var(--tn-muted)">-</span>'
-            # The anchor is not decoration: a task waiting on the captain is
-            # listed in the asks index above, and that index links here. A row
-            # with no id would leave the captain clicking an ask that goes
-            # nowhere. The answer form is here for the same reason - a row that
-            # asks for a ruling and offers no way to give one is the one
-            # regression that matters on this surface.
-            forms = answer_forms(item)
-            aged = ('<span class="chip aging">waiting %s</span>' % esc(item["age_label"])
-                    if item.get("aging") else "")
-            # A discarded row has to carry its own provenance. The cleanup that
-            # wrote it skipped the landed-work test, so a reader needs all three
-            # facts here - that the check was skipped, that the work was thrown
-            # away, and the judgement someone gave for skipping it - rather than
-            # only in the record behind the board.
-            why = ('<div class="why override">%s</div>' % esc(item["note"])
-                   if item["outcome"] in ("discarded", "unknown") and item["note"]
-                   else "")
-            ending = outcome_chip(item) or (
-                '<span style="color:var(--tn-muted)">still going</span>')
-            add('<tr id="item-%s"><td><b>%s</b>%s</td><td>%s</td><td>%s</td>'
-                '<td class="st">%s%s</td><td class="st">%s</td><td>%s%s</td></tr>'
-                % (esc(item["id"]), esc(item["title"] or item["id"]), why,
-                   esc(item["project"]), esc(item["phase"] or "-"),
-                   chip(item), aged, ending, where, forms))
-        add("</table></div>")
+            add(history_row(items[key], doc))
     else:
-        add('<p class="empty">No tasks on the board.</p>')
+        add('<p class="empty">No tasks in the record.</p>')
     for group, label in (("fleet_landed", "landed"),
                          ("fleet_discarded", "discarded"),
                          ("fleet_unknown", "ended, how unknown")):
         hidden = len(zones[group]) - len(closed_shown[group])
         if hidden > 0:
-            add('<div class="overflow">+%d older %s tasks in the record. '
-                "They are capped here, not dropped - <code>%s</code> has every "
+            add('<div class="overflow">+%d older %s tasks in the record. They '
+                "are capped here, not dropped - <code>%s</code> has every "
                 "one.</div>" % (hidden, esc(label), esc(doc["checks"]["raw stream"])))
     add("</section>")
 
@@ -1858,11 +2578,11 @@ def render_html(doc):
             "record quietly placed in the wrong bucket is how a surface starts "
             "lying.</p>")
         for key in zones["unzoned"]:
-            add(card(items[key]))
+            add(history_row(items[key], doc))
         add("</section>")
 
     add("<footer>")
-    add("<div><b>Check this board against its own source.</b></div>")
+    add("<div><b>Check this page against its own source.</b></div>")
     for label in sorted(doc["checks"]):
         add('<div class="row">%s &nbsp; <code>%s</code></div>'
             % (esc(label), esc(doc["checks"][label])))
@@ -1871,44 +2591,22 @@ def render_html(doc):
     steering = doc.get("substrate", {}).get("steering", {})
     if steering.get("items"):
         stages = steering.get("stages", {})
-        add("<div>%d steering-lifecycle records are in the record but not on this "
-            "board - they are machinery, not something for you to read "
+        add("<div>%d steering-lifecycle records are in the record but on neither "
+            "page - they are machinery, not something for you to read "
             "(sent %d, delivered %d, consumed %d). Ask about one with "
             "<code>bin/fm-bridge-render.sh --lifecycle &lt;id&gt;</code>.</div>"
             % (steering["items"], stages.get("sent", 0),
                stages.get("delivered", 0), stages.get("consumed", 0)))
-    # WHAT THIS SURFACE PROMISES, AND WHAT IT DOES NOT. Every line here is a
-    # measured verdict, not a design intention - the measurements and their
-    # exact output are in docs/verification/bridge-hosted-input.md. A reader who
-    # trusts the wrong half of this loses a ruling and does not find out, which
-    # is why the half that does not hold is stated as plainly as the half that
-    # does.
-    add('<div class="promises">')
-    add("<div><b>What this page does, and does not.</b></div>")
-    add("<div>It shows fleet state, and it takes no input of its own. A ruling "
-        "reaches firstmate by annotation: select the ask, or the answer you "
-        "want, say what you decided, and send it from the conversation "
-        "panel.</div>")
-    add("<div>A ruling you have queued survives this page being redrawn, and "
-        "still points at the ask you placed it on.</div>")
-    add("<div>A ruling still sitting in the annotation box does not. This page "
-        "is rewritten whenever the ledger changes, and an unqueued annotation "
-        "goes with it, silently. Queue it, then keep reading.</div>")
-    add("<div>Opened as a plain file with nothing behind it, this page has no "
-        "input path at all. Tell firstmate directly.</div>")
-    add("</div>")
-    add("<div class=\"row\">This page is generated. Edits to it are overwritten "
-        "the next time the ledger changes; facts belong in the ledger.</div>")
+    add('<div class="row">%s</div>'
+        % link(BOARD_FILENAME, "← board", external=False))
     add("</footer></div>")
 
-    # The exact state document this board was drawn from rides along, so the
-    # board can be audited without trusting the renderer.
     add('<script type="application/json" id="fm-bridge-state">')
     add(state_json(doc))
     add("</script>")
+    add("<script>%s</script>" % SCRIPT)
     add("</body></html>")
     return "\n".join(out) + "\n"
-
 
 def state_json(doc):
     """The one serialization of folded state, shared by --state and the copy the
@@ -1940,12 +2638,25 @@ def main(argv):
         sys.stdout.write(json.dumps(lifecycle(doc, argv[4]), indent=2,
                                     sort_keys=True, ensure_ascii=False) + "\n")
         return 0
-    if mode == "html":
-        # ONE fold, shared in-process: render_html consumes the return value
-        # directly. It is handed no path and opens no file, so the drawing half
-        # cannot become a second reader of the stream.
+    if mode in ("html", "history"):
+        # ONE fold, shared in-process: the renderer consumes the return value
+        # directly. It is handed no ledger path and opens no file, so the
+        # drawing half cannot become a second reader of the stream.
+        #
+        # The live readings are collected separately and handed in as a second
+        # document, for the same reason in the other direction: they are not
+        # ledger facts and must never enter the fold, or `--state` - read by the
+        # linter, the co-captain and every lifecycle query - would grow a
+        # subprocess behind it.
+        global BOARD_FILENAME, HISTORY_FILENAME
+        fm_home, state_dir = argv[4], argv[5]
+        BOARD_FILENAME, HISTORY_FILENAME = argv[6], argv[7]
         doc = fold(argv[2], argv[3])
-        sys.stdout.write(render_html(doc))
+        env = collect_env(fm_home, state_dir, argv[3])
+        if mode == "html":
+            sys.stdout.write(render_board(doc, env))
+        else:
+            sys.stdout.write(render_history(doc, env))
         return 0
     if mode == "signature":
         sys.stdout.write(signature(argv[2]) + "\n")
@@ -1984,9 +2695,21 @@ emit_lifecycle() {  # <folded-at> <id>
   python3 "$PROGRAM" lifecycle "$(fm_bridge_ledger_path)" "$1" "$2"
 }
 
+emit_page() {  # <mode: html|history> <folded-at>
+  # One process, one fold, shared in-process with the renderer. FM_HOME and the
+  # state dir travel with it because the live half of the board - lanes and the
+  # admission gauges - is read from them, and the two page basenames because
+  # each page links to the other.
+  python3 "$PROGRAM" "$1" "$(fm_bridge_ledger_path)" "$2" "$FM_HOME" "$STATE_DIR" \
+    "$(basename "$(fm_bridge_board_path)")" "$(basename "$(fm_bridge_history_path)")"
+}
+
 emit_html() {  # <folded-at>
-  # One process, one fold, shared in-process with the renderer.
-  python3 "$PROGRAM" html "$(fm_bridge_ledger_path)" "$1"
+  emit_page html "$1"
+}
+
+emit_history() {  # <folded-at>
+  emit_page history "$1"
 }
 
 ledger_signature() {
@@ -2006,20 +2729,31 @@ ledger_signature() {
 # sentence and it is the only thing a later reader has to go on: "the board did
 # not render" and "the board's directory is a file" send someone to two very
 # different places.
-write_board() {  # <folded-at>
-  local board tmp
-  board=$(fm_bridge_board_path)
-  mkdir -p "$(dirname "$board")" \
-    || { printf 'cannot create the board directory %s\n' "$(dirname "$board")" >&2; return 1; }
-  tmp="$board.tmp.$$"
-  emit_html "$1" > "$tmp" \
-    || { rm -f "$tmp"; printf 'the fold or the render failed for %s\n' "$board" >&2; return 1; }
-  if [ -f "$board" ] && cmp -s "$tmp" "$board"; then
+write_page() {  # <emitter> <path> <folded-at>
+  local emitter=$1 target=$2 tmp
+  mkdir -p "$(dirname "$target")" \
+    || { printf 'cannot create the directory %s\n' "$(dirname "$target")" >&2; return 1; }
+  tmp="$target.tmp.$$"
+  "$emitter" "$3" > "$tmp" \
+    || { rm -f "$tmp"; printf 'the fold or the render failed for %s\n' "$target" >&2; return 1; }
+  if [ -f "$target" ] && cmp -s "$tmp" "$target"; then
     rm -f "$tmp"
     return 0
   fi
-  mv -f "$tmp" "$board" \
-    || { rm -f "$tmp"; printf 'cannot replace %s with the rendered board\n' "$board" >&2; return 1; }
+  mv -f "$tmp" "$target" \
+    || { rm -f "$tmp"; printf 'cannot replace %s with the rendered page\n' "$target" >&2; return 1; }
+  return 0
+}
+
+# BOTH PAGES, FROM ONE FOLD EACH, AND ALWAYS TOGETHER. History is a second
+# output of the same surface, not a separate artifact with its own schedule: a
+# board whose history link resolves to a page from an older fold would be two
+# readings of one record, which is the thing this design exists to make
+# impossible. History is written FIRST, so the board's history link never goes
+# live before the page it points at exists.
+write_board() {  # <folded-at>
+  write_page emit_history "$(fm_bridge_history_path)" "$1" || return 1
+  write_page emit_html "$(fm_bridge_board_path)" "$1" || return 1
   return 0
 }
 
@@ -2187,7 +2921,7 @@ do_tick() {
   # And the skip itself is NEUTRAL: it neither resets the count nor increments
   # it, because a tick with nothing to render observed nothing about whether the
   # renderer works.
-  if [ "$sig" = "$prev" ] && [ -f "$board" ]; then
+  if [ "$sig" = "$prev" ] && [ -f "$board" ] && [ -f "$(fm_bridge_history_path)" ]; then
     [ "$verbose" -eq 1 ] && printf 'bridge: ledger unchanged since the last render; left %s alone\n' "$board"
     return 0
   fi
@@ -2211,9 +2945,11 @@ while [ $# -gt 0 ]; do
   case "$1" in
     --state) MODE='state'; shift ;;
     --html) MODE='html'; shift ;;
+    --history) MODE='history'; shift ;;
     --tick) MODE='tick'; shift ;;
     --write) MODE='write'; shift ;;
     --path) MODE='path'; shift ;;
+    --history-path) MODE='history-path'; shift ;;
     --ledger-path) MODE='ledger-path'; shift ;;
     --id) [ $# -gt 1 ] || die "--id needs an item id"; ITEM_ID=$2; shift 2 ;;
     --lifecycle)
@@ -2229,6 +2965,7 @@ done
 NOW=$(fm_bridge_now)
 case "$MODE" in
   path) fm_bridge_board_path; echo ;;
+  history-path) fm_bridge_history_path; echo ;;
   ledger-path) fm_bridge_ledger_path; echo ;;
   state)
     prepare
@@ -2250,10 +2987,15 @@ case "$MODE" in
     prepare
     if [ -n "$OUT" ]; then emit_html "$NOW" > "$OUT"; else emit_html "$NOW"; fi
     ;;
+  history)
+    prepare
+    if [ -n "$OUT" ]; then emit_history "$NOW" > "$OUT"; else emit_history "$NOW"; fi
+    ;;
   write)
     prepare
     write_board "$NOW" || die "could not write the board"
     printf '%s\n' "$(fm_bridge_board_path)"
+    printf '%s\n' "$(fm_bridge_history_path)"
     ;;
   tick) do_tick "$VERBOSE" ;;
 esac
