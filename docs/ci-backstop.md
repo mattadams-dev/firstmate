@@ -38,12 +38,15 @@ Two further facts, recorded so the idea is not re-proposed on the assumption tha
 
 ## What the `main` CI run does catch
 
-[`.github/workflows/ci.yml`](../.github/workflows/ci.yml) triggers on every push to `main` and runs the same 12 required contexts.
+[`.github/workflows/ci.yml`](../.github/workflows/ci.yml) triggers on every push to `main`, so a merge run reports the 11 required contexts that `ci.yml` owns, not all 12.
+The 12th required context, `PR must be raised via no-mistakes`, comes from [`.github/workflows/no-mistakes-required.yml`](../.github/workflows/no-mistakes-required.yml), which triggers only on `pull_request` and so cannot report on a push at all.
+No conflict detection is lost to that gap: it reads the pull request body for a signature, which is not something a semantic conflict can fail.
+`ci.yml`'s own 12th job, `Behavior timing aggregate`, is not a required context either, so it is not counted here.
 
 - **Latency is measured, not assumed.** The five most recent `main` push runs took 8m16s to 10m05s, mean about 9.4 minutes.
 - **No detection is lost to a following merge.** `ci.yml` declares no `concurrency` group, so back-to-back merges each get their own run and none is cancelled by its successor.
 
-So any semantic conflict that one of the 12 contexts actually exercises is detected, roughly nine to ten minutes after it lands.
+So any semantic conflict that one of those 11 contexts actually exercises is detected, roughly nine to ten minutes after it lands.
 
 ## What it does not catch
 
@@ -115,10 +118,17 @@ Leaving that to be found by whichever worker pushes next is exactly the failure 
 **When the check happens matters.**
 A merged-pull-request wake arrives at merge time, and the `main` run for that merge has not concluded yet - it needs about 9.4 minutes.
 Reading it at that moment returns "in progress", which is a third outcome and must never be reported as green.
-The check therefore belongs to the next fleet-wide review, by which time the run has concluded.
+The check therefore belongs to the periodic fleet-wide review, which reads every cloned project's default branch unconditionally, every time.
 
-**Deliberately not built:** no new watcher, poll, script, or state file.
-This is a procedure step on wakes that already happen, because the fleet already receives a merged-pull-request wake and already performs a periodic fleet-wide review.
+**Reading unconditionally is what makes the unknown safe.**
+Restricting the read to projects that landed work since the previous review would drop that third outcome on the floor: a merge landing shortly before a review is read as "in progress", so no item opens, and at the next review nothing has landed since, so nobody looks again and a red `main` stays invisible indefinitely.
+An unconditional read is stateless, so nothing is carried between reviews and nothing can be carried wrongly.
+It is idempotent: a re-read costs one API call and changes nothing when the answer has not moved.
+And it makes an unconcluded run self-healing by construction rather than by anyone remembering to look again, because the run that was in progress last time is simply read again this time.
+
+**Deliberately not built:** no new watcher, poll, script, state file, or remembered marker for a run previously read as unconcluded.
+Remembered state is the more fragile shape for an identical outcome.
+This is a procedure step on a wake that already happens, because the fleet already performs a periodic fleet-wide review.
 
 ## Maintaining this file
 
