@@ -15,6 +15,22 @@
 # for done, relay stdout and stderr separately, then reap only their completed
 # record. Input, argv, stdout, and stderr are each capped at 1048576 bytes.
 #
+# Queue expiry is a check-time test rather than an execution-time one.
+# The worker compares the job's durable queue_deadline at the moment it considers
+# that job, so a job whose queue_deadline passes between that check and the start
+# of its execution still runs to completion.
+# That window is deliberate and bounded, not an oversight.
+# It spans only the claim path - the atomic claim, the timeout read, the deadline
+# and state writes, and tracked-command validation - and it is absorbed by
+# FM_REMOTE_JOB_WAIT_GRACE, 30 seconds by default, so the caller waiting on the
+# record is still waiting when such a job publishes its result.
+# It is recorded here because an intentional window that is written down nowhere
+# reads to the next person as a defect: they would either close it and change
+# this contract by accident, or lose time rediscovering it while diagnosing
+# something else.
+# The adjacent guarantee, that a job already expired before any worker existed is
+# never executed, is pinned by tests/fm-remote-job.test.sh.
+#
 # The worker accepts only a tracked, non-symlink executable named fm-*.sh below
 # its configured FM_ROOT/bin. Every child receives env -i with the composed
 # PATH, HOME, FM_HOME, FM_ROOT_OVERRIDE, and FM_REMOTE_JOB_ACTIVE=1. The PATH
