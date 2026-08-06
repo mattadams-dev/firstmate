@@ -101,9 +101,9 @@ function names.
 
 The unmutated suite breaks nothing, per-test and as a whole. The run above was
 taken at 28 tests, before the id-collision regression and the review rounds below
-were added; the suite now runs 49 tests and reports 49 ok, 0 not ok
+were added; the suite now runs 54 tests and reports 54 ok, 0 not ok
 (`bash tests/fm-fork-freshness.test.sh | grep -c '^ok -'` against the count of
-invocations in the file's trailing block - both 49, which is the point: a suite
+invocations in the file's trailing block - both 54, which is the point: a suite
 that halts early would show fewer ok lines than invocations).
 
 What the table establishes:
@@ -141,7 +141,7 @@ above.
 | trailing-slash strip in the origin-URL parser | `not ok - a cloned fork that is behind must not exit clean: expected exit 3, got 0` |
 | enumeration-cap detection | `not ok - a sweep whose enumeration hit its cap must not exit clean: expected exit 4, got 0` |
 | cap detection forced always-on (the cry-wolf direction) | `not ok - a fork behind its upstream must not exit clean: expected exit 3, got 5` |
-| session-start trigger relaying the sweep's stderr | `not ok - a sync task whose backlog write failed reached the digest as a clean queued task (missing: 'BACKLOG_MANUAL: add fm-sync-acme-widget')` |
+| session-start trigger relaying the sweep's stderr | `not ok - a sync task whose backlog write failed reached the digest as a clean queued task (missing: 'TASK_MANUAL: acme/widget is behind but sync task fm-sync-acme-widget')` |
 | session-start trigger reporting a non-0/3/4/5 exit | `not ok - a sweep that crashed without a reading printed exactly what a not-due sweep prints (missing: 'FORK_FRESHNESS_COVERAGE: status=unknown')` |
 | time bound on the pre-PR reading | `not ok - a stalled freshness reading hung the PR-ready path for 20s` |
 
@@ -190,6 +190,13 @@ a failed notification must never cost the task its instructions.
 
 Date: 2026-08-05.
 
+**Superseded in part by the fourth round below.** This round asked the task
+system the liveness question but kept the brief as the gate deciding whether the
+question got asked, and re-materialised with `add`, which cannot reopen. The
+fourth round removed the gate and the guard entirely; the rows below marked
+superseded describe mechanisms that no longer exist, and the rest were re-run
+against the current tree.
+
 The round before this one gave the marker a lifetime by retiring it on a
 `behind=0` reading. Review then found that trigger is not enough on its own: it
 fires only where a reading happens to catch the fork level, and the readings
@@ -210,14 +217,14 @@ suite there, record the line that halted it verbatim.
 
 | Reverted fix | Captured failure |
 | --- | --- |
-| liveness asked of the task system (guard keyed on the marker file alone) | `not ok - already queued named no open task; it may not be printed on the marker file alone (missing: 'the backlog reports it queued')` |
-| the live/spent distinction (every marker treated as spent) | `not ok - a repeat sweep must find the first sweep's task, not create another (missing: 'action=task fm-sync-acme-widget already queued')` |
-| an unreadable task state kept distinct from an open one | `not ok - a liveness question that could not be answered passed silently (missing: 'GUARD_UNKNOWN:')` |
-| retirement of a spent marker on a level reading | `not ok - the reading that found the marker spent did not retire it (missing: 'action=task fm-sync-acme-widget retired')` |
+| liveness asked of the task system (guard keyed on the marker file alone) | superseded by the fourth round: the brief no longer gates the question |
+| the live/spent distinction (every marker treated as spent) | superseded by the fourth round: the four-answer classification replaced it |
+| an unreadable task state kept distinct from an open one | `not ok - a liveness question that could not be answered passed silently (missing: 'TASK_UNKNOWN:')` |
+| the stale brief filed away on a level reading | `not ok - the reading that found the marker spent did not retire it (missing: 'action=task fm-sync-acme-widget retired')` |
 | credential strip on the clone origin written into the brief | `not ok - the brief carries the clone's credential into a durable, travelling artifact` |
-| the atomic move checked by its result, not only its status | `not ok - the reading dropped the reason its task could not be created (missing: 'NOT created: instructions could not be placed')` |
+| the atomic move checked by its result, not only its status | `not ok - the reading dropped the reason its task could not be created (missing: 'NOT queued: instructions could not be placed')` |
 | `data/projects.md` as a discovery source | `not ok - a registered fork that is behind must not exit clean: expected exit 3, got 0` |
-| the composed task-failure reason kept on the reading | `not ok - the reading dropped the reason its task could not be created (missing: 'NOT created: instructions could not be placed')` |
+| the composed task-failure reason kept on the reading | `not ok - the reading dropped the reason its task could not be created (missing: 'NOT queued: instructions could not be placed')` |
 | `--owner` rejecting a missing value | `not ok - a flag with no value must be refused like every other malformed option: expected exit 2, got 1` |
 
 Rows six and eight halt on the same assertion for different reasons, and the
@@ -228,34 +235,48 @@ the failure is reported but its cause and `MANUAL=` marker are overwritten by a
 bare literal. The same test catches both because it asserts the reading carries
 what actually happened.
 
-Rows one to three are the guard's three worlds, each caught by exactly its own
-case, which is the requirement that made the fix non-trivial:
+Rows one and two were this round's own fix and are superseded: it made the
+liveness answer come from the task system but left the brief deciding whether the
+question was asked at all, so the conflation survived one layer down. The fourth
+round removed that gate.
 
-- brief present, task open: `test_repeat_sweep_creates_no_duplicate_task` still
-  short-circuits, and now asserts the reading names the open task it
-  short-circuited on.
-- brief present, task closed or absent:
-  `test_closed_task_frees_a_behind_fork_to_queue_again` and
-  `test_absent_task_frees_a_behind_fork_to_queue_again` retire the marker and
-  raise a fresh sync. The first is the finding's own sequence - the task is
-  closed and upstream moves again before any reading catches the fork level, so
-  the `behind=0` trigger never gets its chance.
-- brief present, task state unreadable:
-  `test_unreadable_task_state_neither_duplicates_nor_retires` removes `tasks-axi`
-  from the case's PATH and asserts the sweep creates nothing, retires nothing,
-  and prints `GUARD_UNKNOWN:` with the reason.
-
-Retirement is recorded, never silent: the brief is moved to
-`data/<id>/brief.retired-<stamp>.md` and the reading that decided it carries
-`RETIRED=<file>` and the reason the marker was judged spent, so a retirement that
-should not have happened stays discoverable from the reading and the kept file.
-`bin/fm-teardown.sh` is untouched - it removes exactly what it removed before.
+A brief is still never silently deleted - it is kept as
+`data/<id>/brief.retired-<stamp>.md` and named on the reading that replaced it -
+and `bin/fm-teardown.sh` is untouched, removing exactly what it removed before.
 
 The fake `tasks-axi` in the suite gained `show <id>` in the installed CLI's
 shape, checked against the installed one (tasks-axi 0.2.3): an indented
 `state: <queued|in_flight|done>` line at rc=0, and `code: NOT_FOUND` on
 **stdout** at rc=1. The stream matters - a fake that wrote NOT_FOUND to stderr
 would let a mis-parsed absent task pass here and read as unknown in production.
+
+## Fourth round: the boundary itself, not a fourth patch
+
+Date: 2026-08-05.
+
+Three rounds moved one conflation a step downstream each time - a file existing
+read as a task existing, then retiring on observation read as retiring on
+completion, then `add` read as reopening. The third failed while PRINTING
+`queued` over a task that stayed `done`, on every sweep, forever, which is a
+false success and therefore worse than the silent failures it replaced.
+
+Apply the two-world check to that reading. The two states `queued` was meant to
+separate are (a) a sync task was created or reopened and is now owed, and (b) an
+add short-circuited over a done task and nothing was queued at all. Both produced
+the identical reading, so anything stronger than unknown was fabrication - and it
+printed a definite success.
+
+So this round reshapes the boundary rather than patching the seam again:
+
+- **Is a sync owed?** the forge answers, `behind > 0`.
+- **Does open work already carry it?** the task system answers, asked directly by
+  id with nothing on disk gating the question.
+
+The brief stops being a guard and keeps only creation-atomicity. The remediation
+primitive is matched to the answer - `add` creates, `reopen` reopens - and the
+post-state is read back rather than inferred, so `queued` is reachable only from
+a confirmed reading. The task is created last, because whatever the sweep gates
+on must be its final artifact.
 
 ## What the installed task CLI actually does
 
@@ -346,6 +367,51 @@ $ tasks-axi reopen sync-probe --json
 
 Reopen is therefore reachable only from a confirmed closed reading, never from an
 open or unknown one.
+
+
+### Mutation evidence for the fourth round
+
+Same method as the rounds above: revert one fix in a scratch copy of the current
+tree, run the whole suite there, record the line that halted it verbatim.
+
+| Reverted fix | Captured failure |
+| --- | --- |
+| the post-state read back instead of inferred from exit status | `not ok - the sweep printed queued over a task that never left done - exit status was treated as a result (unexpected: 'action=task fm-sync-acme-widget queued')` |
+| `reopen` as the primitive for a closed task (`add` used instead) | `not ok - the fork's second episode created no task (missing: 'action=task fm-sync-acme-widget queued')` |
+| the liveness question asked unconditionally (gated on the brief again) | `not ok - a brief and a wake left by a dead run suppressed the sweep - only the task system may answer whether work is owed (missing: 'action=task fm-sync-acme-widget queued')` |
+| the task created last, after the wake and the Bridge row | `not ok - the task landed without the wake that must precede it - creating it last is what prevents exactly this` |
+| an unreadable post-state kept distinct from a confirmed one | `not ok - an unconfirmable post-state was reported as a definite success (unexpected: 'action=task fm-sync-acme-widget queued')` |
+| `reopen` reachable only from a confirmed closed reading | `not ok - an in-flight sync task was pulled back to the queue underneath its worker (the backlog reports 'queued', expected 'in_flight')` |
+
+Row two is the third finding itself, and it is worth naming why it needs the
+post-state assertion rather than the reading alone: with `add` swapped back in,
+the sweep still prints a line for that fork. What changes is what the backlog
+says afterwards, so `assert_task_state` is what fails, not a string match on
+stdout.
+
+Row six is the reason `reopen` is entered only from a confirmed closed reading.
+`reopen` moves Done **or In flight** back to Queued, so reaching it from an open
+reading pulls work back to the queue underneath the crewmate holding it.
+
+The `held)` arm this round removed carries no mutation row, and deliberately so:
+it was unreachable, because hold is an orthogonal field and no state is ever
+named `held`. An unreachable branch has no behavioral mutation to catch - the
+evidence for removing it is the CLI reading above, and
+`test_a_held_task_is_open_work_and_is_not_duplicated` pins the behavior that
+matters, which is that a held task is open work and short-circuits.
+
+### The fake had to stop being more generous than the CLI
+
+The suite could not have caught the third finding. Its `tasks-axi` fake modelled
+`add` as an upsert that also transitioned, so `add` over a done task reopened it
+in the suite and no-opped in production. The one place the fake and the tool
+disagreed is the exact place the defect lived.
+
+The fake is now create-only over an existing id and answers `reopen` and
+`update` in the installed shapes. This is the same rule the harness-dependent
+check guidance states for vendor-emitted signals: a stub can only confirm the
+assumption written into it, so anywhere it is more generous than the tool it
+stands in for, the difference ships.
 
 ## Trigger wiring
 
