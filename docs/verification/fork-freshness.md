@@ -108,9 +108,9 @@ function names.
 
 The unmutated suite breaks nothing, per-test and as a whole. The run above was
 taken at 28 tests, before the id-collision regression and the review rounds below
-were added; the suite now runs 64 tests and reports 64 ok, 0 not ok
+were added; the suite now runs 66 tests and reports 66 ok, 0 not ok
 (`bash tests/fm-fork-freshness.test.sh | grep -c '^ok -'` against the count of
-invocations in the file's trailing block - both 64, which is the point: a suite
+invocations in the file's trailing block - both 66, which is the point: a suite
 that halts early would show fewer ok lines than invocations).
 
 What the table establishes:
@@ -449,7 +449,7 @@ whether or not the sweep deduped. That is exactly what mutation M3 below shows.
 ### Mutations, run against this tree
 
 Same method as the rounds above: apply one mutant to `bin/fm-fork-freshness.sh`,
-run the whole suite, record the line that halted it verbatim. The suite is 64 ok
+run the whole suite, record the line that halted it verbatim. The suite is 66 ok
 / 0 not ok unmutated.
 
 | Mutant | Captured failure |
@@ -782,6 +782,61 @@ check guidance states for vendor-emitted signals: a stub can only confirm the
 assumption written into it, so anywhere it is more generous than the tool it
 stands in for, the difference ships.
 
+## The registry line format has one reader again (2026-08-05)
+
+The sweep shipped with its own `awk` over `data/projects.md`, bracket parse
+included, to find the projects this home maintains but has not cloned. That made
+it a second reader of a format
+[`bin/fm-project-mode.sh`](../../bin/fm-project-mode.sh) owns, and two readers of
+one format drift. It was routed through the owner instead, which needed a gap in
+the owner closed: it answered only "what posture is registered for THIS project",
+one name at a time, and this caller needs to enumerate. `--list` prints one
+`<name> <mode> <yolo>` line per registered project, resolved through the same
+validation, fallback and `--raw` mapping as the one-name form.
+
+`bin/fm-fork-freshness.sh` now holds no knowledge of the line format at all - no
+bracket parse, no `- <name> -` line pattern, no mode list beyond the single
+`local-only` comparison against the owner's own output vocabulary. That is
+checkable rather than asserted: `grep -n 'yolo\|awk' bin/fm-fork-freshness.sh`
+returns only the usage banner.
+
+Routing through the owner made that script a dependency of coverage, which is a
+new way for the sweep to go quiet: an unlistable registry and an empty one
+produce the identical candidate set. Under the rule this whole instrument exists
+for, that reads `unknown` - a second coverage line naming what could not be read,
+counted into the exit code, withholding the completion stamp. A home with no
+`data/projects.md` is deliberately not that case; the owner reports an empty
+registry at exit 0, so no home carries a standing false unknown.
+
+### Mutations, run against this tree
+
+Same method: revert one fix in a scratch copy of the current tree, run the whole
+suite there, record the line that halted it verbatim.
+
+| Reverted fix | Suite | Captured failure |
+| --- | --- | --- |
+| the sweep keeps its own parser of the registry line format | fork-freshness | `not ok - the stubbed listing named no fork to read: expected exit 0, got 4` |
+| an unlistable registry prints no unknown coverage line | fork-freshness | `not ok - the registered projects went unread with no line and no count (missing: 'FORK_FRESHNESS_COVERAGE: status=unknown')` |
+| an unlistable registry left out of the exit code | fork-freshness | `not ok - a registry the sweep could not list is unknown coverage, not a clean sweep: expected exit 4, got 0` |
+| `--list` skips the shared resolution and prints raw registry values | task-delivery | `not ok - --list did not map the conditional policy and keep its +yolo posture (missing: 'prodproj no-mistakes on')` |
+| `--list` drops projects carrying no bracket annotation | task-delivery | `not ok - --list did not emit exactly one line per registered project: widget no-mistakes off` |
+
+Row one is the one worth reading closely, because it is what stops the second
+parser coming back rather than merely proving today's behavior. Reverting the fix
+changes no reading of any real registry - both readers treat anything that is not
+`local-only` as remote-backed, which is why this was a drift risk rather than a
+live defect - so a test asserting the swept candidate set would have passed the
+mutant. `test_registry_listing_is_taken_through_the_owning_parser` stubs
+`bin/fm-project-mode.sh` to list one project the registry file does not contain
+and puts a different one in the file: only a sweep that genuinely asks the owner
+sees the stub's answer, and the resurrected parser is caught reading the file's.
+
+Behavior is otherwise equivalent by construction, and the registry-discovery
+cases pin it in both directions: a registered fork that is not cloned here is
+still swept (`test_registered_project_without_a_clone_is_swept`), and a
+registered `local-only` project is still reported by name rather than spent as an
+unknown (`test_registered_local_only_project_is_named_not_read`).
+
 ## Trigger wiring
 
 Both triggers are exercised through their real callers, with a recorder standing
@@ -817,5 +872,13 @@ configuration:
 
 ```
 $ bin/fm-lint.sh bin/fm-fork-freshness.sh bin/fm-bootstrap.sh bin/fm-pr-check.sh tests/fm-fork-freshness.test.sh
+fm-lint.sh: ShellCheck 0.11.0 (pinned 0.11.0)
+```
+
+And the round that gave the registry line format one reader again, over the two
+scripts and two suites it touched:
+
+```
+$ bin/fm-lint.sh bin/fm-fork-freshness.sh bin/fm-project-mode.sh tests/fm-fork-freshness.test.sh tests/fm-task-delivery.test.sh
 fm-lint.sh: ShellCheck 0.11.0 (pinned 0.11.0)
 ```

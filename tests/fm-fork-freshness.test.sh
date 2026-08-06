@@ -800,6 +800,64 @@ test_registered_local_only_project_is_named_not_read() {
   pass "fm-fork-freshness: a registered local-only project is reported by name, not read as unknown"
 }
 
+# The registry line format lives in bin/fm-project-mode.sh, so that script is now
+# a dependency of coverage. The failure it introduces has to read as unknown: an
+# unreadable listing and an empty registry produce the same candidate set, and
+# only one of them is a complete sweep.
+test_unlistable_registry_reads_unknown_not_empty() {
+  local dir root out rc=0
+  dir=$(new_case)
+  repolist "$dir" '[]'
+  printf -- '- widget [no-mistakes] - the widget project (added 2026-07-01)\n' \
+    > "$dir/home/data/projects.md"
+  root="$dir/root"
+  mkdir -p "$root"
+  cp -R "$ROOT/bin" "$root/bin"
+  rm -f "$root/bin/fm-project-mode.sh"
+  out=$(FM_TEST_SWEEP_BIN="$root/bin/fm-fork-freshness.sh" \
+    run_sweep "$dir" sweep --owner acme) || rc=$?
+
+  expect_code 4 "$rc" "a registry the sweep could not list is unknown coverage, not a clean sweep"
+  assert_contains "$out" "FORK_FRESHNESS_COVERAGE: status=unknown" \
+    "the registered projects went unread with no line and no count"
+  assert_contains "$out" "fm-project-mode.sh" \
+    "the unknown coverage line did not name what could not be read"
+  assert_absent "$dir/home/state/.fork-freshness-last" \
+    "the sweep stamped itself complete over a registry it never read"
+  pass "fm-fork-freshness: a registry that cannot be listed reads unknown, never as an empty one"
+}
+
+test_registry_listing_is_taken_through_the_owning_parser() {
+  local dir root out rc=0
+  dir=$(new_case)
+  # The other direction: the sweep must actually ROUTE through that parser rather
+  # than keep a second reading of the format alive behind it. A registry whose
+  # only reader is a stub proves the routing - a sweep still parsing
+  # data/projects.md itself would sweep acme/widget anyway, and one still
+  # carrying its own bracket parse would call the stubbed lab local-only.
+  repolist "$dir" '[]'
+  printf -- '- widget [no-mistakes] - never listed by the stub (added 2026-07-01)\n' \
+    > "$dir/home/data/projects.md"
+  root="$dir/root"
+  mkdir -p "$root"
+  cp -R "$ROOT/bin" "$root/bin"
+  cat > "$root/bin/fm-project-mode.sh" <<'STUB'
+#!/bin/sh
+[ "$1" = --list ] || exit 1
+printf 'lab local-only off\n'
+STUB
+  chmod +x "$root/bin/fm-project-mode.sh"
+  out=$(FM_TEST_SWEEP_BIN="$root/bin/fm-fork-freshness.sh" \
+    run_sweep "$dir" sweep --owner acme) || rc=$?
+
+  expect_code 0 "$rc" "the stubbed listing named no fork to read"
+  assert_contains "$out" "lab status=ignored" \
+    "the sweep did not take its registered projects from bin/fm-project-mode.sh --list"
+  assert_not_contains "$out" "acme/widget" \
+    "the sweep still reads the registry line format itself instead of asking its owner"
+  pass "fm-fork-freshness: registered projects are read through bin/fm-project-mode.sh, not re-parsed here"
+}
+
 test_owner_flag_without_a_value_is_refused_loudly() {
   local dir rc=0
   dir=$(new_case)
@@ -1966,6 +2024,8 @@ test_full_enumeration_under_the_cap_reads_clean
 test_configured_extra_fork_outside_enumeration_is_swept
 test_registered_project_without_a_clone_is_swept
 test_registered_local_only_project_is_named_not_read
+test_unlistable_registry_reads_unknown_not_empty
+test_registry_listing_is_taken_through_the_owning_parser
 test_owner_flag_without_a_value_is_refused_loudly
 test_same_named_forks_under_two_owners_get_two_tasks
 test_sync_task_carries_the_proven_procedure

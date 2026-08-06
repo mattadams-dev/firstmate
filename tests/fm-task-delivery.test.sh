@@ -272,6 +272,63 @@ EOF
   pass "fm-project-mode: the conditional policy is accepted, mapped for mechanical callers, and readable raw"
 }
 
+# --list exists so a caller that needs the WHOLE registry - bin/fm-fork-freshness.sh
+# enumerating what this home maintains - never reads data/projects.md itself. The
+# test that matters is therefore that the listing carries everything such a caller
+# would otherwise have re-parsed the format to learn, and resolves it identically
+# to the one-name form.
+test_project_mode_lists_the_whole_registry() {
+  local home out err lname lmode lyolo
+  home="$TMP_ROOT/project-mode-list/home"
+  mkdir -p "$home/data"
+  cat > "$home/data/projects.md" <<'EOF'
+# Projects
+
+- widget [no-mistakes] - fixture (added 2026-01-01)
+- lab [local-only] - fixture (added 2026-01-01)
+- legacy - no annotation at all (added 2026-01-01)
+- prodproj [no-mistakes-prod-only +yolo] - fixture (added 2026-01-01)
+- typoproj [no-mistakez] - fixture (added 2026-01-01)
+EOF
+  out=$(FM_HOME="$home" "$PROJECT_MODE" --list 2>/dev/null)
+
+  [ "$(printf '%s\n' "$out" | wc -l)" -eq 5 ] \
+    || fail "--list did not emit exactly one line per registered project: $out"
+  assert_contains "$out" "widget no-mistakes off" "--list dropped a registered project's name or posture"
+  assert_contains "$out" "lab local-only off" \
+    "--list did not carry local-only, the one posture its caller must be able to tell apart"
+  assert_contains "$out" "legacy no-mistakes off" "--list mis-read an unannotated legacy line"
+  assert_contains "$out" "prodproj no-mistakes on" \
+    "--list did not map the conditional policy and keep its +yolo posture"
+  assert_contains "$out" "typoproj no-mistakes off" \
+    "--list dropped a project with a typo'd mode instead of falling back to the rigorous default"
+  err=$(FM_HOME="$home" "$PROJECT_MODE" --list 2>&1 >/dev/null)
+  assert_contains "$err" "unknown mode" "--list swallowed the typo the one-name form warns about"
+
+  out=$(FM_HOME="$home" "$PROJECT_MODE" --raw --list 2>/dev/null)
+  assert_contains "$out" "prodproj no-mistakes-prod-only on" \
+    "--raw --list did not expose the registered annotation"
+
+  # Every listed posture must be the one-name form's answer for that project, or
+  # the caller that switched to --list has quietly changed what it reads.
+  while read -r lname lmode lyolo; do
+    [ -n "$lname" ] || continue
+    [ "$(FM_HOME="$home" "$PROJECT_MODE" "$lname" 2>/dev/null)" = "$lmode $lyolo" ] \
+      || fail "--list and the one-name form disagree about $lname"
+  done <<EOF
+$(FM_HOME="$home" "$PROJECT_MODE" --list 2>/dev/null)
+EOF
+
+  # No name to fall back FOR: inventing "no-mistakes off" here would hand the
+  # caller a project that is not registered anywhere.
+  out=$(FM_HOME="$TMP_ROOT/project-mode-list/absent" "$PROJECT_MODE" --list 2>/dev/null) \
+    || fail "--list over a missing registry must not fail its caller"
+  [ -z "$out" ] || fail "--list invented projects for a home with no registry: $out"
+  err=$(FM_HOME="$TMP_ROOT/project-mode-list/absent" "$PROJECT_MODE" --list 2>&1 >/dev/null)
+  assert_contains "$err" "no registry" "a missing registry listed silently"
+  pass "fm-project-mode: --list carries every registered project, resolved exactly as the one-name form"
+}
+
 test_ship_spawn_requires_a_valid_delivery_contract
 test_scout_and_secondmate_refuse_delivery_flags
 test_spawn_refuses_a_brief_mode_mismatch
@@ -279,4 +336,5 @@ test_spawn_notices_a_rigor_downgrade_against_the_registry
 test_scout_records_no_delivery_posture
 test_promote_requires_and_records_the_delivery_contract
 test_project_mode_maps_the_conditional_policy
+test_project_mode_lists_the_whole_registry
 echo "# all fm-task-delivery tests passed"

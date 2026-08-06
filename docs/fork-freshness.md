@@ -20,7 +20,9 @@ extend:
   list so private repositories are included,
 - every fork that is the origin of a clone under this home's `projects/`,
 - every project registered in this home's `data/projects.md` that it has not
-  cloned, qualified with the sweep owner,
+  cloned, qualified with the sweep owner - read through
+  [`bin/fm-project-mode.sh`](../bin/fm-project-mode.sh) `--list`, which owns the
+  registry line format, so the sweep never parses it a second time,
 - every entry in `config/maintained-forks`, for a fork this home neither owns nor
   has cloned,
 - minus every entry in `config/fork-sweep-ignore`.
@@ -73,6 +75,18 @@ completion stamp; see [When it runs](#when-it-runs).
 That is unknown coverage, not a clean sweep: the exit code carries it, the
 completion stamp is withheld, and the sweep stays due. `FM_FORK_SWEEP_LIST_LIMIT`
 raises the cap for a run.
+
+A registry that could not be listed at all reads the same way, for the same
+reason: an unlistable registry and an empty one yield the identical candidate
+set, so the sweep says which it observed rather than banking the cheaper answer.
+
+```
+FORK_FRESHNESS_COVERAGE: status=unknown reason=the project registry could not be listed through bin/fm-project-mode.sh, so any fork registered in ~/firstmate/data/projects.md and not cloned here was never read
+```
+
+A home with no `data/projects.md` is *not* that case - the registry owner reports
+an empty registry successfully - so this stays a real failure to read rather than
+a standing unknown every sweep would carry.
 
 The public `users/<login>/repos` endpoint is deliberately not used: it returns
 only public repositories, so an enumeration built on it silently truncates the

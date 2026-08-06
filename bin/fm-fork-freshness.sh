@@ -1052,31 +1052,24 @@ qualify() {
 # banking a clean one. A name that does not resolve under the sweep owner reads
 # unknown for the same structural reason, and config/fork-sweep-ignore is the
 # documented way to retire the entry from the sweep.
-registry_candidates() {
-  local owner=$1 reg="$DATA/projects.md" name mode
-  [ -f "$reg" ] || return 0
-  while IFS=$'\t' read -r name mode; do
+#
+# The registry LINE FORMAT is not knowledge this script holds. bin/fm-project-mode.sh
+# owns it, and its --list form answers exactly what this caller needs: the name
+# and resolved posture of every registered project. Re-reading data/projects.md
+# here would be a second parser of one format, and two parsers drift - which is
+# the whole reason the posture has one owner. The listing is taken by the caller,
+# because a listing that could not be taken at all is unknown COVERAGE rather
+# than an empty registry, and this function runs too deep to say so.
+registry_candidates() {  # <owner>, with the project listing on stdin
+  local owner=$1 name mode
+  while read -r name mode _; do
     [ -n "$name" ] || continue
     [ ! -d "$PROJECTS/$name/.git" ] || continue
     case "$mode" in
       local-only) printf '!%s\n' "$name" ;;
       *) qualify "$name" "$owner" ;;
     esac
-  done <<< "$(
-    awk '
-      $1 == "-" && $2 != "" {
-        mode = "no-mistakes"
-        if ($3 ~ /^\[/) {
-          s = ""
-          for (i = 3; i <= NF; i++) { s = s (s == "" ? "" : " ") $i; if ($i ~ /\]$/) break }
-          gsub(/^\[|\]$/, "", s)
-          split(s, a, " ")
-          if (a[1] != "" && a[1] != "+yolo") mode = a[1]
-        }
-        printf "%s\t%s\n", $2, mode
-      }
-    ' "$reg"
-  )"
+  done
 }
 
 is_ignored() {
@@ -1136,6 +1129,15 @@ cmd_sweep() {
     return 4
   fi
 
+  # The registry is a candidate source in its own right, so a listing that could
+  # not be taken is unknown COVERAGE, not an empty registry: every project this
+  # home maintains and has not cloned would go unread with no line and no count.
+  # A home with no registry at all is not that - the owner lists it as empty at
+  # exit 0 - so this stays a real failure to read rather than a standing unknown.
+  local registry_listing registry_unread=0
+  registry_listing=$(FM_HOME="$FM_HOME" FM_DATA_OVERRIDE="$DATA" \
+    "$FM_ROOT/bin/fm-project-mode.sh" --list 2>/dev/null) || registry_unread=1
+
   # Candidates the enumeration cannot see: a clone whose origin belongs to
   # another account, a project this home's registry maintains but has not cloned,
   # and any maintained fork with no clone and no owned copy.
@@ -1147,7 +1149,7 @@ cmd_sweep() {
         origin_slug "${dir%/}"
       done
     fi
-    registry_candidates "$owner"
+    registry_candidates "$owner" <<< "$registry_listing"
     config_list maintained-forks | while IFS= read -r extra; do
       [ -n "$extra" ] || continue
       qualify "$extra" "$owner"
@@ -1238,10 +1240,14 @@ cmd_sweep() {
     printf 'FORK_FRESHNESS_COVERAGE: status=unknown reason=%s\n' \
       "$(clean_reason "the repository list for $owner returned $owned entries, the whole --limit $LIST_LIMIT cap, so any fork past it was never read")"
   fi
+  if [ "$registry_unread" = 1 ]; then
+    printf 'FORK_FRESHNESS_COVERAGE: status=unknown reason=%s\n' \
+      "$(clean_reason "the project registry could not be listed through bin/fm-project-mode.sh, so any fork registered in $DATA/projects.md and not cloned here was never read")"
+  fi
 
   local code=0
   [ "$BEHIND_COUNT" -eq 0 ] || code=3
-  if [ "$UNKNOWN_COUNT" -gt 0 ] || [ "$truncated" = 1 ]; then
+  if [ "$UNKNOWN_COUNT" -gt 0 ] || [ "$truncated" = 1 ] || [ "$registry_unread" = 1 ]; then
     [ "$code" -eq 3 ] && code=5 || code=4
   fi
   return "$code"
