@@ -4,8 +4,8 @@ This record holds the empirical facts the `AGENTS.md` context diet acts on: the 
 
 `.agents/skills/firstmate-coding-guidelines/SKILL.md` owns the knowledge-placement policy this diet applies, including the extraction break-even and the two-sentence description cap that came out of these measurements.
 
-Every byte and birth-weight figure in this record is a reading taken against a specific commit, not a live description of the working tree.
-The closing figures for this work were read at commit `428035e`; a later edit to `AGENTS.md` moves them, so re-measure rather than assuming they still hold.
+Every figure here is a reading of a described state, not a live description of the working tree.
+Each measurement below states the content it was taken against, so rebuild that content to reproduce it rather than assuming a figure still holds.
 
 ## Where the remaining value is - read this before resuming
 
@@ -154,10 +154,12 @@ Break-even is therefore a relation and not a constant: **the net resident remova
 The three-state table above cannot isolate the two-sentence description, because it holds no row for the tuned `AGENTS.md` with the skill directory absent.
 That pair was therefore built and read separately, claude 2.1.222.
 
-Two trees were built from commit `b7928302`, each containing `AGENTS.md` and `.agents/skills` with its `.claude/skills` symlink, identical except that one has `.agents/skills/validation-supersession` removed.
+Two trees were built, each containing `AGENTS.md` and `.agents/skills` with its `.claude/skills` symlink as this change ships them, identical to each other except that one omits `.agents/skills/validation-supersession`.
+The description under test is the two-sentence one this change ships.
 `claude -p` was run in each and the first `message.usage` line summed, two rounds per tree with zero spread within each.
 
-That commit is named rather than left implicit because this pair is the most load-bearing measurement here - the 87 it yields replaced two figures that turned out to have been inferred rather than read - and it was checked to be an ancestor of the pipeline head, so the anchor survives in final history.
+The pair is identified by that content rather than by the commit it was read on, because this repo squash-merges task branches and a branch commit id would not resolve for a later reader.
+State the content precisely, because this pair is the most load-bearing measurement here: the 87 it yields replaced two figures that turned out to have been inferred rather than read.
 
 | Tree | Birth weight |
 | --- | --- |
@@ -170,7 +172,7 @@ Both absolute floors sit below the in-repo readings because these trees live out
 87 is a reading taken on 2026-08-05, on claude 2.1.222, under the two-sentence cap, and never a standing figure.
 Re-measure before applying the relation to a new extraction, because a harness change, a listing-format change, or a differently worded description moves it.
 
-After rewriting the description to two sentences and shortening both the stub and the index line, the same extraction reads 49,831: a net saving of **77 tokens** against the 49,908 it started from.
+After rewriting the description to two sentences and shortening both the stub and the index line - the state this change ships - the same extraction reads 49,831: a net saving of **77 tokens** against the 49,908 it started from.
 It decomposes as 164 tokens of net resident removal from `AGENTS.md` against the 87-token description.
 The 87 and the 77 are measured; the 164 is derived from them rather than read off an instrument, because no run isolates the tuned trim on its own.
 
