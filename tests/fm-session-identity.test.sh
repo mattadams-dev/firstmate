@@ -212,18 +212,28 @@ test_lock_records_pid_then_session() {
 }
 
 test_lock_is_reacquired_by_its_own_session() {
-  local home="$TMP_ROOT/lock-reacquire" out live
+  local home="$TMP_ROOT/lock-reacquire" out status other fakebin
   mkdir -p "$home/state"
-  # A DIFFERENT, LIVE process id under the SAME session - the deadlock shape.
-  # sleep is not a harness, so fm_harness_pid_alive would refuse it; use this
-  # test's own shell, which is alive and is not the acquiring harness either.
-  live=$$
-  printf '%s\nsession=sess-aaa\n' "$live" > "$home/state/.lock"
-  out=$(run_lock "$home" sess-aaa) \
-    || fail "a session could not reacquire its OWN lock after its process identity changed: $out"
+  # THE DEADLOCK, at the acquisition boundary. The recorded holder must be a
+  # process that is ALIVE and that reads as a real harness - in the field it was
+  # the captain's own live `claude` CLI - because a dead or non-harness holder
+  # takes the ordinary stale-takeover path and proves nothing about identity.
+  # The session id on the lock is ours; only the process identity moved.
+  bash -c 'sleep 30; :' &
+  other=$!
+  fakebin=$(fm_fakebin "$home")
+  write_fake_ps "$fakebin" "$other"
+  printf '%s\nsession=sess-aaa\n' "$other" > "$home/state/.lock"
+  out=$(PATH="$fakebin:$PATH" run_lock "$home" sess-aaa); status=$?
+  kill "$other" 2>/dev/null || true
+  wait "$other" 2>/dev/null || true
+  [ "$status" -eq 0 ] \
+    || fail "a session could not reacquire its OWN lock while a live process held its old identity - this is the deadlock: $out"
   [ "$(sed -n 2p "$home/state/.lock")" = "session=sess-aaa" ] \
     || fail "reacquisition lost the session record"
-  pass "lock: a session reacquires its own lock after its process identity changed"
+  [ "$(sed -n 1p "$home/state/.lock")" != "$other" ] \
+    || fail "reacquisition left the superseded process identity on the lock"
+  pass "lock: a session reacquires its own lock while a live process still holds its old identity"
 }
 
 test_lock_refuses_a_different_live_session() {
@@ -277,6 +287,90 @@ test_safe_kill_still_refuses_the_lock_holder() {
   [ "$status" -ne 0 ] || fail "safe-kill signalled the session-lock holder: $out"
   assert_contains "$out" 'holds this home' "safe-kill must refuse ON THE LOCK, not incidentally on some later check"
   pass "safe-kill: still refuses the lock's pid once the record carries a session line"
+}
+
+# --- the refusal branch records its refusal ----------------------------------
+
+install_autoarm_home() {  # <dir>
+  local dir=$1 f
+  mkdir -p "$dir/state" "$dir/bin"
+  git init -q "$dir"
+  git -C "$dir" commit -q --allow-empty -m init
+  : > "$dir/AGENTS.md"
+  for f in fm-claude-stop-autoarm.sh fm-lock.sh fm-primary-scope-lib.sh \
+    fm-supervision-lib.sh fm-wake-lib.sh fm-session-lock-lib.sh; do
+    cp "$ROOT/bin/$f" "$dir/bin/$f"
+  done
+  chmod +x "$dir/bin/fm-claude-stop-autoarm.sh" "$dir/bin/fm-lock.sh"
+  # An arm wrapper that would leave a trace if it ever ran. It must not.
+  cat > "$dir/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+: > "$FM_HOME/state/arm-ran"
+printf 'heartbeat\n'
+SH
+  chmod +x "$dir/bin/fm-watch-arm.sh"
+  : > "$dir/state/task.meta"
+  printf '%s\n' "$dir"
+}
+
+run_autoarm() {  # <dir> <payload-session>
+  local dir=$1 id=$2 home
+  home=$(cd "$dir" && pwd)
+  printf '{"session_id":"%s"}' "$id" \
+    | env -u CLAUDE_CODE_SESSION_ID -u FM_SESSION_ID \
+      FM_HOME="$home" bash "$dir/bin/fm-claude-stop-autoarm.sh" 2>&1
+}
+
+test_identity_refusal_is_recorded() {
+  local dir out status other fakebin
+  dir=$(install_autoarm_home "$TMP_ROOT/refusal-recorded")
+  bash -c 'sleep 30; :' &
+  other=$!
+  fakebin=$(fm_fakebin "$dir")
+  write_fake_ps "$fakebin" "$other"
+  # A live holder that names a DIFFERENT session than the Stop payload does.
+  printf '%s\nsession=owner-aaa\n' "$other" > "$dir/state/.lock"
+  out=$(PATH="$fakebin:$PATH" run_autoarm "$dir" intruder-bbb); status=$?
+  kill "$other" 2>/dev/null || true
+  wait "$other" 2>/dev/null || true
+  expect_code 0 "$status" "an identity refusal must not force a continuation"
+  [ ! -e "$dir/state/arm-ran" ] || fail "the hook armed supervision for a session it does not own"
+  [ "$(sed -n 2p "$dir/state/.lock")" = "session=owner-aaa" ] \
+    || fail "the refusing hook overwrote the owner's lock record"
+  # THE CAPTAIN'S FIXTURE. A refusal is an outcome. Exiting 0 having written
+  # nothing is what made the turn-end guard's escape unreachable, because the
+  # escape is keyed on evidence the silent branch never produced.
+  grep -q 'outcome=refused' "$dir/state/.claude-autoarm-epoch" 2>/dev/null \
+    || fail "the identity refusal wrote no refused epoch: $(cat "$dir/state/.claude-autoarm-epoch" 2>/dev/null || echo '<no epoch at all>')"
+  [ -e "$dir/state/.claude-autoarm-failure-notified" ] \
+    || fail "the identity refusal raised no operator notice"
+  assert_contains "$out" 'REFUSED' "the refusal must name itself"
+  assert_contains "$out" 'owner-aaa' "the refusal must name the session that does own the home"
+  pass "refusal: an identity refusal is recorded as an outcome instead of exiting 0 in silence"
+}
+
+test_refusal_record_waits_for_the_need_gate() {
+  local dir out status other fakebin
+  dir=$(install_autoarm_home "$TMP_ROOT/refusal-idle")
+  rm -f "$dir/state/task.meta"
+  bash -c 'sleep 30; :' &
+  other=$!
+  fakebin=$(fm_fakebin "$dir")
+  write_fake_ps "$fakebin" "$other"
+  printf '%s\nsession=owner-aaa\n' "$other" > "$dir/state/.lock"
+  out=$(PATH="$fakebin:$PATH" run_autoarm "$dir" intruder-bbb); status=$?
+  kill "$other" 2>/dev/null || true
+  wait "$other" 2>/dev/null || true
+  expect_code 0 "$status" "an idle home must stay inert"
+  # Recording a refusal is owed only when the refusal actually withholds
+  # something. An idle home is not blocked by it, so it stays byte-for-byte
+  # inert - otherwise every Stop of every unowned idle home churns state and
+  # raises a notice nobody needs.
+  [ ! -e "$dir/state/.claude-autoarm-epoch" ] \
+    || fail "an idle home recorded a refusal that withheld nothing"
+  [ ! -e "$dir/state/.claude-autoarm-failure-notified" ] \
+    || fail "an idle home raised an operator notice"
+  pass "refusal: an idle home records nothing, because its refusal withholds nothing"
 }
 
 # --- the recorded refusal keeps the guard's escape reachable ------------------
@@ -372,5 +466,7 @@ test_lock_is_reacquired_by_its_own_session
 test_lock_refuses_a_different_live_session
 test_lock_without_a_session_id_stays_on_the_pid_basis
 test_safe_kill_still_refuses_the_lock_holder
+test_identity_refusal_is_recorded
+test_refusal_record_waits_for_the_need_gate
 test_recorded_refusal_reaches_the_bounded_escape
 test_silent_refusal_freezes_the_escape

@@ -81,6 +81,35 @@ The identity refusal therefore writes a `refused` epoch and one operator notice 
 
 ## Both mutation directions
 
-Guard-class code fails in two directions and both are tested.
-`tests/fm-session-identity.test.sh` carries the mutation table: a mutant that weakens the identity comparison must break its own test, and a mutant that refuses a legitimate session must break a different one.
-A guard that refuses everything is not safe, because it is disabled by the next person under time pressure.
+Guard-class code fails in two directions, so both are mutated.
+A mutant that weakens the identity comparison must break its own test, and a mutant that makes the check refuse a legitimate session must break a different one.
+A guard that refuses everything is not safe; it is the same failure one mirror over, because it is disabled by the next person under time pressure.
+
+Every mutant below was applied one at a time to a clean tree, with each test run in its own shell and the tree restored before the next.
+`tests/fm-session-identity.test.sh` owns these fixtures unless another suite is named.
+
+Weakening - the identity check admits something it must refuse:
+
+| Mutant | File | Change | Broke |
+| --- | --- | --- | --- |
+| W1 | `bin/fm-session-lock-lib.sh` | any established session matches the lock | `test_refuse_lock_naming_another_session` |
+| W2 | `bin/fm-session-lock-lib.sh` | a caller whose own session id is unestablishable inherits the lock's | `test_refuse_when_own_session_unestablishable` |
+| W3 | `bin/fm-safe-kill.sh` | read the lock file whole again instead of its pid line | `test_safe_kill_still_refuses_the_lock_holder` |
+| W4 | `bin/fm-lock.sh` | acquire over a live holder naming another session | `test_lock_refuses_a_different_live_session` |
+| W5 | `bin/fm-claude-stop-autoarm.sh` | the identity refusal exits 0 without writing its epoch | `test_identity_refusal_is_recorded` |
+| W6 | `bin/fm-turnend-guard.sh` | drop `refused` from the verified failure episode | `test_recorded_refusal_reaches_the_bounded_escape` |
+
+Over-refusal - the identity check refuses something it must admit:
+
+| Mutant | File | Change | Broke |
+| --- | --- | --- | --- |
+| R1 | `bin/fm-session-lock-lib.sh` | demand the ancestry test as well as the session id | `test_admit_same_session_across_changed_process_identity` |
+| R2 | `bin/fm-session-lock-lib.sh` | refuse every lock that records no session id | `test_admit_legacy_session_less_lock_by_ancestry` |
+| R3 | `bin/fm-lock.sh` | refuse to acquire at all when no session id is observable | `test_lock_without_a_session_id_stays_on_the_pid_basis` |
+| R4 | `bin/fm-lock.sh` | refuse a session's own lock whenever the recorded pid is live | `test_lock_is_reacquired_by_its_own_session` |
+| R5 | `bin/fm-claude-stop-autoarm.sh` | refuse before ownership is tested at all | `tests/fm-claude-stop-autoarm.test.sh`, nested-ancestry arm |
+
+R4 is worth keeping in mind when editing these fixtures.
+It survived the first version of `test_lock_is_reacquired_by_its_own_session`, because that fixture recorded an ordinary live shell as the prior holder and the harness-liveness predicate rejects a shell - so the live-holder branch the mutant changes was never reached.
+The specimen only reproduces when the recorded holder is alive AND reads as a real harness, which is what it was in the field.
+A fixture that exercises the wrong branch reports a coverage it does not have.
