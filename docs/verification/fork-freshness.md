@@ -473,6 +473,76 @@ Keyed on the exact count, a moving upstream makes every retry a new condition,
 so the dedupe never fires and the row the assertion looks for is never the one
 that stands.
 
+## Seventh round: the reading that denied itself
+
+Date: 2026-08-05.
+
+Splitting the pre-state out of `SUPERSEDED=` in the sixth round made it an
+unconditional trailing parenthetical, and `standing_phrase` is present tense. So
+the sweep's single most common reading became
+
+```
+action=task fm-sync-acme-widget queued (the backlog has no such task)
+```
+
+a line ending in a clause denying the word in front of it. The state named there
+is one the sweep had just changed and then confirmed changed - the instrument
+asserting something it had already disproved, in the branch whose whole subject
+is instruments not claiming what they did not observe. Behaviour was correct
+throughout; only the words were wrong, which is why no test caught it: every
+assertion was an `assert_contains` substring that a contradictory line still
+matches.
+
+The ruling was to LABEL the pre-state rather than re-tense it, and the label is
+doing work a tense could not. Two symptoms, and past tense alone would leave the
+second standing:
+
+- the contradiction above;
+- the ambiguity on the confirmed-not-open reading, where the state found and the
+  state now are the same words, and two similar English clauses would sit on one
+  line with nothing marking which is which:
+  `NOT queued: the backlog has no such task after create (the backlog has no such task)`.
+
+`FOUND=absent|closed` now carries it, in the same `KEY=value` vocabulary as
+`MANUAL=` and `SUPERSEDED=` on that line. `standing_phrase` was NOT rewritten:
+it is still correct at every site that describes a state the sweep did not change
+- the already-queued short-circuit, the confirmed post-state, the level-fork
+retirement, and the reason inside `SUPERSEDED=<file> (<reason>)`, which explains
+why that file was kept at the moment it was kept. A reading carries the pre-state
+one way or the other, never both.
+
+The four readings this changes, taken from the suite's own fixtures rather than
+retyped:
+
+```
+action=task fm-sync-acme-widget queued FOUND=absent
+action=task fm-sync-acme-widget NOT queued: the backlog has no such task after create MANUAL=backlog FOUND=absent
+action=task fm-sync-acme-widget queued SUPERSEDED=brief.retired-20270115T090000Z.md (the backlog reports it done)
+action=task fm-sync-acme-widget NOT queued: the backlog reports it done after reopen MANUAL=backlog FOUND=closed
+```
+
+The second and fourth are the ones the label exists for: prose for the state the
+sweep confirmed, a labelled token for the state it started from, on a line where
+those two are otherwise the same words.
+
+| Mutant | Captured failure |
+| --- | --- |
+| the pre-state back as a bare parenthetical (`episode=" ($(standing_phrase "$standing"))"`) | `not ok - the pre-state on a plain queued reading is not labelled as the state that was found (missing: 'action=task fm-sync-acme-widget queued FOUND=absent')` |
+| the label dropped, past tense only (`episode=" (found: ...)"`) | `not ok - the pre-state on a plain queued reading is not labelled as the state that was found (missing: 'action=task fm-sync-acme-widget queued FOUND=absent')` |
+| the SUPERSEDED clause also carrying `FOUND=` | `not ok - the pre-state was stated twice - once inside SUPERSEDED= and once as a bare token (unexpected: 'FOUND=')` |
+| `standing_phrase` rewritten past-tense at every call site | `not ok - already queued named no open task; it may not be printed on the marker file alone (missing: 'the backlog reports it queued')` |
+
+The second row is the one worth keeping: it is the tense-only fix the ruling
+rejected, and the suite refuses it for the reason the ruling gave - on the
+double-clause line a reader still could not tell the before from the after.
+
+The fourth row halts earlier than its own subject, and that is recorded as taken
+rather than tidied: rewriting `standing_phrase` globally breaks the
+already-queued short-circuit before the run ever reaches a `SUPERSEDED=` clause.
+The suite halts at its first failure, so what is captured is the first thing that
+broke, which is itself the point - present tense is load-bearing at the sites
+that describe a state the sweep did not change.
+
 ## What the installed task CLI actually does
 
 Taken 2026-08-05 against tasks-axi 0.2.3 in a throwaway backlog, because the

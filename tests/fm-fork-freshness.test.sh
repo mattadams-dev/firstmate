@@ -409,6 +409,15 @@ test_behind_creates_a_sync_task() {
   assert_not_contains "$out" "MANUAL=" \
     "a reading that says queued must have all four artifacts, not a manual hand-off"
   assert_contains "$out" "behind=1 " "the coverage line lost the behind count"
+
+  # The sweep's single most common reading, and the one that must not end in a
+  # clause denying itself. The state the episode started from is labelled as the
+  # state FOUND; the bare "queued (the backlog has no such task)" it replaced
+  # asserted a current backlog state this very line has just disproved.
+  assert_contains "$out" "action=task fm-sync-acme-widget queued FOUND=absent" \
+    "the pre-state on a plain queued reading is not labelled as the state that was found"
+  assert_not_contains "$out" "queued (the backlog" \
+    "the reading ends in a present-tense clause contradicting the queued it just printed"
   pass "fm-fork-freshness: behind > 0 creates the sync task and refuses to exit clean"
 }
 
@@ -1177,8 +1186,8 @@ test_absent_task_frees_a_behind_fork_to_queue_again() {
   expect_code 3 "$rc" "the fork is still behind"
   assert_contains "$out" "action=task fm-sync-acme-widget queued" \
     "a marker backed by no task at all still suppressed the work it was tracking"
-  assert_contains "$out" "the backlog has no such task" \
-    "the reading did not record why a new episode was started"
+  assert_contains "$out" "FOUND=absent" \
+    "the reading did not record the state this new episode was started from"
   assert_task_state "$dir" fm-sync-acme-widget queued \
     "the reading said queued over a backlog the task had been dropped from"
   pass "fm-fork-freshness: a marker the backlog has no task for is retired, not honoured"
@@ -1341,6 +1350,18 @@ test_backlog_failure_is_reported_not_swallowed() {
     "this case is only meaningful while the backlog write actually fails"
   assert_present "$dir/home/data/fm-sync-acme-widget/brief.md" \
     "a failed backlog write must not cost the task its instructions"
+
+  # This is the line where the state found and the state now are the SAME words,
+  # so it is the one that decides whether a reader can tell them apart. The
+  # pre-state must be labelled; an unlabelled trailing "(the backlog has no such
+  # task)" would leave two identical clauses with nothing marking which is which,
+  # and would still satisfy every substring assertion above.
+  assert_contains "$out" "NOT queued: the backlog has no such task after create" \
+    "the post-state clause stopped naming the state the sweep actually confirmed"
+  assert_contains "$out" "FOUND=absent" \
+    "the state this episode started from is unlabelled, so it cannot be told from the state now"
+  assert_not_contains "$out" "create (the backlog" \
+    "the pre-state came back as a bare parenthetical, indistinguishable from the post-state beside it"
   pass "fm-fork-freshness: a backlog write that fails is reported, not swallowed"
 }
 
@@ -1442,6 +1463,13 @@ test_a_changed_condition_still_supersedes_and_still_raises() {
   expect_code 3 "$rc" "the fork is behind by more than it was"
   assert_contains "$out" "SUPERSEDED=brief.retired-" \
     "a genuinely changed reading must still name the brief it filed away"
+  # A reading carries the pre-state one way or the other, never both: inside the
+  # SUPERSEDED clause, where present tense is right because that state is why the
+  # file was kept, or as the bare labelled token when no file was kept.
+  assert_contains "$out" "(the backlog reports it done)" \
+    "the SUPERSEDED clause lost the reason the file was kept"
+  assert_not_contains "$out" "FOUND=" \
+    "the pre-state was stated twice - once inside SUPERSEDED= and once as a bare token"
   [ "$(count_retired "$dir" fm-sync-acme-widget)" = 1 ] ||
     fail "a changed reading archived $(count_retired "$dir" fm-sync-acme-widget) briefs; the idempotence must not swallow a real new episode"
   assert_grep "behind 41, ahead 0" "$dir/home/data/fm-sync-acme-widget/brief.md" \
@@ -1653,6 +1681,14 @@ test_a_task_confirmed_not_open_does_not_bank_a_week_of_silence() {
     "this case is only meaningful while the reading refuses to say queued"
   assert_contains "$out" "undischarged=1" \
     "a confirmed-not-open task left the coverage line reading like a discharged sweep"
+  # The state now and the state found are the same words on this reading, so the
+  # label is the only thing that tells them apart.
+  assert_contains "$out" "NOT queued: the backlog has no such task after create" \
+    "the post-state clause stopped naming the state the sweep actually confirmed"
+  assert_contains "$out" "FOUND=absent" \
+    "the state this episode started from is unlabelled and cannot be told from the state now"
+  assert_not_contains "$out" "create (the backlog" \
+    "the pre-state came back as a bare parenthetical beside an identical post-state clause"
   last=$(cat "$dir/home/state/.fork-freshness-last")
   [ "$last" != "$now" ] ||
     fail "a sweep whose task was confirmed absent recorded itself as complete"

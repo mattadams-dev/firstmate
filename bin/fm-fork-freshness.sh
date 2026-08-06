@@ -551,11 +551,39 @@ brief_tmp_cleanup() {
 
 # standing_phrase <liveness>: a task_liveness reading in the words the action
 # field uses, so every reading that cites the backlog cites it the same way.
+#
+# Present tense, and correct wherever it describes a state the sweep did NOT
+# change: the already-queued short-circuit, the post-state it just confirmed, the
+# level-fork retirement, and the reason inside SUPERSEDED=<file> (<reason>),
+# which explains why that file was kept at the moment it was kept. It is NOT
+# usable on its own to describe the state an episode started from - see
+# found_marker.
 standing_phrase() {
   case "$1" in
     'open '*|'closed '*) printf 'the backlog reports it %s\n' "${1#* }" ;;
     absent) printf 'the backlog has no such task\n' ;;
     *) printf '%s\n' "${1#unknown }" ;;
+  esac
+}
+
+# found_marker <liveness>: the state this episode STARTED from, labelled as such
+# and carried in the same KEY=value vocabulary as MANUAL= and SUPERSEDED=.
+#
+# It is a label rather than a re-tensed phrase because the label kills two
+# problems and a tense would leave one standing. The first is a contradiction:
+# standing_phrase read as a bare suffix asserts a current backlog state that the
+# reading in front of it has just changed and confirmed changed, so
+# "queued (the backlog has no such task)" - the sweep's single most common
+# reading - ends in a clause denying itself. The second is ambiguity: on the
+# confirmed-not-open reading the pre-state and the post-state can be the very
+# same words, and past tense alone would leave two similar English clauses on one
+# line with nothing marking which is which. FOUND= marks it.
+found_marker() {
+  case "$1" in
+    absent) printf ' FOUND=absent' ;;
+    'closed '*) printf ' FOUND=closed' ;;
+    'open '*) printf ' FOUND=open' ;;
+    *) printf ' FOUND=unknown' ;;
   esac
 }
 
@@ -698,13 +726,13 @@ ensure_sync_task() {
     *) need=reopen ;;
   esac
 
-  # Why this episode is being started at all - the backlog reports the task done,
-  # or has none - stated on every reading that starts one. It used to ride along
-  # inside SUPERSEDED=, which conflated two different facts: which file was kept,
-  # and what the backlog said. A re-sweep of an unchanged condition keeps no file
-  # and must still name what it acted on, so the two are separate now and
-  # SUPERSEDED= means only "here is the copy I kept".
-  episode=" ($(standing_phrase "$standing"))"
+  # Why this episode is being started at all - the backlog had the task closed, or
+  # had none - stated on every reading that starts one, and LABELLED, because by
+  # the time the reading prints, the sweep has changed that state and confirmed
+  # it changed. The archive branch below replaces this with the SUPERSEDED=<file>
+  # clause, whose parenthetical says the same thing where present tense is right:
+  # that state is why the file was kept, at the moment it was kept.
+  episode=$(found_marker "$standing")
 
   taken=$(date -u -d "@$(now_epoch)" '+%Y-%m-%d %H:%M UTC' 2>/dev/null ||
     date -u '+%Y-%m-%d %H:%M UTC')
@@ -759,7 +787,7 @@ ensure_sync_task() {
   else
     if [ -f "$brief" ]; then
       if name=$(archive_brief "$id"); then
-        episode=" SUPERSEDED=$name$episode"
+        episode=" SUPERSEDED=$name ($(standing_phrase "$standing"))"
       else
         printf 'ARCHIVE_MANUAL: %s could not move its superseded data/%s/brief.md aside, so this episode overwrites it and that copy of the previous reading is lost; no sync is blocked\n' \
           "$slug" "$id" >&2

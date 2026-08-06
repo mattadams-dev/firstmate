@@ -85,8 +85,17 @@ Each fork produces one line naming both directions, because "behind 20, ahead 6,
 diverged" is actionable where a single number is not:
 
 ```
-FORK_FRESHNESS: acme/widget status=diverged behind=20 ahead=6 upstream=up/widget compare=main...main action=task fm-sync-acme-widget queued
+FORK_FRESHNESS: acme/widget status=diverged behind=20 ahead=6 upstream=up/widget compare=main...main action=task fm-sync-acme-widget queued FOUND=absent
 ```
+
+`FOUND=` is the state the backlog was in when this episode **started** -
+`absent` or `closed` - and it is labelled rather than phrased because by the time
+the line prints, the sweep has changed that state and confirmed it changed. An
+unlabelled `(the backlog has no such task)` after the word `queued` would be the
+instrument denying what it had just observed. When a brief was filed away the
+same fact rides on the `SUPERSEDED=<file> (<reason>)` clause instead, where the
+present tense is right: that state is why the file was kept, at the moment it was
+kept. A reading carries one form or the other, never both.
 
 A reading that could not be taken says so and carries no counts at all:
 
@@ -190,9 +199,16 @@ what was actually found:
 
 | Post-state | Reading |
 | --- | --- |
-| confirmed open | `action=task <id> queued` |
-| confirmed still closed or absent | `action=task <id> NOT queued: <state found> after <create\|reopen>`, plus `TASK_MANUAL:` on stderr |
-| could not be read | `action=task <id> queue-state unknown after <create\|reopen>`, plus `TASK_UNCONFIRMED:` on stderr |
+| confirmed open | `action=task <id> queued <pre-state>` |
+| confirmed still closed or absent | `action=task <id> NOT queued: <state now> after <create\|reopen> <pre-state>`, plus `TASK_MANUAL:` on stderr |
+| could not be read | `action=task <id> queue-state unknown after <create\|reopen> <pre-state>`, plus `TASK_UNCONFIRMED:` on stderr |
+
+`<pre-state>` is the labelled `FOUND=<absent\|closed>` above, or the
+`SUPERSEDED=<file> (<reason>)` clause when a brief was filed away. The middle row
+is why it is labelled at all rather than merely re-tensed: the state now and the
+state found can be the same words - `NOT queued: the backlog has no such task
+after create FOUND=absent` - and the label is the only thing telling a reader
+which clause is which.
 
 The word `queued` is reachable only from a confirmed reading. Without that, a
 guard that correctly detects a stale state and then fails to act on it is not
@@ -251,7 +267,7 @@ situation leave exactly what one leaves:
 
 | Artifact | What makes two attempts the same | What a repeat does |
 | --- | --- | --- |
-| `data/<id>/brief.md` | the brief's whole content **except the observation timestamp** on its `Taken <when>: **behind N, ahead M - <status>**` line | nothing: the standing brief is left in place, not archived and not rewritten, and the reading carries no `SUPERSEDED=` |
+| `data/<id>/brief.md` | the brief's whole content **except the observation timestamp** on its `Taken <when>: **behind N, ahead M - <status>**` line | nothing: the standing brief is left in place, not archived and not rewritten, and the reading carries the bare `FOUND=` rather than a `SUPERSEDED=` clause |
 | the wake entry | the sync task id, asked of `fm_wake_queued_keys` - a key is listed there exactly while a record for it is queued and unconsumed | nothing: no second entry is appended while the first is still unread |
 | the Bridge ask | the ask title, which names the fork and the upstream it is behind; the current numbers live in the row's body | nothing: no second ask is written while an open row for that fork stands |
 
