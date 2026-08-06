@@ -240,6 +240,49 @@ on stderr naming the reading the body should have carried, and `note` in the
 `MANUAL=` set on the reading. Refresh the body by hand so nobody picks the task
 up and works to a superseded number.
 
+### A retry adds nothing
+
+An undischarged behind fork withholds the completion stamp, so the sweep comes
+back at the retry floor rather than the weekly cadence. That is the point of the
+stamp rule, and it means a condition nobody has resolved is re-swept roughly
+every hour instead of every week. Every artifact is therefore keyed on the
+**condition**, not on the attempt, so a hundred retries over one unresolved
+situation leave exactly what one leaves:
+
+| Artifact | What makes two attempts the same | What a repeat does |
+| --- | --- | --- |
+| `data/<id>/brief.md` | the brief's whole content **except the observation timestamp** on its `Taken <when>: **behind N, ahead M - <status>**` line | nothing: the standing brief is left in place, not archived and not rewritten, and the reading carries no `SUPERSEDED=` |
+| the wake entry | the sync task id, asked of `fm_wake_queued_keys` - a key is listed there exactly while a record for it is queued and unconsumed | nothing: no second entry is appended while the first is still unread |
+| the Bridge ask | the ask title, which names the fork and the upstream it is behind; the current numbers live in the row's body | nothing: no second ask is written while an open row for that fork stands |
+
+The timestamp is excluded from the brief comparison deliberately, and the
+exclusion is load-bearing rather than cosmetic: it is re-read from the clock on
+every attempt, so comparing whole files would find two attempts at an identical
+situation different every single time - a check that can never fire, which is a
+false success wearing the shape of a fix. Everything else in that line - the
+behind count, the ahead count, the status - **is** compared, along with every
+other byte of the procedure, so the question the comparison actually answers is
+"would rewriting this change what it tells a worker to do?"
+
+The identity in each row above is read from a record that already exists: the
+brief's own content, the wake queue, the board. Nothing new is stored to track
+episodes - no marker, no attempt counter - because a marker that can outlive what
+it describes is the failure this instrument has spent four rounds removing.
+
+The Bridge half is worth stating precisely, because the board alone would hide
+it. The fold derives an item's id from its title, so asking the same question
+every hour has always folded to ONE row - the visible board was never the thing
+growing. The append-only ledger under it was, one record per retry, and that
+stream is what every audit reads raw. Skipping the ask is what keeps it flat.
+
+The two idempotence keys are read qualitatively on purpose. A fork that is behind
+by 3 and the same fork behind by 9 an hour later are the same unresolved
+condition, so keying the wake or the board on the exact count would raise a fresh
+one every retry and buy nothing - an upstream that moves is the normal case. The
+brief is the one artifact that does track the numbers, because they are part of
+what it instructs, so a genuinely changed reading still supersedes the old
+instructions and still names the file it kept.
+
 The sweep does not launch the worker by default. The sync pushes a merge commit
 straight to a default branch, which is not something this fleet does without a
 person saying go; the task waits, tracked, until someone does. A home that wants

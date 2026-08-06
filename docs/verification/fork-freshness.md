@@ -108,9 +108,9 @@ function names.
 
 The unmutated suite breaks nothing, per-test and as a whole. The run above was
 taken at 28 tests, before the id-collision regression and the review rounds below
-were added; the suite now runs 59 tests and reports 59 ok, 0 not ok
+were added; the suite now runs 64 tests and reports 64 ok, 0 not ok
 (`bash tests/fm-fork-freshness.test.sh | grep -c '^ok -'` against the count of
-invocations in the file's trailing block - both 59, which is the point: a suite
+invocations in the file's trailing block - both 64, which is the point: a suite
 that halts early would show fewer ok lines than invocations).
 
 What the table establishes:
@@ -355,6 +355,123 @@ construction (`NOTE_MANUAL:`, held by
 does NOT withhold the stamp: a reopen that landed while its body refresh did not
 leaves the task genuinely open and owed, only describing the previous episode's
 reading, so the work is tracked and it is the instruction that is stale.
+
+## Sixth round: what the hourly retry accumulates
+
+Date: 2026-08-05.
+
+The fifth round's stamp rule has a consequence it did not price. Withholding the
+stamp turns an unresolved behind fork from a weekly re-sweep into an hourly one,
+and two of the four undischarged paths rewrote the brief on every attempt - so an
+unattended broken backlog would leave roughly twenty-four near-identical
+`brief.retired-*.md` files a day in a directory teardown never clears, plus a
+wake and a Bridge row per attempt. That degrades exactly what `SUPERSEDED=`
+exists for: one archive per real change keeps the previous episode's reading
+findable, one per attempt buries it.
+
+The ruling was **idempotence, not episode tracking**, and the distinction is the
+whole point. An episode marker would be another artifact that can outlive what it
+describes - the failure family the five rounds above exist to close - and it
+would be chasing the trigger. Idempotence removes the consequence instead. So no
+marker, no attempt counter, no "last undischarged" file was added: each artifact
+is keyed on an identity that already exists in a record somebody else owns.
+
+| Artifact | Identity, and who owns it |
+| --- | --- |
+| the brief | its own content, compared minus the per-attempt observation timestamp |
+| the wake | the sync task id, asked of `fm_wake_queued_keys` - the durable queue is the authority on what is still unconsumed |
+| the Bridge ask | the ask title, read through `bin/fm-bridge-render.sh --state`, the one sanctioned fold over the ledger |
+
+The brief comparison is the part that decides whether the fix is real, and the
+trap in it is worth stating plainly: `write_sync_brief` stamps a fresh
+`Taken <when>` into the brief on every attempt, so a whole-file comparison would
+find two attempts at an identical situation different every single time. That
+would be a check that cannot fire - a no-op wearing the shape of a fix, which is
+the false-success class this branch exists to remove, and worse than leaving the
+accumulation visible. The comparison therefore normalises that one field out and
+compares everything else, including the behind/ahead/status counts on the same
+line. `test_an_unchanged_condition_supersedes_nothing_and_says_so` is what proves
+the skip fires: it asserts no new `brief.retired-*` file and no `SUPERSEDED=` on
+the reading, both of which fail under the whole-file version.
+
+The wake and board identities are read qualitatively - the fork and its
+condition, not the exact behind-count - because an upstream that moves between
+sweeps is the normal case, and keying on the count would raise a fresh one every
+retry and buy nothing. The Bridge ask title was narrowed to
+`<fork> is behind <upstream>` for that reason; the numbers moved to the row's
+body, which is where a reader wants them anyway. The brief is the one artifact
+that does track the counts, because they are part of what it instructs.
+
+Five cases hold it, and the last two are the both-directions half without which
+the first three would pass for an implementation that never archives or raises
+anything:
+
+| Case | Test |
+| --- | --- |
+| three retries over one unresolved condition leave one archived brief, one wake, one open board row | `test_a_repeated_undischarged_sweep_accumulates_nothing` |
+| the archive skip actually fires on an unchanged condition | `test_an_unchanged_condition_supersedes_nothing_and_says_so` |
+| the TASK_UNCONFIRMED path accumulates as little as the TASK_MANUAL one | `test_an_unconfirmable_retry_accumulates_nothing_either` |
+| the TASK_UNKNOWN path keeps touching nothing at all | `test_an_unreadable_liveness_retry_still_touches_nothing` |
+| **both directions**: a genuinely changed reading still supersedes and still raises | `test_a_changed_condition_still_supersedes_and_still_raises` |
+
+The suite's toolbox gained `python3`, without which `bin/fm-bridge-render.sh`
+cannot fold the ledger and the board-idempotence assertions would have passed
+vacuously - the reader would have failed, the sweep would have raised a row every
+time, and the count would have been read as zero rather than as unmeasured. The
+board is asserted through that reader rather than by parsing the ledger, because
+a test with its own parser is a second opinion about the same record and can
+agree with a broken fold.
+
+### The finding's board claim, corrected by measurement
+
+The finding reported "one Bridge row per retry". Measured against the installed
+reader, that is not what repetition costs. The fold derives an item's id from its
+title, so three asks under one title produce three ledger records and **one**
+row:
+
+```
+$ for i in 1 2 3; do bin/fm-bridge.sh ask --project widget \
+    --title "acme/widget is behind upstream/widget" --body "reading $i" \
+    --answer "sync now" --answer hold --quiet; done
+$ wc -l < <home>/data/bridge/ledger.jsonl
+3
+$ bin/fm-bridge-render.sh --state | jq -r '.asks[] as $k | .items[$k] | "\(.ref)\t\(.title)"'
+W1	acme/widget is behind upstream/widget
+```
+
+So the visible board was never the thing growing once the title stopped carrying
+the moving behind-count; the append-only ledger under it was, and that stream is
+what every audit reads raw. The assertion is therefore on `.counts.records` from
+the same fold - the raw-stream-against-folded-state comparison the renderer
+publishes `counts` for - and not on the row count, which would have passed
+whether or not the sweep deduped. That is exactly what mutation M3 below shows.
+
+### Mutations, run against this tree
+
+Same method as the rounds above: apply one mutant to `bin/fm-fork-freshness.sh`,
+run the whole suite, record the line that halted it verbatim. The suite is 64 ok
+/ 0 not ok unmutated.
+
+| Mutant | Captured failure |
+| --- | --- |
+| M1: brief compared whole-file, timestamp included - the check that cannot fire | `not ok - three undischarged sweeps left 3 archived brief(s); one changed reading supersedes once, and the retries after it must archive nothing` |
+| M2: wake dedupe removed, every retry appends | `not ok - three undischarged sweeps queued 4 wake entries for one unconsumed condition` |
+| M3: board dedupe removed, every retry asks | `not ok - three undischarged sweeps appended 4 records to the Bridge ledger; they fold to one row, but the raw stream still grows once per retry` |
+| M4: nothing is ever archived (idempotence swallowing a real episode) | `not ok - the replaced instructions were not named, so the previous episode's reading is undiscoverable (missing: 'SUPERSEDED=brief.retired-')` |
+| M5: ask title keyed on the moving behind-count again | `not ok - three undischarged sweeps left 0 open Bridge rows for one unresolved condition` |
+| M6: the brief skip never fires, every attempt rewrites | `not ok - three undischarged sweeps left 3 archived brief(s); one changed reading supersedes once, and the retries after it must archive nothing` |
+
+M1 is the row that matters most, and it was earned rather than assumed: the first
+version of these tests took its retries at machine speed, so both sweeps fell
+inside the same minute, carried the SAME `Taken` stamp, and M1 passed. A test that
+cannot fail on the mutant it exists to catch is the same vacuous pass this record
+refuses elsewhere, so the suite now advances the clock an hour between retries -
+the spacing the retry floor actually produces - and M1 fails as it should.
+
+M5 is the anti-cry-wolf direction: it shows the identity has to be qualitative.
+Keyed on the exact count, a moving upstream makes every retry a new condition,
+so the dedupe never fires and the row the assertion looks for is never the one
+that stands.
 
 ## What the installed task CLI actually does
 

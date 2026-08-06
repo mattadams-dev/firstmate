@@ -62,7 +62,7 @@ TOOLBOX="$TMP_ROOT/toolbox"
 mkdir -p "$TOOLBOX"
 for tool in bash sh git jq date tr cut sed awk cat mkdir rm rmdir sort grep head tail \
   mktemp uname stat ps kill sleep ln cp mv chmod chgrp basename dirname touch \
-  timeout find wc readlink id env expr od shasum sha256sum flock getconf; do
+  timeout find wc readlink id env expr od shasum sha256sum flock getconf python3; do
   real=$(command -v "$tool" 2>/dev/null) || continue
   ln -sf "$real" "$TOOLBOX/$tool"
 done
@@ -242,6 +242,45 @@ fi
 exit "${FM_TEST_TASKS_RC:-0}"
 SH
   chmod +x "$1/tasks-axi"
+}
+
+# count_retired <case> <id>: archived briefs standing in that task's directory.
+count_retired() {
+  find "$1/home/data/$2" -name 'brief.retired-*.md' 2>/dev/null | wc -l | tr -d ' '
+}
+
+# count_wakes <case> <key>: queued wake records carrying that key. The queue is
+# <epoch>\t<seq>\t<kind>\t<key>\t<payload>, so the key is field 4.
+count_wakes() {
+  awk -F '\t' -v k="$2" 'NF >= 5 && $4 == k' "$1/home/state/.wake-queue" 2>/dev/null |
+    wc -l | tr -d ' '
+}
+
+# bridge_state <case>: the one sanctioned fold over the ledger. Read through
+# bin/fm-bridge-render.sh --state rather than by parsing the ledger here: a test
+# with its own parser is a second opinion about the same record, and two folds
+# can agree while both are wrong.
+bridge_state() {
+  FM_HOME="$1/home" PATH="$1/bin:$TOOLBOX" \
+    "$ROOT/bin/fm-bridge-render.sh" --state 2>/dev/null
+}
+
+# count_open_asks <case> <title>: open Bridge rows under that exact title.
+count_open_asks() {
+  bridge_state "$1" | jq --arg t "$2" \
+    '[.asks[] as $k | .items[$k].title | select(. == $t)] | length'
+}
+
+# count_bridge_records <case>: records the ledger actually holds, as the fold
+# counts them.
+#
+# The row count alone cannot see a repeated ask: the fold derives an item's id
+# from its title, so asking the same question ten times folds to ONE row while
+# appending ten records to an append-only stream everyone audits. Counting rows
+# would pass whether or not the sweep deduped. This is the raw-stream-against-
+# folded-state comparison the renderer publishes `counts` for.
+count_bridge_records() {
+  bridge_state "$1" | jq '.counts.records'
 }
 
 # close_task <case> <id>: the backlog now reports that task done, which is what
@@ -1305,6 +1344,166 @@ test_backlog_failure_is_reported_not_swallowed() {
   pass "fm-fork-freshness: a backlog write that fails is reported, not swallowed"
 }
 
+# A retry an hour later, which is what the retry floor actually produces. The
+# clock is advanced explicitly rather than left to run at machine speed: the
+# brief stamps a fresh observation time on every attempt, so two sweeps inside
+# one minute would carry the SAME timestamp and every accumulation test below
+# would pass whether or not the comparison excludes it. Modelling the real
+# spacing is what makes these tests able to fail.
+retry_sweep() {  # <case> <hours-from-base> [args...]
+  local dir=$1 hours=$2
+  shift 2
+  FM_FORK_FRESHNESS_NOW=$((1800000000 + hours * 3600)) run_sweep "$dir" "$@"
+}
+
+test_a_repeated_undischarged_sweep_accumulates_nothing() {
+  local dir out rc=0 asks
+  dir=$(new_case)
+  one_fork "$dir" behind 0 3
+  retry_sweep "$dir" 0 sweep --owner acme >/dev/null || true
+  assert_task_state "$dir" fm-sync-acme-widget queued \
+    "this case starts from a real first episode, so that must have landed"
+
+  # The backlog is pruned and its writes now fail persistently - an unwritable
+  # store, a full disk, a home since rebuilt - and the fork moves once. Every
+  # sweep from here reads behind, finds no task, fails to create one, and comes
+  # back at the retry floor rather than the weekly cadence, because withholding
+  # the completion stamp is what the previous round made it do.
+  #
+  # So the retry is the common case, and the question is what a hundred of them
+  # leave behind. One changed reading may supersede the standing brief once; the
+  # attempts after it must add nothing at all, or an unattended broken backlog
+  # buries the very record SUPERSEDED= exists to keep findable.
+  drop_task "$dir" fm-sync-acme-widget
+  compare_fixture "$dir" upstream/widget main acme main behind 0 9 >/dev/null
+  FM_TEST_TASKS_RC=1 retry_sweep "$dir" 1 sweep --owner acme >/dev/null || true
+  FM_TEST_TASKS_RC=1 retry_sweep "$dir" 2 sweep --owner acme >/dev/null || true
+  out=$(FM_TEST_TASKS_RC=1 retry_sweep "$dir" 3 sweep --owner acme) || rc=$?
+
+  expect_code 3 "$rc" "the fork is behind on every one of these sweeps"
+  assert_contains "$out" "NOT queued" \
+    "this case is only meaningful while the sweeps really do stay undischarged"
+  assert_task_state "$dir" fm-sync-acme-widget - \
+    "this case is only meaningful while the backlog write keeps failing"
+
+  [ "$(count_retired "$dir" fm-sync-acme-widget)" = 1 ] ||
+    fail "three undischarged sweeps left $(count_retired "$dir" fm-sync-acme-widget) archived brief(s); one changed reading supersedes once, and the retries after it must archive nothing"
+  [ "$(count_wakes "$dir" fm-sync-acme-widget)" = 1 ] ||
+    fail "three undischarged sweeps queued $(count_wakes "$dir" fm-sync-acme-widget) wake entries for one unconsumed condition"
+  asks=$(count_open_asks "$dir" "acme/widget is behind upstream/widget")
+  [ "$asks" = 1 ] ||
+    fail "three undischarged sweeps left $asks open Bridge rows for one unresolved condition"
+  [ "$(count_bridge_records "$dir")" = 1 ] ||
+    fail "three undischarged sweeps appended $(count_bridge_records "$dir") records to the Bridge ledger; they fold to one row, but the raw stream still grows once per retry"
+  pass "fm-fork-freshness: a repeated undischarged sweep adds nothing to what the first one raised"
+}
+
+test_an_unchanged_condition_supersedes_nothing_and_says_so() {
+  local dir out rc=0
+  dir=$(new_case)
+  one_fork "$dir" behind 0 3
+  retry_sweep "$dir" 0 sweep --owner acme >/dev/null || true
+  drop_task "$dir" fm-sync-acme-widget
+
+  # The archive skip has to be PROVEN to fire, because the shape that fails
+  # silently here is the dangerous one: write_sync_brief stamps a fresh
+  # observation time into the brief on every attempt, so a whole-file comparison
+  # would find these two runs different and skip nothing, while still looking
+  # exactly like a working check. The retry is therefore taken an hour later,
+  # with a genuinely different timestamp and nothing else changed, which is the
+  # only spacing at which this test can fail.
+  out=$(FM_TEST_TASKS_RC=1 retry_sweep "$dir" 1 sweep --owner acme) || rc=$?
+
+  expect_code 3 "$rc" "the fork is still behind"
+  [ "$(count_retired "$dir" fm-sync-acme-widget)" = 0 ] ||
+    fail "a re-sweep of an unchanged condition archived a brief that superseded nothing - the comparison is not excluding the per-attempt timestamp"
+  assert_not_contains "$out" "SUPERSEDED=" \
+    "the reading claimed it superseded a brief while leaving that brief exactly where it was"
+  assert_grep "behind 3, ahead 0" "$dir/home/data/fm-sync-acme-widget/brief.md" \
+    "the standing brief must still carry the reading it was written for"
+  pass "fm-fork-freshness: an unchanged condition supersedes nothing and claims nothing"
+}
+
+test_a_changed_condition_still_supersedes_and_still_raises() {
+  local dir out rc=0
+  dir=$(new_case)
+  one_fork "$dir" behind 0 3
+  retry_sweep "$dir" 0 sweep --owner acme >/dev/null || true
+  close_task "$dir" fm-sync-acme-widget
+
+  # The other direction, and without it the idempotence tests above would all
+  # pass for an implementation that never archives and never raises anything.
+  # Upstream moved, so the standing instructions now name the wrong reading and a
+  # real new episode is starting: the brief must be filed away under its stamped
+  # name and the reading must say which file it kept.
+  compare_fixture "$dir" upstream/widget main acme main behind 0 41 >/dev/null
+  out=$(retry_sweep "$dir" 1 sweep --owner acme) || rc=$?
+
+  expect_code 3 "$rc" "the fork is behind by more than it was"
+  assert_contains "$out" "SUPERSEDED=brief.retired-" \
+    "a genuinely changed reading must still name the brief it filed away"
+  [ "$(count_retired "$dir" fm-sync-acme-widget)" = 1 ] ||
+    fail "a changed reading archived $(count_retired "$dir" fm-sync-acme-widget) briefs; the idempotence must not swallow a real new episode"
+  assert_grep "behind 41, ahead 0" "$dir/home/data/fm-sync-acme-widget/brief.md" \
+    "the standing brief still carries the superseded reading rather than the new one"
+  assert_task_state "$dir" fm-sync-acme-widget queued \
+    "the new episode's task was never actually reopened"
+  pass "fm-fork-freshness: a changed condition still supersedes its brief and still raises the work"
+}
+
+test_an_unconfirmable_retry_accumulates_nothing_either() {
+  local dir asks
+  dir=$(new_case)
+  one_fork "$dir" behind 0 3
+  retry_sweep "$dir" 0 sweep --owner acme >/dev/null || true
+  drop_task "$dir" fm-sync-acme-widget
+
+  # The other undischarged path that rewrites the brief: the attempt runs and its
+  # post-state cannot be read back, so the sweep reports neither success nor
+  # failure and comes back at the retry floor exactly as the confirmed-failure
+  # path does. It must accumulate exactly as little.
+  FM_TEST_TASKS_SHOW_FAIL_FROM=2 retry_sweep "$dir" 1 sweep --owner acme >/dev/null || true
+  rm -f "$dir/tasks.store.shows"
+  FM_TEST_TASKS_SHOW_FAIL_FROM=2 retry_sweep "$dir" 2 sweep --owner acme >/dev/null || true
+
+  [ "$(count_retired "$dir" fm-sync-acme-widget)" = 0 ] ||
+    fail "unconfirmable retries left $(count_retired "$dir" fm-sync-acme-widget) archived brief(s) over one unchanged condition"
+  [ "$(count_wakes "$dir" fm-sync-acme-widget)" = 1 ] ||
+    fail "unconfirmable retries queued $(count_wakes "$dir" fm-sync-acme-widget) wake entries for one unconsumed condition"
+  asks=$(count_open_asks "$dir" "acme/widget is behind upstream/widget")
+  [ "$asks" = 1 ] ||
+    fail "unconfirmable retries left $asks open Bridge rows for one unresolved condition"
+  [ "$(count_bridge_records "$dir")" = 1 ] ||
+    fail "unconfirmable retries appended $(count_bridge_records "$dir") records to the Bridge ledger over one unresolved condition"
+  pass "fm-fork-freshness: an unconfirmable retry accumulates no more than a confirmed-failed one"
+}
+
+test_an_unreadable_liveness_retry_still_touches_nothing() {
+  local dir asks
+  dir=$(new_case)
+  one_fork "$dir" behind 0 3
+  retry_sweep "$dir" 0 sweep --owner acme >/dev/null || true
+
+  # The third undischarged path returns before it reaches any artifact at all,
+  # and that must stay true rather than becoming true by accident: with no task
+  # system to ask, repeated sweeps may not archive, rewrite, re-wake or re-raise
+  # anything, because they cannot tell an open sync task from one that closed.
+  rm -f "$dir/bin/tasks-axi"
+  retry_sweep "$dir" 1 sweep --owner acme >/dev/null || true
+  retry_sweep "$dir" 2 sweep --owner acme >/dev/null || true
+
+  [ "$(count_retired "$dir" fm-sync-acme-widget)" = 0 ] ||
+    fail "a sweep that could not read liveness archived a brief anyway"
+  [ "$(count_wakes "$dir" fm-sync-acme-widget)" = 1 ] ||
+    fail "a sweep that could not read liveness queued $(count_wakes "$dir" fm-sync-acme-widget) wake entries"
+  asks=$(count_open_asks "$dir" "acme/widget is behind upstream/widget")
+  [ "$asks" = 1 ] ||
+    fail "a sweep that could not read liveness left $asks open Bridge rows"
+  [ "$(count_bridge_records "$dir")" = 1 ] ||
+    fail "a sweep that could not read liveness appended $(count_bridge_records "$dir") records to the Bridge ledger"
+  pass "fm-fork-freshness: an unreadable liveness reading keeps touching nothing on every retry"
+}
+
 test_a_stale_task_body_is_reported_not_just_marked() {
   local dir out stderr rc=0
   dir=$(new_case)
@@ -1723,6 +1922,11 @@ test_sync_brief_never_carries_a_remote_credential
 test_wake_failure_is_reported_not_swallowed
 test_bridge_failure_is_reported_not_swallowed
 test_backlog_failure_is_reported_not_swallowed
+test_a_repeated_undischarged_sweep_accumulates_nothing
+test_an_unchanged_condition_supersedes_nothing_and_says_so
+test_a_changed_condition_still_supersedes_and_still_raises
+test_an_unconfirmable_retry_accumulates_nothing_either
+test_an_unreadable_liveness_retry_still_touches_nothing
 test_a_stale_task_body_is_reported_not_just_marked
 test_if_due_is_silent_inside_the_interval
 test_if_due_runs_once_the_interval_elapsed

@@ -75,6 +75,17 @@
 # spent: it is kept as data/<id>/brief.retired-<stamp>.md - never deleted - and
 # named SUPERSEDED=<file> on the reading.
 #
+# An undischarged behind fork brings the sweep back at the retry floor rather
+# than the weekly cadence, so every artifact is keyed on the CONDITION rather
+# than on the attempt and a retry adds nothing: a standing brief that would say
+# the same thing is left in place (compared over its whole content except the
+# per-attempt observation timestamp, so the check can actually fire), the wake is
+# keyed on the sync task id and skipped while one is still queued for it, and the
+# Bridge ask is skipped while an open row for that fork already stands. The
+# identities all come from records that already exist - no episode marker, no
+# attempt counter - because a new marker class is one more thing that can go
+# stale, which is the failure family this instrument exists to close.
+#
 # An absent task is created and a closed one is REOPENED, because `tasks-axi add`
 # is create-only: over an existing id it returns 0 having transitioned nothing.
 # Whichever primitive ran, the post-state is read back and the reading is keyed
@@ -466,18 +477,65 @@ task_liveness() {
   esac
 }
 
+# bridge_open_ask <title>: is an OPEN ask already on the board under that title?
+#
+# Read through bin/fm-bridge-render.sh --state, which is the ONE sanctioned fold
+# over the ledger (AGENTS.md, docs/bridge.md) - a second parser here would be a
+# second opinion about the same record, which is the class of thing that can
+# agree with the board while both are wrong. `.asks` is exactly the needs-captain
+# queue, so a title found there is a row nobody has answered yet.
+#
+# Non-zero also means "could not be determined" - no reader, no jq, an
+# unreadable ledger - and the caller raises the ask in that case. A duplicate row
+# is a cost the captain can see and dismiss; a row that was never raised because
+# a reader failed is the silence this whole instrument exists to prevent.
+bridge_open_ask() {
+  local title=$1 state
+  [ -x "$SCRIPT_DIR/fm-bridge-render.sh" ] || return 1
+  command -v jq >/dev/null 2>&1 || return 1
+  state=$("$SCRIPT_DIR/fm-bridge-render.sh" --state 2>/dev/null) || return 1
+  printf '%s' "$state" |
+    jq -e --arg t "$title" '[.asks[] as $k | .items[$k].title] | index($t) != null' \
+      >/dev/null 2>&1
+}
+
+# bridge_ask <slug> <title> <body>: put the condition to the captain ONCE.
+#
+# The title carries the identity - this fork, behind this upstream - and the body
+# carries the current numbers, so a retry over the same unresolved condition
+# recognises its own row instead of stacking another beside it. Keying the
+# identity on the exact behind-count would buy nothing: upstream moving between
+# sweeps is the normal case, so every retry would look like a new condition.
 bridge_ask() {
   local slug=$1 title=$2 body=$3
+  ! bridge_open_ask "$title" || return 0
   [ -x "$SCRIPT_DIR/fm-bridge.sh" ] || return 1
   "$SCRIPT_DIR/fm-bridge.sh" ask --project "${slug##*/}" --title "$title" \
     --body "$body" --answer "sync now" --answer "hold" --quiet >/dev/null 2>&1
 }
 
+# queue_wake <key> <payload>: raise the notification ONCE per unconsumed key.
+#
+# The key was the constant literal `fork-freshness` for every fork and every
+# retry, which made it useless as an identity. It is the sync task id now - one
+# fork, one condition - and fm_wake_queued_keys is asked whether a record for it
+# is still queued and unconsumed. That queue is the authority on the question
+# (bin/fm-wake-lib.sh), so this needs no marker of its own: asking the owner of
+# the record beats storing a second copy of the answer, which is the failure
+# family this instrument keeps closing.
+#
+# A queue that cannot be read appends anyway, for the same reason the board does:
+# a duplicate wake is visible, a missing one is not.
 queue_wake() {
-  local payload=$1
+  local key=$1 payload=$2 queued
   # shellcheck source=bin/fm-wake-lib.sh disable=SC1091
   . "$SCRIPT_DIR/fm-wake-lib.sh" || return 1
-  fm_wake_append check fork-freshness "$payload" >/dev/null 2>&1
+  if queued=$(fm_wake_queued_keys check 2>/dev/null); then
+    case $'\n'"$queued"$'\n' in
+      *$'\n'"$key"$'\n'*) return 0 ;;
+    esac
+  fi
+  fm_wake_append check "$key" "$payload" >/dev/null 2>&1
 }
 
 dispatch_harness() {
@@ -518,6 +576,19 @@ archive_brief() {
   printf '%s\n' "$name"
 }
 
+# brief_condition <path>: the brief's condition-bearing content - every byte of
+# it EXCEPT the observation timestamp on its "Taken <when>: **behind ...**" line.
+#
+# That one field is a fresh reading of the clock on every attempt, so comparing
+# whole files would find two retries of an identical situation different every
+# single time: a check that cannot fire, wearing the shape of a fix. The rest of
+# that line - behind, ahead, status - is exactly the condition and IS compared,
+# as is every other byte of the procedure. So this answers "would rewriting the
+# brief change what it tells a worker to do?" and nothing wider.
+brief_condition() {
+  LC_ALL=C sed 's/^Taken .*: \*\*/Taken: **/' "$1" 2>/dev/null
+}
+
 # manual_marker <set>: the accumulated "+step" set as the reading's suffix, or
 # nothing when every step landed. One formatter, so every exit from
 # ensure_sync_task carries the marker set in the same shape - including the two
@@ -526,7 +597,7 @@ manual_marker() {
   [ -z "$1" ] || printf ' MANUAL=%s' "${1#+}"
 }
 
-# queued_reading <id> <manual> <archived> [<why the worker was not launched>]:
+# queued_reading <id> <manual> <episode> [<why the worker was not launched>]:
 # the dispatch tail's one reading shape. Five copies differing only in an
 # optional parenthetical is five places a later edit can update four of.
 queued_reading() {
@@ -598,7 +669,7 @@ brief_failed() {
 # there buys a full cadence of silence over it.
 ensure_sync_task() {
   local slug=$1 up=$2 fork_branch=$3 up_branch=$4 behind=$5 ahead=$6 status=$7
-  local id brief taken harness clone manual="" name archived=""
+  local id brief taken harness clone manual="" name episode=""
   local standing need rc=0 confirmed title note
   id=$(sync_task_id "$slug")
   brief="$DATA/$id/brief.md"
@@ -627,29 +698,33 @@ ensure_sync_task() {
     *) need=reopen ;;
   esac
 
+  # Why this episode is being started at all - the backlog reports the task done,
+  # or has none - stated on every reading that starts one. It used to ride along
+  # inside SUPERSEDED=, which conflated two different facts: which file was kept,
+  # and what the backlog said. A re-sweep of an unchanged condition keeps no file
+  # and must still name what it acted on, so the two are separate now and
+  # SUPERSEDED= means only "here is the copy I kept".
+  episode=" ($(standing_phrase "$standing"))"
+
   taken=$(date -u -d "@$(now_epoch)" '+%Y-%m-%d %H:%M UTC' 2>/dev/null ||
     date -u '+%Y-%m-%d %H:%M UTC')
   title="Sync $slug from $up"
   note="Reading $taken: behind $behind, ahead $ahead - $status. Instructions: data/$id/brief.md. Sync pushes a true merge commit directly to $fork_branch, never through a PR."
 
-  # A brief from a closed episode is superseded, not spent: it is kept under a
-  # stamped name rather than overwritten. Failing to keep it costs that copy and
-  # blocks no sync, so it is reported rather than fatal.
+  # THE RETRY IS THE COMMON CASE NOW, SO EVERY STEP BELOW IS IDEMPOTENT
   #
-  # How much else survives depends on the path, and the message does not promise
-  # more than the path delivers: reopening also archives the superseded reading
-  # into the task's own body (backlog_reopen), while creating a task the backlog
-  # no longer has leaves no previous body to archive, so that copy is simply lost.
-  if [ -f "$brief" ]; then
-    if name=$(archive_brief "$id"); then
-      archived=" SUPERSEDED=$name ($(standing_phrase "$standing"))"
-    else
-      printf 'ARCHIVE_MANUAL: %s could not move its superseded data/%s/brief.md aside, so this episode overwrites it and that copy of the previous reading is lost; no sync is blocked\n' \
-        "$slug" "$id" >&2
-      manual="$manual+brief"
-    fi
-  fi
-
+  # A behind fork whose task could not be made to exist withholds the completion
+  # stamp, so the sweep comes back at the retry floor rather than the weekly
+  # cadence - which turns "once a week" into "once an hour" for exactly the runs
+  # that keep failing. Each artifact below is therefore keyed on the CONDITION
+  # rather than on the attempt, and the identity used is one that already exists
+  # in the record: the brief's own content, the wake queue's key, the board's ask
+  # title. No episode marker, no attempt counter, no "last undischarged" file -
+  # a new marker class would be one more thing that can go stale, which is the
+  # family of failure this instrument has spent four rounds closing. Idempotence
+  # removes the consequence instead of chasing the trigger.
+  #
+  # The brief is rendered FIRST so it can be compared before anything is moved.
   trap brief_tmp_cleanup EXIT
   trap 'exit 1' HUP INT TERM
   if ! mkdir -p "$DATA/$id" 2>/dev/null ||
@@ -659,26 +734,56 @@ ensure_sync_task() {
     brief_tmp_cleanup
     brief_failed "$slug" "$id" written
     printf 'task %s NOT queued: instructions could not be written%s%s\n' \
-      "$id" "$(manual_marker "$manual")" "$archived"
+      "$id" "$(manual_marker "$manual")" "$episode"
     return 1
   fi
-  # The move is checked by its result, not only by its status: mv onto an
-  # existing directory succeeds by moving the file INSIDE it, which would leave
-  # the brief somewhere nobody looks while the reading says queued.
-  if ! mv -f "$BRIEF_TMP" "$brief" 2>/dev/null || [ ! -f "$brief" ]; then
-    brief_tmp_cleanup
-    brief_failed "$slug" "$id" placed
-    printf 'task %s NOT queued: instructions could not be placed%s%s\n' \
-      "$id" "$(manual_marker "$manual")" "$archived"
-    return 1
-  fi
-  BRIEF_TMP=
 
-  queue_wake "fork-freshness: $slug is behind $up by $behind (ahead $ahead) - sync task $id" || {
+  # A standing brief that would tell a worker exactly what the new one tells them
+  # is not superseded by it, so it is left alone: no archive, no rewrite, and no
+  # SUPERSEDED= on the reading, because nothing was superseded and the reading may
+  # not say otherwise. One archived copy per real change, not one per attempt -
+  # which is what keeps the previous episode's reading findable rather than buried
+  # under near-identical retries in a directory teardown never clears.
+  #
+  # A brief from a genuinely different reading is superseded, not spent: it is
+  # kept under a stamped name rather than overwritten. Failing to keep it costs
+  # that copy and blocks no sync, so it is reported rather than fatal.
+  #
+  # How much else survives depends on the path, and the message does not promise
+  # more than the path delivers: reopening also archives the superseded reading
+  # into the task's own body (backlog_reopen), while creating a task the backlog
+  # no longer has leaves no previous body to archive, so that copy is simply lost.
+  if [ -f "$brief" ] &&
+    [ "$(brief_condition "$brief")" = "$(brief_condition "$BRIEF_TMP")" ]; then
+    brief_tmp_cleanup
+  else
+    if [ -f "$brief" ]; then
+      if name=$(archive_brief "$id"); then
+        episode=" SUPERSEDED=$name$episode"
+      else
+        printf 'ARCHIVE_MANUAL: %s could not move its superseded data/%s/brief.md aside, so this episode overwrites it and that copy of the previous reading is lost; no sync is blocked\n' \
+          "$slug" "$id" >&2
+        manual="$manual+brief"
+      fi
+    fi
+    # The move is checked by its result, not only by its status: mv onto an
+    # existing directory succeeds by moving the file INSIDE it, which would leave
+    # the brief somewhere nobody looks while the reading says queued.
+    if ! mv -f "$BRIEF_TMP" "$brief" 2>/dev/null || [ ! -f "$brief" ]; then
+      brief_tmp_cleanup
+      brief_failed "$slug" "$id" placed
+      printf 'task %s NOT queued: instructions could not be placed%s%s\n' \
+        "$id" "$(manual_marker "$manual")" "$episode"
+      return 1
+    fi
+    BRIEF_TMP=
+  fi
+
+  queue_wake "$id" "fork-freshness: $slug is behind $up by $behind (ahead $ahead) - sync task $id" || {
     printf 'WAKE_MANUAL: %s raised no wake entry; carry sync task %s forward by hand\n' "$slug" "$id" >&2
     manual="$manual+wake"
   }
-  bridge_ask "$slug" "$slug is behind $up by $behind commits" \
+  bridge_ask "$slug" "$slug is behind $up" \
     "Reading $taken: behind $behind, ahead $ahead - $status. Sync task $id carries the procedure; it pushes a merge commit straight to $fork_branch, so it waits for a go." || {
     printf 'BRIDGE_MANUAL: %s has no Bridge row; put sync task %s to the captain by hand\n' "$slug" "$id" >&2
     manual="$manual+bridge"
@@ -718,36 +823,36 @@ ensure_sync_task() {
       printf 'TASK_UNCONFIRMED: %s is behind and the %s of sync task %s could not be confirmed afterwards (%s); check the backlog by hand rather than reading this as queued\n' \
         "$slug" "$need" "$id" "${confirmed#unknown }" >&2
       printf 'task %s queue-state unknown after %s (%s)%s%s\n' \
-        "$id" "$need" "${confirmed#unknown }" "$manual" "$archived"
+        "$id" "$need" "${confirmed#unknown }" "$manual" "$episode"
       return 1
       ;;
     *)
       printf 'TASK_MANUAL: %s is behind but sync task %s did not %s - %s; queue it by hand\n' \
         "$slug" "$id" "$need" "$(standing_phrase "$confirmed")" >&2
       printf 'task %s NOT queued: %s after %s%s%s\n' \
-        "$id" "$(standing_phrase "$confirmed")" "$need" "$manual" "$archived"
+        "$id" "$(standing_phrase "$confirmed")" "$need" "$manual" "$episode"
       return 1
       ;;
   esac
 
   if [ "$DISPATCH" != 1 ]; then
-    queued_reading "$id" "$manual" "$archived"
+    queued_reading "$id" "$manual" "$episode"
     return 0
   fi
   if ! clone=$(clone_dir_for "$slug"); then
-    queued_reading "$id" "$manual" "$archived" \
+    queued_reading "$id" "$manual" "$episode" \
       "no local copy of ${slug##*/} in this home"
     return 0
   fi
   harness=$(dispatch_harness)
   if [ -z "$harness" ]; then
-    queued_reading "$id" "$manual" "$archived" "no fork-sync-harness configured"
+    queued_reading "$id" "$manual" "$episode" "no fork-sync-harness configured"
     return 0
   fi
   if "$SCRIPT_DIR/fm-spawn.sh" "$id" "$clone" --harness "$harness" >/dev/null 2>&1; then
-    printf 'task %s dispatched%s%s\n' "$id" "$manual" "$archived"
+    printf 'task %s dispatched%s%s\n' "$id" "$manual" "$episode"
   else
-    queued_reading "$id" "$manual" "$archived" "worker could not be launched"
+    queued_reading "$id" "$manual" "$episode" "worker could not be launched"
   fi
 }
 
