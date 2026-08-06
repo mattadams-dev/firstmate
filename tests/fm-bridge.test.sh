@@ -66,6 +66,20 @@ new_home() {  # -> a fresh isolated FM_HOME
 
 ledger_of() { printf '%s/data/bridge/ledger.jsonl' "$1"; }
 
+# THE TWO PAGES, AND WHICH ONE A GUARD BELONGS ON.
+#
+# v2 split one page into two: the BOARD is the captain's action surface - open
+# asks, the co-captain line, lanes, admission, and nothing else - and HISTORY
+# holds everything the board excludes: resolved and landed items, closed
+# criticals, events, tallies, the glossary, unrecognized records.
+#
+# A guard about something the captain acts on belongs on the board; a guard
+# about something they consult belongs on history. Putting a history assertion
+# on the board would pin exactly the length the split exists to remove, so the
+# choice is not cosmetic - it is the rule being enforced.
+board_of() { FM_HOME=$1 "$RENDER" --html; }
+history_of() { FM_HOME=$1 "$RENDER" --history; }
+
 # Whether the board file was WRITTEN, which is the question the hosted page
 # answers to - Lavish reloads on the write, not on a diff. Portable across the
 # two stat dialects rather than assuming GNU.
@@ -167,11 +181,14 @@ pass "unknown state and severity are preserved verbatim and flagged, never defau
 unzoned=$(state_query "$HOME3" 'd["zones"]["unzoned"]')
 [ "$unzoned" = "['future-kind']" ] \
   || fail "unrecognized values: an unknown kind was filed somewhere convenient instead of shown ($unzoned)"
-case "$(FM_HOME=$HOME3 "$RENDER" --html)" in
+# Shown, on the page that holds everything the captain consults rather than
+# acts on. Absent from BOTH would be the silent masking this guard exists for;
+# a strange record is not an ask, so it does not belong above the decisions.
+case "$(history_of "$HOME3")" in
   *"Unrecognized records"*) : ;;
-  *) fail "unrecognized values: the board hid an unknown-kind record" ;;
+  *) fail "unrecognized values: an unknown-kind record is on neither page" ;;
 esac
-pass "an unknown kind is shown on the board rather than filed into a known zone"
+pass "an unknown kind is shown rather than filed into a known zone"
 
 # An unrecognized state must not be counted as though it were understood.
 unrec=$(state_query "$HOME3" 'd["summary"]["unrecognized"]')
@@ -230,22 +247,26 @@ sys.exit(0)
 PY
 pass "every folded ask reaches the board with an anchor and a title"
 
-# A task-kind ask renders as a table ROW, not a card, so it needs its own guard:
-# the asks index links to it, and an index entry that lands nowhere - or lands
-# somewhere with no way to answer - is worse than one that was never listed.
+# A PR waiting on a merge decision is an ask like any other, and v2 gives it
+# the SAME card as every other ask rather than a row in a different zone with
+# its own affordances. That is what makes this guard cheap to keep: there is
+# one card shape, so an ask that cannot be answered where it lands is a defect
+# in one place rather than in whichever zone happened to render it.
 python3 - "$TMP_ROOT/mode-board.html" <<'ROWCHECK' \
-  || fail "mode drift: a task-kind ask is listed but not answerable where it lands"
-import sys
+  || fail "mode drift: a task-kind ask is shown but not answerable where it lands"
+import re, sys
 html = open(sys.argv[1]).read()
 if 'id="item-t-pr"' not in html:
-    sys.exit("the asks index links to #item-t-pr but the fleet strip has no such anchor")
-row = html.split('id="item-t-pr"', 1)[1].split("</tr>", 1)[0]
+    sys.exit("the board has no anchor for the PR ask t-pr")
+card = html.split('id="item-t-pr"', 1)[1].split('<div class="ask" id=', 1)[0]
 for form in ("merge it", "hold"):
-    if form not in row:
-        sys.exit("the PR row offers no way to answer it: %r missing" % form)
+    if form not in card:
+        sys.exit("the PR card offers no way to answer it: %r missing" % form)
+if not re.search(r'<button class="ansbtn"', card):
+    sys.exit("the PR card lists its answers but offers no way to queue one")
 sys.exit(0)
 ROWCHECK
-pass "a PR waiting on a merge decision is anchored and answerable in the fleet strip"
+pass "a PR waiting on a merge decision gets the same answerable card as any ask"
 
 # --- 5. an ask looks like an ask --------------------------------------------
 
@@ -269,20 +290,22 @@ pass "the writer records disposition explicitly in the raw stream"
 asks=$(state_query "$HOME4" 'len(d["asks"])')
 [ "$asks" = 3 ] || fail "asks: expected 3 open asks, got $asks"
 boardhtml=$(cat "$TMP_ROOT/mode-board.html")
-# THE COUNT IS RENDERED CONTENT, in normal flow with the other tallies. That is
-# the only surface on a hosted board a redraw is guaranteed to refresh: the tab
-# title is propagated into the hosting page once, at load (section 29), and
-# unlike anything that travels with the viewport a tally cannot come to cover a
-# row.
+# THE COUNT IS RENDERED CONTENT, in normal flow, on the header's one counts
+# line. That is the only surface on a hosted board a redraw is guaranteed to
+# refresh: the tab title is propagated into the hosting page once, at load
+# (section 29), and unlike anything that travels with the viewport a line of
+# text cannot come to cover a row.
 case "$boardhtml" in
-  *'<b>3</b>waiting on you'*) : ;;
+  *'<b class="you">3</b> waiting on you'*) : ;;
   *) fail "asks: the board's own header does not carry the open-ask count" ;;
 esac
-# It still reaches the index in one click, which is the one thing a bare number
-# would have lost.
+# v2 retired the separate asks index: the cards ARE the list, first on the
+# page, so there is nothing left for the count to jump to. What replaced that
+# affordance is stricter, and section 31 measures it - the first decision is
+# fully visible without scrolling at all.
 case "$boardhtml" in
-  *'class="tally ask" href="#waiting"'*) : ;;
-  *) fail "asks: the count does not jump to the asks index" ;;
+  *'id="waiting"'*) fail "asks: the retired asks index is back, and it duplicates the cards below it" ;;
+  *) : ;;
 esac
 pass "the open-ask count is rendered in the board's own header, in normal flow"
 
@@ -500,16 +523,22 @@ pass "an unchanged ledger leaves the board file untouched, not rewritten with a 
 # a "checked" time nothing advances would be an instrument reporting a liveness
 # it never observed - the exact failure the restamp existed to avoid, arrived at
 # from the other side.
-grep -q 'content as of <span class="clock">2026-07-31T12:00:00Z' "$BOARD" \
-  || fail "tick: the board does not say when its content is from"
+grep -q 'fold <span class="mono">2026-07-31T12:00:00Z' "$BOARD" \
+  || fail "tick: the board does not say which fold it was drawn from"
 grep -q 'checked <span class="clock"' "$BOARD" \
   && fail "tick: the board still claims a checked time nothing advances"
-pass "the board dates its content and claims no supervision liveness of its own"
+# The same time, in the one place the freshness poll can string-match it out of
+# a fetched copy. The poll compares this against the copy on screen, so a page
+# that renders a fold time it does not also publish here could never tell the
+# captain it had gone stale.
+grep -q '<meta name="fm-folded-at" content="2026-07-31T12:00:00Z">' "$BOARD" \
+  || fail "tick: the board does not publish its fold time where the freshness poll reads it"
+pass "the board dates its content, publishes it for the poll, and claims no supervision liveness"
 
 FM_HOME=$HOME11 "$BRIDGE" note -q --project orca --title "a new fact" >/dev/null
 FM_BRIDGE_NOW=2026-07-31T12:06:00Z FM_HOME=$HOME11 "$RENDER" --tick \
   || fail "tick: re-render after a ledger change failed"
-grep -q 'content as of <span class="clock">2026-07-31T12:06:00Z' "$BOARD" \
+grep -q 'fold <span class="mono">2026-07-31T12:06:00Z' "$BOARD" \
   || fail "tick: a changed ledger did not advance the content clock"
 grep -q 'a new fact' "$BOARD" || fail "tick: a changed ledger did not pick up the new record"
 pass "a changed ledger re-renders the body and re-dates the content"
@@ -738,8 +767,8 @@ while [ "$i" -le 18 ]; do
     --ts "2026-07-31T10:$(printf '%02d' "$i"):00Z" >/dev/null
   i=$((i + 1))
 done
-capped=$(FM_HOME=$HOME12 "$RENDER" --html)
-shown=$(printf '%s' "$capped" | grep -c '<li><span class="when">' || true)
+capped=$(history_of "$HOME12")
+shown=$(printf '%s' "$capped" | grep -c 'class="hitem"' || true)
 [ "$shown" = 12 ] || fail "caps: expected 12 events shown, got $shown"
 case "$capped" in
   *"older events. They are not lost"*) : ;;
@@ -751,11 +780,13 @@ case "$capped" in
 esac
 pass "capped zones show an overflow pointer to the full record, never silent truncation"
 
-# Boards carry their check commands.
+# The check commands live with the material they check. They moved to history
+# with the capped zones: a footer of commands is something a reader consults,
+# and every line of it on the board is length above the next decision.
 for probe in "fm-bridge-render.sh --state" "fm-bridge.sh lint" "tail -n 40"; do
   case "$capped" in
     *"$probe"*) : ;;
-    *) fail "checks: the board does not carry '$probe'" ;;
+    *) fail "checks: the page does not carry '$probe'" ;;
   esac
 done
 pass "the board carries the commands that check it against its own source"
@@ -800,7 +831,7 @@ FM_HOME=$HOME14 "$BRIDGE" ask -q --id g1 --project orca --title "an orca ask" \
   --answer "A" >/dev/null
 collided=$(state_query "$HOME14" '[g["collision"] for g in d["glossary"]]')
 [ "$collided" = "[True]" ] || fail "glossary: a cross-project term collision was not detected"
-gloss=$(FM_HOME=$HOME14 "$RENDER" --html)
+gloss=$(history_of "$HOME14")
 case "$gloss" in
   *"Terms that mean different things by project"*) : ;;
   *) fail "glossary: collisions are not defined up front" ;;
@@ -841,9 +872,9 @@ owner=$(state_query "$HOME15" 'd["items"]["for-co"]["owner"]')
 pass "routing sets the owner to the reader the item was addressed to"
 
 # The captain-facing surface must not count it ANYWHERE.
-routed=$(FM_HOME=$HOME15 "$RENDER" --html)
+routed=$(board_of "$HOME15")
 case "$routed" in
-  *'<b>1</b>waiting on you'*) : ;;
+  *'<b class="you">1</b> waiting on you'*) : ;;
   *) fail "routing: the header count counts co-captain items as captain asks" ;;
 esac
 tally=$(state_query "$HOME15" 'd["summary"]["needs-captain"]')
@@ -875,7 +906,7 @@ pass "routing refuses an unknown reader"
 
 # With every ask routed away, the board says so plainly rather than looking
 # like a board that failed to load.
-allclear=$(FM_HOME=$HOME15 "$RENDER" --html)
+allclear=$(board_of "$HOME15")
 case "$allclear" in
   *"Nothing is waiting on you"*) : ;;
   *) fail "routing: with all asks routed away the board does not report a clear queue" ;;
@@ -949,22 +980,29 @@ sys.exit(0)
 LINKCHECK
 pass "every link carries Lavish's pass-through, opens safely, and reads as its own URL"
 
-# --- 16b. the board takes no input, and everything on it can be annotated ---
+# --- 16b. the two input paths, and the one that must never be blocked -------
 #
-# The board's input path is Lavish's annotation layer and its conversation
-# panel. Nothing else. It used to carry a composer of its own - a textarea with
-# copy and clear and no send - which could not reach anybody and was wiped by
-# the next redraw, so a captain who typed a ruling into it believed they had
-# answered and the fleet never heard it.
+# v1 had one input path: annotate a row, send from the conversation panel. It
+# was authored by forbidding every native control, because Lavish skips a
+# control and everything inside it when deciding what can be annotated - so a
+# control was a dead spot on a row the captain had to rule on.
 #
-# That makes two properties guard-class, and they fail in opposite directions:
-#   1. the board must offer NO input affordance of its own, and
-#   2. everything the captain must annotate must actually BE annotatable.
-# Lavish skips native controls and everything inside them when deciding what can
-# be annotated, so the same list settles both: a control on this board is either
-# an input path it does not have, or a dead spot on a row the captain must rule
-# on. Measured, both directions, against real hosting:
-# docs/verification/bridge-hosted-input.md.
+# v2 adds a second path deliberately. Twice in one day a ruling travelled by
+# terminal instead of this board, once because the answer forms could not be
+# selected; answers are now controls the captain clicks, and a per-card Queue
+# button sends the choice. That trades those options' annotatability away on
+# purpose, so the guard is no longer "no controls" - it is:
+#
+#   1. controls exist ONLY where a click is the point - the answers, the Queue
+#      button, the context disclosure, the stale bar's reload,
+#   2. the board still has no free-text input of its own, so the composer that
+#      could not send stays retired, and
+#   3. what a free-text ruling needs in order to identify an ask - the per-item
+#      anchor, the visible ref, the title - stays OUTSIDE every control, so
+#      annotating the card still works for anything the buttons cannot say.
+#
+# Measured against real hosting: docs/verification/bridge-hosted-input.md and
+# docs/verification/bridge-board-v2.md.
 
 python3 - "$TMP_ROOT/links.html" <<'INPUTCHECK' \
   || fail "input path: see the reported element"
@@ -974,18 +1012,27 @@ html = open(sys.argv[1]).read()
 # and a rule or a record that merely mentions a tag name is not one.
 markup = re.sub(r"<(style|script)\b[^>]*>.*?</\1>", "", html, flags=re.S | re.I)
 
-# Lavish's own exclusion list, from its artifact SDK. Anything matching it - or
-# nested inside something matching it - is invisible to annotation.
-NATIVE = ("button", "input", "select", "textarea", "option", "optgroup",
-          "label", "summary")
-
-for tag in NATIVE:
-    for found in re.finditer(r"<%s\b[^>]*>" % tag, markup, re.I):
-        sys.exit("the board renders a native control, which is either an input "
-                 "it cannot send or a spot the captain cannot annotate: %s"
-                 % found.group(0))
+# A FREE-TEXT INPUT IS STILL FORBIDDEN, at any count. The composer's defect was
+# never its styling: it was a box that accepted a ruling it could not deliver,
+# on a page rewritten underneath it.
+for tag in ("input", "textarea", "select", "optgroup", "label"):
+    found = re.search(r"<%s\b[^>]*>" % tag, markup, re.I)
+    if found:
+        sys.exit("the board renders %s, which is either an input it cannot send "
+                 "or a spot the captain cannot annotate: %s"
+                 % (tag, found.group(0)))
 if re.search(r'contenteditable=["\']?(?!false)', markup, re.I):
     sys.exit("the board renders a contenteditable element")
+
+# The controls that ARE allowed, each identified by the class that says what it
+# is for. A button with no recognised role is an affordance nobody accounted
+# for, on a surface where an affordance that cannot deliver is the whole defect.
+ALLOWED = ('class="ansbtn"', 'class="qbtn"', 'id="fm-stale-reload"')
+for found in re.finditer(r"<button\b[^>]*>", markup, re.I):
+    if not any(mark in found.group(0) for mark in ALLOWED):
+        sys.exit("the board renders a button with no accounted-for role, so "
+                 "something on it promises an action nobody has checked: %s"
+                 % found.group(0))
 
 # The composer specifically, by every name it went under.
 for dead in ("queue-text", "queue-copy", "queue-clear", "queued rulings",
@@ -994,13 +1041,11 @@ for dead in ("queue-text", "queue-copy", "queue-clear", "queued rulings",
         sys.exit("the retired ruling composer is still on the board: %r" % dead)
 sys.exit(0)
 INPUTCHECK
-pass "the board renders no control of its own: nothing to type into, nothing that cannot be annotated"
+pass "the board has no free-text input of its own, and every control it renders has a stated role"
 
-# The other half, and the reason the first half is safe: the ask rows still
-# carry what an annotation needs to identify. An annotation arrives as the
-# anchor it was rooted at plus the text it was placed on, so stripping either
-# the per-item anchors or the visible refs would trade one broken input path
-# for another - silently, since the board would still look right.
+# The half that fails silently: a card whose identifying text has drifted inside
+# a control still LOOKS right, and a free-text ruling annotated on it arrives
+# saying nothing about which ask it meant.
 python3 - "$TMP_ROOT/links.html" "$TMP_ROOT/links-state.json" <<'ANCHORCHECK' \
   || fail "annotation anchors: see the reported ask"
 import json, re, sys
@@ -1009,66 +1054,105 @@ doc = json.load(open(sys.argv[2]))
 asks = doc["asks"]
 if not asks:
     sys.exit("no asks in the fixture, so this guard proves nothing")
+if '<button class="ansbtn"' not in html:
+    sys.exit("no answer controls rendered, so this guard proves nothing")
 
-options = re.findall(r'<span class="ans">([^<]*)</span>', html)
-if not options:
-    sys.exit("no answer options rendered, so this guard proves nothing")
-
-def where_it_lands(key):
-    """The ask's OWN card or row, not the whole page.
-
-    An annotation is rooted where it was placed, so what identifies it has to be
-    there. Checking the document would pass a board whose refs live only in the
-    index at the top - which is exactly what an annotation on the card never
-    sees.
-    """
+def card_of(key):
+    """The ask's OWN card, not the whole page. An annotation is rooted where it
+    was placed, so what identifies it has to be there - checking the document
+    would pass a board whose refs live only in a header the card never sees."""
     anchor = 'id="item-%s"' % key
     if anchor not in html:
         return None
     rest = html.split(anchor, 1)[1]
-    return re.split(r'id="item-|</section>|</table>', rest, maxsplit=1)[0]
+    return re.split(r'<div class="ask" id=|</section>', rest, maxsplit=1)[0]
+
+def outside_controls(fragment):
+    """The fragment with every native control, and its contents, removed - which
+    is exactly what Lavish's annotation layer can still see."""
+    return re.sub(r"<(button|summary|select|textarea)\b.*?</\1>", " ",
+                  fragment, flags=re.S | re.I)
 
 for key in asks:
     item = doc["items"][key]
-    landing = where_it_lands(key)
-    if landing is None:
+    card = card_of(key)
+    if card is None:
         sys.exit("ask %s has no per-item anchor, so an annotation on it cannot "
                  "say which ask it meant" % key)
+    annotatable = outside_controls(card)
     label = item["ref"] or item["id"]
-    if item["answers"]:
-        for answer in item["answers"]:
-            wanted = "%s: %s" % (label, answer)
-            if wanted not in landing:
-                sys.exit("ask %s renders an answer that does not name its own "
-                         "ask where the annotation lands: expected %r"
-                         % (key, wanted))
-    if item["ref"] and ('<span class="ref">%s</span>' % item["ref"]) not in landing:
-        sys.exit("ask %s renders no visible ref, so an annotation on it arrives "
-                 "unquotable" % key)
+    if ('<span class="ref">%s</span>' % label) not in annotatable:
+        sys.exit("ask %s renders no visible ref outside its controls, so a "
+                 "free-text ruling on it arrives unquotable" % key)
+    title = item["title"] or item["id"]
+    if title and title not in annotatable:
+        sys.exit("ask %s renders no annotatable title, so there is nothing left "
+                 "on the card to place a free-text ruling on" % key)
+    # And the machine-readable half the Queue button sends, which is what makes
+    # a clicked ruling name its ask without the captain retyping it - and what
+    # makes a second answer to the same ask REPLACE the first rather than queue
+    # beside it.
+    if ('data-ask-ref="%s"' % label) not in card:
+        sys.exit("ask %s carries no queue key, so a queued ruling could not name "
+                 "the ask it answers, or replace its own earlier answer" % key)
 sys.exit(0)
 ANCHORCHECK
-pass "every ask keeps its per-item anchor, its visible ref, and answers that name their own ask"
+pass "every ask keeps its anchor, an annotatable ref and title, and a queue key that names it"
 
-# And the board says where the input actually is, rather than leaving the
-# captain to infer it from the absence of a box.
+# And the board states BOTH paths, and states plainly what neither promises.
 python3 - "$TMP_ROOT/links.html" <<'SIGNPOSTCHECK' \
   || fail "signpost: see the reported gap"
 import sys
-html = open(sys.argv[1]).read()
-if "annotate" not in html.lower():
-    sys.exit("the board never names annotation as the way to rule")
-if "conversation panel" not in html.lower():
-    sys.exit("the board never names where an annotated ruling is sent from")
-if "no input path at all" not in html.lower():
+html = open(sys.argv[1]).read().lower()
+if "queue" not in html:
+    sys.exit("the board never names queueing as the way a clicked answer is sent")
+if "annotate" not in html:
+    sys.exit("the board never names annotation as the way to rule in your own words")
+if "conversation panel" not in html:
+    sys.exit("the board never names where a queued or annotated ruling is sent from")
+if "no input path at all" not in html:
     sys.exit("the board does not say what it is when opened as a plain file, "
              "which is the one case where there is no input path")
-if "not saved anywhere" not in html.lower():
+if "not saved anywhere" not in html:
     sys.exit("the board does not warn that an unqueued annotation is lost on "
              "the next redraw, which is measured behaviour")
 sys.exit(0)
 SIGNPOSTCHECK
-pass "the board states its input path, and states plainly what it does not promise"
+pass "the board states both input paths, and states plainly what it does not promise"
 
+# THE FAILURE THIS SURFACE MUST NOT HAVE: an option that turns green over a
+# ruling that never left the page. Success, failure and "there is no API here"
+# are three outcomes, and collapsing any of them into the reassuring one is the
+# missing-alarm failure wearing a tick.
+python3 - "$TMP_ROOT/links.html" <<'HONESTY' || fail "queueing: see the reported path"
+import re, sys
+html = open(sys.argv[1]).read()
+script = re.findall(r"<script>(.*?)</script>", html, re.S)
+if not script:
+    sys.exit("the board carries no interaction script, so a clicked answer "
+             "cannot be queued at all")
+body = "\n".join(script)
+if "queuePrompt" not in body:
+    sys.exit("the board never calls the queue API, so a clicked answer goes nowhere")
+if "queueKey" not in body:
+    sys.exit("the board queues without a key, so changing your mind would send "
+             "two answers to one ask")
+if "typeof api" not in body:
+    sys.exit("the board calls the queue API without checking it exists, so a "
+             "copy hosted without it would throw instead of saying so")
+# Every place the queued class is applied has to be downstream of an observed
+# verdict. A single unguarded one is the green tick over a dropped ruling.
+for found in re.finditer(r'classList\.add\("queued"\)', body):
+    if 'verdict === "queued"' not in body[:found.start()][-900:]:
+        sys.exit("an answer is marked queued without checking that the queue "
+                 "call actually succeeded")
+for phrase in ("nothing was queued", "nothing was sent"):
+    if phrase not in body:
+        sys.exit("the board has no wording for a queue attempt that did not "
+                 "land, so a failure would look like a success: %r" % phrase)
+sys.exit(0)
+HONESTY
+pass "an answer reads as queued only when the queue call was observed to succeed"
 # --- 17. ledger text cannot break out of the embedded state document -------
 #
 # The board carries the exact state document it drew from inside a
@@ -1383,15 +1467,26 @@ sys.exit(0)
 RAIL
 pass "nothing on the board is out of flow, and no gutter is reserved for chrome that is gone"
 
-# The job the retired gutter counter did is still done by a count in the header
-# that reaches the asks index in one click - the one thing a bare number would
-# have lost, and the reason a count that does not follow the viewport is still
-# enough.
+# The job the retired gutter counter did is done by the header's counts line,
+# and the job the asks index did is done by the cards themselves being first on
+# the page. A count that does not follow the viewport is enough because there
+# is no longer anywhere to travel to.
 case "$(cat "$TMP_ROOT/links.html")" in
-  *'class="tally ask" href="#waiting"'*) : ;;
-  *) fail "layout: the header count no longer reaches the asks index" ;;
+  *'class="countline"'*) : ;;
+  *) fail "layout: the header no longer carries the counts line" ;;
 esac
-pass "the count reaches the index from the header, with no travelling chrome"
+pass "the counts line sits in the header, with no travelling chrome"
+
+# The stale bar is the one element added since, and it is the exact shape the
+# audits caught: a bar that announces something about the page. It is in normal
+# flow like everything else - the parse above would have failed otherwise - and
+# this pins that it exists at all, so a later hand at it starts from the rule
+# rather than rediscovering it.
+case "$(cat "$TMP_ROOT/links.html")" in
+  *'class="stalebar" id="fm-stale" hidden'*) : ;;
+  *) fail "layout: the freshness bar is missing, or no longer starts hidden" ;;
+esac
+pass "the freshness bar starts hidden and lives in normal flow like everything else"
 
 # --- 22. two axes: who owes it, and how it ended ---------------------------
 #
@@ -1457,24 +1552,31 @@ pass "state and outcome are recorded and reported as two independent facts"
 
 # MERGED WORK NEVER READS AS THROWN AWAY. This is the case the whole design
 # exists to make unrepresentable.
-FM_HOME=$HOME22 "$RENDER" --html > "$TMP_ROOT/axes.html"
+history_of "$HOME22" > "$TMP_ROOT/axes.html"
 python3 - "$TMP_ROOT/axes.html" <<'PY' || fail "axes: see the reported row"
 import re, sys
 html = open(sys.argv[1]).read()
-merged = re.search(r'<tr id="item-t-merged">.*?</tr>', html, re.S)
+
+def row(key):
+    anchor = '<div class="hitem" id="item-%s">' % key
+    if anchor not in html:
+        return None
+    rest = html.split(anchor, 1)[1]
+    return re.split(r'<div class="hitem"|</section>', rest, maxsplit=1)[0]
+
+merged = row("t-merged")
 if merged is None:
-    sys.exit("the merged task has no row on the fleet strip")
-merged = merged.group(0)
+    sys.exit("the merged task appears on neither page")
 if "discarded" in merged:
     sys.exit("merged work reads as discarded: %s" % merged)
 for fragment in ("landed", "resolved"):
     if fragment not in merged:
         sys.exit("the merged row does not say %r, so a reader must guess: %s"
                  % (fragment, merged))
-gone = re.search(r'<tr id="item-t-gone">.*?</tr>', html, re.S).group(0)
+gone = row("t-gone")
 if "discarded" not in gone or "needs-captain" not in gone:
     sys.exit("the discarded row hides one of its two axes: %s" % gone)
-murky = re.search(r'<tr id="item-t-murky">.*?</tr>', html, re.S).group(0)
+murky = row("t-murky")
 if "unknown" not in murky:
     sys.exit("a cleanup that could not tell does not say so on the row: %s" % murky)
 sys.exit(0)
@@ -1558,19 +1660,19 @@ pass "an item nobody owes is not an ask even while the work is still live"
 FM_HOME=$HOME23 "$RENDER" --html > "$TMP_ROOT/discard-ask.html"
 askboard=$(cat "$TMP_ROOT/discard-ask.html")
 case "$askboard" in
-  *'<b>1</b>waiting on you'*) : ;;
+  *'<b class="you">1</b> waiting on you'*) : ;;
   *) fail "asks: the header count still counts work that ended" ;;
 esac
 # An override's provenance carries the accent; an ordinary note does not, so a
 # routine event never reads as a problem on a board where orange means one thing.
 FM_HOME=$HOME23 "$BRIDGE" note -q --id ev-plain --project orca \
   --title "a routine landed change" --note "picked up the pin bump too" >/dev/null
-FM_HOME=$HOME23 "$RENDER" --html > "$TMP_ROOT/accent.html"
+history_of "$HOME23" > "$TMP_ROOT/accent.html"
 python3 - "$TMP_ROOT/accent.html" <<'ACCENT' || fail "accent: see the reported note"
 import re, sys
 html = open(sys.argv[1]).read()
 seen_plain = False
-for match in re.finditer(r'<div class="why([^"]*)">([^<]*)</div>', html):
+for match in re.finditer(r'<span class="why([^"]*)">([^<]*)</span>', html):
     accented = "override" in match.group(1)
     provenance = "checks skipped" in match.group(2)
     if accented and not provenance:
@@ -1583,24 +1685,29 @@ if not seen_plain:
 sys.exit(0)
 ACCENT
 pass "only override provenance carries the alarm accent; an ordinary note reads as ordinary"
-python3 - "$TMP_ROOT/discard-ask.html" <<'PY' || fail "asks: see the reported row"
+python3 - "$TMP_ROOT/accent.html" "$TMP_ROOT/discard-ask.html" <<'PY' \
+  || fail "asks: see the reported row"
 import re, sys
-html = open(sys.argv[1]).read()
-row = re.search(r'<tr id="item-task-pr">.*?</tr>', html, re.S)
-if row is None:
-    sys.exit("the task vanished from the board instead of staying visible")
-row = row.group(0)
+history = open(sys.argv[1]).read()
+board = open(sys.argv[2]).read()
+
+anchor = '<div class="hitem" id="item-task-pr">'
+if anchor not in history:
+    sys.exit("the task vanished from both pages instead of staying visible")
+row = re.split(r'<div class="hitem"|</section>',
+               history.split(anchor, 1)[1], maxsplit=1)[0]
 if "discarded" not in row:
     sys.exit("the row does not show how the work ended: %s" % row)
 if "needs-captain" not in row:
     sys.exit("the row hides the disposition it had earned: %s" % row)
 if "branch was a dead end" not in row:
     sys.exit("the row does not carry the reason it was discarded: %s" % row)
-if "button class=\"ans\"" in row:
+if 'class="ansbtn"' in row:
     sys.exit("the row still offers a ruling on work that ended: %s" % row)
-index = re.search(r'<section id="waiting">.*?</section>', html, re.S).group(0)
-if "item-task-pr" in index:
-    sys.exit("work that ended is still listed in the asks index")
+# And it is nowhere on the ACTION surface. Work that ended is not a decision,
+# so it must not cost a line above the ones that are.
+if "item-task-pr" in board:
+    sys.exit("work that ended is still on the board the captain acts from")
 sys.exit(0)
 PY
 pass "a row that ended stays visible with both axes and its reason, and offers no ruling"
@@ -1682,7 +1789,7 @@ while [ "$i" -le 9 ]; do
     --state fm-handling --outcome discarded --ts "2026-07-31T10:0$i:00Z" >/dev/null
   i=$((i + 1))
 done
-capped=$(FM_HOME=$HOME25 "$RENDER" --html)
+capped=$(history_of "$HOME25")
 shown=$(printf '%s' "$capped" | grep -c 'class="chip discarded"' || true)
 [ "$shown" = 6 ] || fail "closed cap: expected 6 discarded rows shown, got $shown"
 case "$capped" in
@@ -1858,9 +1965,11 @@ if doc["summary"]["needs-captain"] != 4:
 ' || fail "tallies: see the reported count"
 pass "both axes count every item, and the ask count stands apart from them"
 
-FM_HOME=$HOME27 "$RENDER" --html > "$TMP_ROOT/tallies.html"
+history_of "$HOME27" > "$TMP_ROOT/tallies.html"
 tallyboard=$(cat "$TMP_ROOT/tallies.html")
-case "$tallyboard" in
+# The ask count stays on the BOARD, where it is acted on; the two axis tallies
+# are on history, where they are consulted.
+case "$(board_of "$HOME27")" in
   *"waiting on you"*) : ;;
   *) fail "tallies: the board does not label the ask count" ;;
 esac
@@ -1885,7 +1994,7 @@ FM_HOME=$HOME28 "$BRIDGE" ask -q --id d-fine --project orca --title "still open"
   --answer A >/dev/null
 
 FM_HOME=$HOME28 "$BRIDGE" lint > "$TMP_ROOT/pointer-lint.txt"
-FM_HOME=$HOME28 "$RENDER" --html > "$TMP_ROOT/pointer-board.html"
+history_of "$HOME28" > "$TMP_ROOT/pointer-board.html"
 python3 - "$TMP_ROOT/pointer-lint.txt" "$TMP_ROOT/pointer-board.html" <<'POINTER' || fail "pointer: see the report"
 import sys
 lint = open(sys.argv[1]).read()

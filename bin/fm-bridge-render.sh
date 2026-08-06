@@ -1365,6 +1365,12 @@ h3.projhead {
 }
 h3.projhead .refs { color:var(--tn-muted); font-weight:400; font-size:.8rem; white-space:nowrap; }
 .local-terms { margin:0 0 .8rem; font-size:.79rem; line-height:1.5; color:var(--tn-dim); border-left:2px solid var(--tn-line); padding-left:.6rem; }
+/* Secondary text under a history row. Dim by default because a note is an
+   ordinary field on every write command; the override accent is the one
+   exception, and it belongs to the judgement that authorized skipping the
+   landed-work test. */
+.hbody .why { color:var(--tn-dim); }
+.hbody .why.override { color:var(--tn-orange); }
 .checkline { margin-top:.5rem; font-size:.76rem; color:var(--tn-muted); overflow-x:auto; }
 .checkline code { color:var(--tn-cyan); }
 """
@@ -1862,14 +1868,21 @@ SCRIPT = r"""
   // ---- freshness ----------------------------------------------------------
   //
   // The page states the fold it was drawn from, ages it live, and polls its own
-  // artifact URL for a newer one. A newer fold on disk means the copy on screen
-  // is not current, and the bar says so with both times.
+  // URL for a newer one. A newer fold there means the copy on screen is not
+  // current, and the bar says so with both times.
   //
-  // AUTO-RELOAD YIELDS TO COMPOSITION, ALWAYS. A redraw destroys an unqueued
-  // annotation - measured - so it happens only when every signal agrees nothing
-  // is in progress, and a signal this page cannot read counts as in progress.
-  // Getting that wrong costs the captain a ruling; not reloading costs a click
-  // on a bar that is already telling them.
+  // THIS PAGE NEVER RELOADS ITSELF, and the reason is measured rather than
+  // cautious. Hosted in Lavish, the host reloads the frame itself within
+  // seconds of the file changing, so an auto-reload here would be a second
+  // owner of an action that already has one. And the frame is sandboxed
+  // WITHOUT allow-same-origin: it cannot see the host's annotation card, so it
+  // could never satisfy "reload only when nothing is being written" - it would
+  // be guessing, and a wrong guess costs the captain a ruling in progress.
+  //
+  // What is left is a bar that reports the gap and a button the reader presses.
+  // That is the whole value in the case the host does not cover: a copy opened
+  // as a plain file, or a write the host missed, where nothing else would ever
+  // say the page had gone stale.
   var meta = document.querySelector('meta[name="fm-folded-at"]');
   var mine = meta ? meta.getAttribute("content") : "";
   var ageEl = document.getElementById("fm-fresh-age");
@@ -1897,32 +1910,12 @@ SCRIPT = r"""
     if (ageEl && age !== null) { ageEl.textContent = coarse(age) + " ago"; }
   }
 
-  function composing() {
-    // An unqueued selection is a ruling in progress by definition.
-    if (document.querySelector(".ansbtn.selected:not(.queued)")) { return true; }
-    var active = document.activeElement;
-    if (active) {
-      var tag = (active.tagName || "").toLowerCase();
-      if (tag === "textarea" || tag === "input" || active.isContentEditable) { return true; }
-    }
-    var sel = window.getSelection && window.getSelection();
-    if (sel && !sel.isCollapsed) { return true; }
-    // Lavish's annotation surface, by the hooks it exposes on the hosting
-    // document. Pinned in docs/verification/bridge-board-v2.md against a
-    // measured version; anything unrecognised here counts as composing.
-    if (document.querySelector("[data-lavish-annotation],[data-lavish-card],.lavish-annotation")) {
-      return true;
-    }
-    return false;
-  }
-
   function showStale(theirs, gap) {
     if (bar) { bar.hidden = false; }
     if (barTimes) {
-      barTimes.textContent = "you are viewing " + mine + "; the fold is at " + theirs;
+      barTimes.textContent = "you are viewing " + mine + "; the record is at " + theirs;
     }
     if (dot && gap >= STALE_GAP) { dot.classList.add("stale"); }
-    if (!composing()) { location.reload(); }
   }
 
   function poll() {
@@ -2308,8 +2301,8 @@ def render_board(doc, env):
     add('<div class="stalebar" id="fm-stale" hidden>')
     add("<span><b>STALE</b> - <span id=\"fm-stale-times\"></span></span>")
     add('<button id="fm-stale-reload">reload now</button>')
-    add('<span class="why">reloads itself once nothing is part-way through '
-        "being written</span>")
+    add('<span class="why">this page never reloads itself - nothing you have '
+        "part-way written is at risk from it</span>")
     add("</div>")
 
     add("<footer>")
@@ -2332,10 +2325,14 @@ def render_board(doc, env):
         "conversation panel until you press Send to Agent. Re-queueing the "
         "same decision replaces what was there, so changing your mind never "
         "sends two answers.</div>")
-    add("<div>A queued ruling survives this page being redrawn. A ruling still "
-        "sitting in the annotation box does not - this page is rewritten "
-        "whenever the record changes, and an unqueued annotation goes with it, "
-        "not saved anywhere. Queue it, then keep reading.</div>")
+    add("<div>A queued ruling survives this page being redrawn, though the "
+        "card stops showing its tick afterwards. It has not been lost: it is "
+        "still in the conversation panel, and re-queueing the same decision "
+        "replaces that entry rather than sending a second one.</div>")
+    add("<div>A ruling still sitting in the annotation box does not survive. "
+        "This page is rewritten whenever the record changes, and an unqueued "
+        "annotation goes with it, not saved anywhere. Queue it, then keep "
+        "reading.</div>")
     add("<div>To say it in your own words instead, annotate the card and send "
         "from the conversation panel.</div>")
     add("<div>Opened as a plain file with nothing behind it, this page has no "
@@ -2372,7 +2369,15 @@ def history_row(item, doc):
     if item["body"]:
         detail.append(esc(item["body"]))
     if item["note"]:
-        detail.append(esc(item["note"]))
+        # ONE MEANING PER ACCENT. A note is an ordinary field on every write
+        # command, so it is dim by default - accenting it would make a routine
+        # event read as a problem and give orange a second job. The exception
+        # is the judgement that authorized an override: a forced cleanup skipped
+        # the landed-work test, and the reason someone gave for skipping it is
+        # the most destructive decision in the fleet. That one earns the accent.
+        detail.append('<span class="why%s">%s</span>'
+                      % (" override" if item["outcome"] in ("discarded", "unknown")
+                         else "", esc(item["note"])))
     if item["pointer"]:
         target = item["pointer"]
         if target.startswith("http://") or target.startswith("https://"):

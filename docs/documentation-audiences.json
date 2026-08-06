@@ -67,6 +67,10 @@
       "target": "docs/verification/bridge-hosted-input.md"
     },
     {
+      "source": "docs/bridge.md",
+      "target": "docs/verification/bridge-board-v2.md"
+    },
+    {
       "source": "docs/sessionstart-nudge.md",
       "target": "docs/verification/supervision.md"
     },
@@ -338,6 +342,10 @@
     },
     {
       "path": "docs/verification/agents-md-diet.md",
+      "audience": "maintainer-verification"
+    },
+    {
+      "path": "docs/verification/bridge-board-v2.md",
       "audience": "maintainer-verification"
     },
     {
