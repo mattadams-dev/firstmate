@@ -77,8 +77,10 @@ Nothing in the red itself tells them which.
 
 That unbounded window is what the surfacing rule below closes, and the bound is a property of the rule rather than a description of any particular moment.
 Wherever a runtime carries that rule and follows it, a red `main` is read within one review interval, because every review reads every cloned project's default branch.
-The distinction matters on this branch: the rule ships in this document, and a document that has landed is not yet a rule the runtime is carrying, so the bound holds from the point the rule is in effect and not before.
-Until then an interim hand-reading rule covers the window: every merge made on the standing word ends with one manual read of `main`'s run to a concluded result, recorded in that merge's ledger line.
+The condition is evaluable rather than temporal, so a reader can test whether it applies to them: check whether the runtime doing the reading carries an `AGENTS.md` that already contains the unconditional default-branch read.
+A document that has landed is not yet a rule a runtime is carrying, so merging this file does not by itself put the bound in effect for a runtime that started before it.
+Where that read is absent, the gap is covered by hand instead: every merge made on the standing word ends with one manual read of `main`'s run to a concluded result, recorded in that merge's ledger line.
+Both paths read the run the same way, because the format recorded below binds either.
 
 ## Revert procedure
 
@@ -134,6 +136,20 @@ And it makes an unconcluded run self-healing by construction rather than by anyo
 **Deliberately not built:** no new watcher, poll, script, state file, or remembered marker for a run previously read as unconcluded.
 Remembered state is the more fragile shape for an identical outcome.
 This is a procedure step on a wake that already happens, because the fleet already performs a periodic fleet-wide review.
+
+## How a `main` run result is read
+
+This format is doctrine, and it binds every reading of a default branch's CI result: the hand reading that covers a runtime not carrying the rule, the read the rule itself requires, and any check ever built to replace either.
+Each clause names the mistake it prevents, because the failure mode here is not a missing reading but a reading that quietly reports an unknown as an answer.
+
+- **Five fields per run, plus the read-time of the reading itself.** Never prose.
+- **The five are `id`, `sha`, `status`, `conclusion`, and both timestamps**, the run's start and its completion.
+- **Only a `completed` run contributes a verdict.** Every other run is named as unknown: not omitted, and never folded into the concluded count. An omitted run reads as though it does not exist, and a counted one reads as green.
+- **The freshness stamp is the newest concluded run's completion time, never a run's creation or start time.** That substitution is what produced the first defective reading of this kind: stamping the reading with a run that had not finished folded an in-progress run into a concluded-success count.
+- **A verdict line carries both the evidence-time and the read-time.** They are different facts, and the gap between them is what tells a reader how stale the verdict is.
+
+Any check built to this rule inherits every clause above.
+Its acceptance test must include a run that is still in flight at read time, and that case must yield pending and never green.
 
 ## Maintaining this file
 
