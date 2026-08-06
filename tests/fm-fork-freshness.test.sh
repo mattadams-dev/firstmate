@@ -365,6 +365,8 @@ test_behind_creates_a_sync_task() {
     "the sync task carries no instructions"
   assert_grep "add fm-sync-acme-widget Sync acme/widget from " "$dir/tasks.log" \
     "the backlog call did not reach tasks-axi in the shape the CLI accepts"
+  assert_task_state "$dir" fm-sync-acme-widget queued \
+    "the reading said queued while the backlog got no task; the word is only ever a confirmed one"
   assert_not_contains "$out" "MANUAL=" \
     "a reading that says queued must have all four artifacts, not a manual hand-off"
   assert_contains "$out" "behind=1 " "the coverage line lost the behind count"
@@ -1137,7 +1139,9 @@ test_absent_task_frees_a_behind_fork_to_queue_again() {
   assert_contains "$out" "action=task fm-sync-acme-widget queued" \
     "a marker backed by no task at all still suppressed the work it was tracking"
   assert_contains "$out" "the backlog has no such task" \
-    "the reading did not record why the marker was judged spent"
+    "the reading did not record why a new episode was started"
+  assert_task_state "$dir" fm-sync-acme-widget queued \
+    "the reading said queued over a backlog the task had been dropped from"
   pass "fm-fork-freshness: a marker the backlog has no task for is retired, not honoured"
 }
 
