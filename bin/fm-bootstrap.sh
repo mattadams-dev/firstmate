@@ -82,10 +82,17 @@
 #          refresh relays any completed fm-fleet-sync.sh output before the
 #          aggregate timeout skip line with timeout and elapsed seconds.
 #          Set FM_FLEET_PRUNE=0 to skip branch pruning during that refresh.
-#          Set FM_BOOTSTRAP_DETECT_ONLY=1 to skip the six MUTATING sweeps
+#          Fork freshness is the weekly half of the fork sweep rule: it runs
+#          bin/fm-fork-freshness.sh sweep --if-due, which is silent between
+#          cadences and reports its own coverage, and is bounded here by
+#          FM_FORK_SWEEP_BOOTSTRAP_TIMEOUT (default 45s) with a timeout, or any
+#          exit outside its normal 0/3/4/5 vocabulary, reported as unknown
+#          coverage rather than silence. The sweep's stderr is relayed too, so a
+#          TASK_MANUAL: line reaches this digest beside its reading.
+#          Set FM_BOOTSTRAP_DETECT_ONLY=1 to skip the seven MUTATING sweeps
 #          (PR-check migration, secondmate_sync, secondmate_liveness_sweep,
-#          secondmate_handoff_resume, x_mode_setup, fleet_sync) while still
-#          printing every read-only detect line
+#          secondmate_handoff_resume, x_mode_setup, fleet_sync, fork_freshness)
+#          while still printing every read-only detect line
 #          above; the TANGLE line switches to advisory-only wording with no
 #          checkout command. Used by
 #          fm-session-start.sh's read-only path when another live session holds
@@ -207,6 +214,47 @@ fleet_sync() {
 
   fleet_sync_relay_filtered_output "$tmp"
   rm -f "$tmp"
+}
+
+fork_freshness() {
+  # The weekly half of the fork freshness rule. Cadence and the whole reading
+  # contract belong to bin/fm-fork-freshness.sh (--if-due keeps this at most
+  # weekly and silent in between); this is only the locked, once-a-session
+  # surface it runs on. A timeout is reported as unknown coverage, never as
+  # silence, because "the sweep did not finish" and "no fork is behind" are
+  # different worlds and must not print the same thing.
+  #
+  # Stderr is relayed rather than discarded: the sweep writes its TASK_MANUAL:
+  # line there because stdout carries the reading, and a sync task whose backlog
+  # entry silently failed is a tracked item nobody is tracking. And 0, 3, 4 and 5
+  # are the sweep's whole vocabulary of normal results, so any other status is a
+  # crash and gets its own unknown line - "the sweep died" must not print the
+  # same nothing as "the sweep was not due".
+  [ -x "$FM_ROOT/bin/fm-fork-freshness.sh" ] || return 0
+  local out status=0 timeout_secs=${FM_FORK_SWEEP_BOOTSTRAP_TIMEOUT:-45}
+  case "$timeout_secs" in ''|*[!0-9]*) timeout_secs=45 ;; esac
+  # timeout treats 0 as "no limit", which is the unbounded wait this bounds.
+  [ "$timeout_secs" -gt 0 ] || timeout_secs=45
+  if command -v timeout >/dev/null 2>&1; then
+    out=$(FM_HOME="$FM_HOME" timeout "$timeout_secs" \
+      "$FM_ROOT/bin/fm-fork-freshness.sh" sweep --if-due 2>&1) || status=$?
+  else
+    out=$(FM_HOME="$FM_HOME" "$FM_ROOT/bin/fm-fork-freshness.sh" sweep --if-due 2>&1) || status=$?
+  fi
+  [ -z "$out" ] || printf '%s\n' "$out"
+  case "$status" in
+    0) ;;
+    3|4|5)
+      [ -n "$out" ] ||
+        echo "FORK_FRESHNESS_COVERAGE: status=unknown reason=freshness sweep reported status $status and no reading"
+      ;;
+    124)
+      echo "FORK_FRESHNESS_COVERAGE: status=unknown reason=freshness sweep timed out after ${timeout_secs}s"
+      ;;
+    *)
+      echo "FORK_FRESHNESS_COVERAGE: status=unknown reason=freshness sweep exited $status before completing"
+      ;;
+  esac
 }
 
 secondmate_sync() {
@@ -1071,6 +1119,7 @@ if [ "${FM_BOOTSTRAP_DETECT_ONLY:-0}" != 1 ]; then
   secondmate_handoff_resume
   x_mode_setup
   fleet_sync
+  fork_freshness
 fi
 secondmate_handoff_detect
 exit 0

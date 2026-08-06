@@ -144,3 +144,35 @@ FM_HOME="$FM_HOME" "$FM_ROOT/bin/fm-bridge.sh" task --quiet \
   --id "$ID" --project "$(basename "${BRIDGE_PROJECT:-fleet}")" \
   --phase pr-open --state "$BRIDGE_STATE" --pointer "$URL" --title "$ID" \
   ${BRIDGE_ANSWERS[@]+"${BRIDGE_ANSWERS[@]}"} >/dev/null 2>&1 || true
+
+# Fork freshness, taken here because this is the one point every fork PR
+# provably passes through: bin/fm-pr-merge.sh refuses a task whose metadata
+# carries no pr= line, and this script is that line's only writer. A fork that
+# is behind its upstream makes this PR misreport its own diff and blocks its own
+# merge, so the reading is machine-taken at PR-ready rather than remembered.
+# bin/fm-fork-freshness.sh is silent when the repository is determinately not a
+# fork and loud when that could not be read; it never merges or pushes anything.
+# Best-effort in one direction only: it can never fail arming the merge watch,
+# but it is never allowed to be silent about a reading it could not take. It is
+# bounded in wall clock for the same reason the weekly trigger is: the reading is
+# up to three sequential forge calls and the forge client has no overall response
+# deadline, so an unreachable-but-accepting host would otherwise hang a task at
+# the moment its PR is ready. A timeout is a reading that could not be taken, so
+# it reports unknown rather than nothing.
+if [ "$PROVIDER" = github ] && [ -x "$FM_ROOT/bin/fm-fork-freshness.sh" ]; then
+  FRESHNESS_STATUS=0
+  FRESHNESS_TIMEOUT=${FM_FORK_SWEEP_PR_TIMEOUT:-45}
+  case "$FRESHNESS_TIMEOUT" in ''|*[!0-9]*) FRESHNESS_TIMEOUT=45 ;; esac
+  # timeout treats 0 as "no limit", which is the unbounded wait this closes.
+  [ "$FRESHNESS_TIMEOUT" -gt 0 ] || FRESHNESS_TIMEOUT=45
+  if command -v timeout >/dev/null 2>&1; then
+    FM_HOME="$FM_HOME" timeout "$FRESHNESS_TIMEOUT" \
+      "$FM_ROOT/bin/fm-fork-freshness.sh" check "$PROJECT_PATH" || FRESHNESS_STATUS=$?
+  else
+    FM_HOME="$FM_HOME" "$FM_ROOT/bin/fm-fork-freshness.sh" check "$PROJECT_PATH" || FRESHNESS_STATUS=$?
+  fi
+  if [ "$FRESHNESS_STATUS" = 124 ]; then
+    printf 'FORK_FRESHNESS: %s status=unknown reason=freshness reading timed out after %ss\n' \
+      "$PROJECT_PATH" "$FRESHNESS_TIMEOUT"
+  fi
+fi
