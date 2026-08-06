@@ -1230,6 +1230,8 @@ details.ctxd .ctxbody {
 /* --- lanes -------------------------------------------------------------- */
 .lanes { display:grid; grid-template-columns:1fr; gap:.55rem; }
 .lanegroup { background:var(--tn-panel); border:1px solid var(--tn-line); border-radius:.5rem; padding:.6rem .9rem; }
+.lanegroup.quiet { padding:.4rem .9rem; }
+.lanegroup.quiet .lghead { margin-bottom:0; }
 .lghead { display:flex; align-items:baseline; gap:.6rem; margin-bottom:.35rem; flex-wrap:wrap; }
 .lghead .p { font-weight:600; font-size:.9rem; color:var(--tn-blue); }
 .lghead .n { font-size:.78rem; color:var(--tn-muted); }
@@ -1504,6 +1506,16 @@ def _run(argv, timeout=PROBE_TIMEOUT):
     return done.stdout.decode("utf-8", "replace"), ""
 
 
+def _probe(reader):
+    """One reading, or the reason there is none. Never raises, so one gauge
+    that fails cannot take the other two - or the decisions above them - with
+    it."""
+    try:
+        return reader()
+    except Exception as exc:  # deliberately broad; a gauge is not worth a page
+        return None, "%s could not be read: %s" % (reader.__name__.strip("_"), exc)
+
+
 def _meminfo():
     """Available and total memory, in MiB, from the kernel's own accounting.
 
@@ -1662,6 +1674,32 @@ def _registry_projects(fm_home):
 
 
 def collect_env(fm_home, state_dir, folded_at):
+    """The live half of the board, and it can never cost the ledger half.
+
+    Every probe below already returns a reason instead of raising, but this
+    wrapper is what makes that a guarantee rather than a review finding: a
+    quota CLI that dies in a new way, a host probe that returns something
+    unimagined, any of it - the board still renders, with gauges that say they
+    could not be read. A render that fails because a gauge misbehaved would
+    take the captain's open decisions down with it, which inverts what the two
+    halves are worth.
+    """
+    try:
+        return _collect_env(fm_home, state_dir, folded_at)
+    except Exception as exc:  # deliberately broad; see the docstring
+        reason = "the live readings could not be collected: %s" % exc
+        return {
+            "collected_at": folded_at,
+            "lanes": {"projects": [], "count": 0, "health_readable": False,
+                      "health_unreadable_because": reason},
+            "admission": {"floor_mib": ADMISSION_FLOOR_MIB,
+                          "memory": None, "memory_unreadable_because": reason,
+                          "host": None, "host_unreadable_because": reason,
+                          "quota": None, "quota_unreadable_because": reason},
+        }
+
+
+def _collect_env(fm_home, state_dir, folded_at):
     """The live half of the board: lanes in flight, and the admission gauges.
 
     Collected once, beside the fold and never inside it, then handed to the
@@ -1715,7 +1753,10 @@ def collect_env(fm_home, state_dir, folded_at):
         lanes.setdefault(project, []).append({
             "id": task,
             "phase": phase,
-            "reported_label": "no word yet" if age is None else _age_label(age),
+            # What the lane last SAID, and when. Where it has said nothing the
+            # phase column already says so, and repeating it here would read as
+            # two separate silences rather than one.
+            "reported_label": "" if age is None else _age_label(age),
             "reported_seconds": age,
             "health": health,
             "pr": fields.get("pr", ""),
@@ -1729,9 +1770,9 @@ def collect_env(fm_home, state_dir, folded_at):
     for slug in sorted(lanes):
         projects.append({"project": slug, "lanes": lanes[slug]})
 
-    memory, memory_why = _meminfo()
-    host, host_why = _host_memory()
-    quota, quota_why = _quota()
+    memory, memory_why = _probe(_meminfo)
+    host, host_why = _probe(_host_memory)
+    quota, quota_why = _probe(_quota)
     return {
         "collected_at": folded_at,
         "lanes": {
@@ -1982,7 +2023,28 @@ def rec_chip(rec):
     return '<span class="rectag">rec: %s</span>' % esc(rec)
 
 
-def ask_card(item):
+def local_terms(item, glossary):
+    """Colliding terms, repeated where the ruling is made.
+
+    A term that means different things in different projects is defined once up
+    front on the history page - and repeated locally, because the reader
+    arriving at a decision must never have to scroll back to find out which
+    meaning is in play. On this board "locally" is inside the card's context
+    dropdown: exactly where the detail needed to rule already lives, and costing
+    the board no height while it is closed.
+    """
+    bits = []
+    for entry in glossary:
+        if not entry["collision"]:
+            continue
+        for sub in entry["entries"]:
+            if sub["project"] == item["project"]:
+                bits.append("<b>%s</b> here means %s"
+                            % (esc(entry["term"]), esc(sub["means"])))
+    return "; ".join(bits)
+
+
+def ask_card(item, glossary=()):
     """One open decision (Law 5).
 
     Ref, project, age, a clamped one-line title, the answers, and a collapsed
@@ -2041,6 +2103,9 @@ def ask_card(item):
             context.append("<code>%s</code>" % esc(target))
     if item["check"]:
         context.append("check <code>%s</code>" % esc(item["check"]))
+    terms = local_terms(item, glossary)
+    if terms:
+        context.append('<span class="local-terms">%s</span>' % terms)
     if context:
         parts.append('<details class="ctxd"><summary>context</summary>'
                      '<div class="ctxbody">%s</div></details>'
@@ -2074,12 +2139,16 @@ def lanes_section(env):
     out.append('<div class="lanes">')
     for group in groups:
         rows = group["lanes"]
-        out.append('<div class="lanegroup"><div class="lghead">'
-                   '<span class="p">%s</span><span class="n">%d %s</span></div>'
-                   % (esc(group["project"]), len(rows),
-                      "lane" if len(rows) == 1 else "lanes"))
-        if not rows:
-            out.append('<div class="idle">idle - nothing dispatched</div>')
+        # AN IDLE PROJECT IS ONE LINE, NOT A CARD WITH A LINE IN IT. It is
+        # listed rather than omitted, because "no lanes" and "no such project"
+        # must not look the same - but a project with nothing dispatched has
+        # nothing to lay out, and four of them stacked as full cards is height
+        # spent on the absence of news.
+        idle = "" if rows else '<span class="idle">idle - nothing dispatched</span>'
+        out.append('<div class="lanegroup%s"><div class="lghead">'
+                   '<span class="p">%s</span><span class="n">%d %s</span>%s</div>'
+                   % (" quiet" if idle else "", esc(group["project"]), len(rows),
+                      "lane" if len(rows) == 1 else "lanes", idle))
         merges = []
         for row in rows:
             out.append('<div class="lane"><span class="nm">%s</span>'
@@ -2087,8 +2156,7 @@ def lanes_section(env):
                        '<span class="hd %s" title="%s"></span></div>'
                        % (esc(row["id"]), esc(row["phase"]),
                           esc("reported %s" % row["reported_label"]
-                              if row["reported_seconds"] is not None
-                              else row["reported_label"]),
+                              if row["reported_label"] else ""),
                           esc(row["health"]),
                           esc({"ok": "moving", "warn": "supervision has flagged this lane",
                                "unknown": "health unread"}[row["health"]])))
@@ -2147,24 +2215,33 @@ def admission_section(env):
 
     quota = adm.get("quota")
     if quota:
-        bits = []
-        tight = False
+        # THE TIGHTEST READABLE PROVIDER LEADS, because that is the one that
+        # decides what can be dispatched. Providers with no reading are counted
+        # rather than listed one by one: four names each saying "unread" is a
+        # wall of nothing, and the count says the same thing in three words
+        # without pretending the gap is not there.
+        read, unread = [], []
         for row in quota["providers"]:
             remaining = row.get("remaining_percent")
             if isinstance(remaining, (int, float)):
-                bits.append("%s %d%% left%s"
-                            % (row["name"], remaining,
-                               " (%s)" % row["pace"] if row.get("pace") else ""))
-                if remaining < 20:
-                    tight = True
+                read.append((remaining, "%s %d%% left%s"
+                             % (row["name"], remaining,
+                                " (%s)" % row["pace"].replace("_", " ")
+                                if row.get("pace") else "")))
             elif row.get("status"):
-                bits.append("%s %s" % (row["name"], row["status"]))
+                read.append((101, "%s %s" % (row["name"], row["status"])))
             else:
-                bits.append("%s unread" % row["name"])
+                unread.append(row["name"])
+        read.sort(key=lambda pair: pair[0])
+        tight = bool(read) and read[0][0] < 20
+        lead = read[0][1] if read else "no provider could be read"
+        rest = [text for _, text in read[1:]]
+        if unread:
+            rest.append("%d unread: %s" % (len(unread), ", ".join(unread)))
         out.append('<div class="gauge %s"><div class="lbl">Provider headroom</div>'
                    '<div class="val">%s</div><div class="sub">%s</div></div>'
-                   % ("warn" if tight else "ok", esc(bits[0]),
-                      esc(" · ".join(bits[1:]) if len(bits) > 1 else "quota-axi")))
+                   % ("warn" if tight or not read else "ok", esc(lead),
+                      esc(" · ".join(rest) if rest else "quota-axi")))
     else:
         tight = False
         unknowns.append("provider headroom")
@@ -2277,7 +2354,7 @@ def render_board(doc, env):
             "&middot; pick an answer, press Queue, Send delivers all &middot; "
             "or annotate the card to say it your way</span></h2>")
         for key in asks:
-            add(ask_card(items[key]))
+            add(ask_card(items[key], doc["glossary"]))
     else:
         add("</h2>")
         add('<p class="allclear">Nothing is waiting on you.</p>')
@@ -2416,6 +2493,17 @@ def render_history(doc, env):
     out = page_open("Bridge - history", doc)
     add = out.append
 
+    # BETWEEN THE TWO PAGES THERE IS NO GAP. The board renders open asks and
+    # the co-captain's routed rows; this page renders everything else, and
+    # "everything else" has to be defined as the complement rather than as a
+    # list of closed zones - or an item that is neither an ask nor closed, like
+    # a decision marked resolved that nothing has yet observed to end, would
+    # appear on neither page and be quietly lost from both.
+    on_board = set(doc.get("asks", [])) | set(doc.get("cocaptain_asks", []))
+
+    def elsewhere(keys):
+        return [key for key in keys if key not in on_board]
+
     add('<header class="top"><div class="wrap">')
     add('<div class="toprow"><h1>History<span class="sub">everything the board '
         "leaves out &middot; generated from the ledger</span></h1>")
@@ -2481,8 +2569,14 @@ def render_history(doc, env):
                 add("<dd><b>%s</b>: %s</dd>" % (esc(sub["project"]), esc(sub["means"])))
         add("</dl></div></section>")
 
-    add("<section><h2>Criticals that closed</h2>")
+    add("<section><h2>Criticals</h2>")
     shown_any = False
+    still_open = elsewhere(zones["criticals"])
+    if still_open:
+        add('<p class="zone-note">open, and not waiting on you</p>')
+        for key in still_open:
+            add(history_row(items[key], doc))
+        shown_any = True
     for group, label in (("criticals_landed", "landed"),
                          ("criticals_discarded", "discarded"),
                          ("criticals_unknown", "ended, how unknown")):
@@ -2499,24 +2593,28 @@ def render_history(doc, env):
                 "<code>%s</code></div>"
                 % (hidden, esc(label), esc(doc["checks"]["raw stream"])))
     if not shown_any:
-        add('<p class="empty">No critical has closed.</p>')
+        add('<p class="empty">No critical is open or closed.</p>')
     add("</section>")
 
     add("<section><h2>Decisions, by project</h2>")
     add('<p class="zone-note">A ref like <b>O1</b> is unique to its project and '
-        "never renumbers, so a bare number is safe to quote. Open decisions are "
-        "on the board, not here.</p>")
+        "never renumbers, so a bare number is safe to quote. The ones waiting "
+        "on you are on the board; everything else about them is here.</p>")
     any_group = False
     for group in zones["decisions"]:
         closed = [side for side in ("landed", "discarded", "unknown") if group[side]]
-        if not closed:
+        open_elsewhere = elsewhere(group["open"])
+        local = [g for g in doc["glossary"]
+                 if any(sub["project"] == group["project"] for sub in g["entries"])]
+        # A project with no closed decisions still gets its heading when a term
+        # collides there: the definition has to appear beside that project's
+        # material, not only in the list up top.
+        if not closed and not open_elsewhere and not local:
             continue
         any_group = True
         add('<h3 class="projhead">%s <span class="refs">refs %s1, %s2, '
             "&hellip;</span></h3>"
             % (esc(group["project"]), esc(group["prefix"]), esc(group["prefix"])))
-        local = [g for g in doc["glossary"]
-                 if any(sub["project"] == group["project"] for sub in g["entries"])]
         if local:
             bits = []
             for entry in local:
@@ -2524,6 +2622,8 @@ def render_history(doc, env):
                              if sub["project"] == group["project"])
                 bits.append("<b>%s</b> here means %s" % (esc(entry["term"]), esc(means)))
             add('<p class="local-terms">%s</p>' % "; ".join(bits))
+        for key in open_elsewhere:
+            add(history_row(items[key], doc))
         for side in ("landed", "discarded", "unknown"):
             shown = group[side][:caps["closed_decisions"]]
             for key in shown:
@@ -2556,7 +2656,7 @@ def render_history(doc, env):
     add("<section><h2>Fleet</h2>")
     add('<p class="zone-note">Every task in the record. Live work is on the '
         "board as a lane; how each closed task ended is here.</p>")
-    rows = list(zones["fleet_open"])
+    rows = elsewhere(zones["fleet_open"])
     closed_shown = {}
     for group in ("fleet_landed", "fleet_discarded", "fleet_unknown"):
         closed_shown[group] = zones[group][:caps["fleet_closed"]]

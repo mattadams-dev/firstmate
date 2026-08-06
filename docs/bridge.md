@@ -33,11 +33,13 @@ They resolve per home, so a secondmate reads and writes its own and never the pa
 | --- | --- | --- |
 | Ledger | `$FM_HOME/data/bridge/ledger.jsonl` | append-only, one JSON object per line |
 | Board | `$FM_HOME/data/bridge/bridge.html` | generated; rewritten only when the ledger content changed |
+| History | `$FM_HOME/data/bridge/history.html` | generated in the same pass, from the same fold; sits beside the board so their links resolve |
 | Change stamp | `$FM_HOME/state/.bridge-render` | content digest of the ledger; drives skip-when-unchanged |
 | Failure count | `$FM_HOME/state/.bridge-tick-failures` | consecutive failed renders and the reason; absent means the last render landed |
 | Tick log | `$FM_HOME/state/.bridge-tick.log` | bounded history of render failures and recoveries |
 
-Ask the scripts rather than hardcoding: `bin/fm-bridge.sh path ledger` and `bin/fm-bridge.sh path board`.
+Ask the scripts rather than hardcoding: `bin/fm-bridge.sh path ledger` and `bin/fm-bridge.sh path board`; `bin/fm-bridge-render.sh --history-path` prints the history page.
+History is derived from the board's own directory, so an `FM_BRIDGE_BOARD` override moves both pages together rather than breaking the link between them.
 
 ## Reading it: `--state` is the only supported reader
 
@@ -82,7 +84,7 @@ Only `ts` and `id` are required on every record.
 | `title` | string | one line, the thing itself |
 | `body` | string | detail |
 | `pointer` | string | URL or path where the outcome lives; required in practice on a resolved decision |
-| `answers` | array | the answer forms; a bare string is tolerated and coerced |
+| `answers` | array | the answer forms; a bare string is tolerated and coerced. An option may end with a `[rec: worker]`, `[rec: fm]` or `[rec: worker+fm]` marker naming who recommends it |
 | `check` | string | a command that verifies this item |
 | `note` | string | free text |
 | `phase` | string | WHERE IT GOT TO mechanically, e.g. `dispatched`, `pr-open`, `merged`, `cleaned`, `force-cleaned`, or `sent`/`delivered`/`consumed`; not a disposition |
@@ -284,72 +286,108 @@ The screen cannot distinguish them, so a verifier reading the screen can only ho
 The steering fix itself (`fm-send-false-failure-guard`) is a separate lane.
 This is the substrate it can be built on: schema room for the event kinds, and a fold that answers targeted questions.
 
-## The board
+## The board, and the history page
 
-Zones, in the order the captain reads them:
+The fold renders **two** pages, written together in one pass so they can never be readings of different records.
 
-1. **Waiting on you** - every open *captain* ask across every project, oldest first, as an index that links to each full card.
-   An index rather than a second set of cards, so nothing is triaged twice.
-2. **With the co-captain** - items routed away, shown so the captain can see where they went.
-3. **Pinned criticals** - security, data loss, fleet blocked, outward-facing anomalies.
-4. **Decisions, by project** - with per-project refs, and any colliding term repeated locally.
-5. **Notable events** - capped, with a visible overflow pointer to the record.
-6. **Fleet** - one row per task.
+The **board** is the captain's action surface, in the order they read it:
 
-Because an ask that scrolls out of view is the failure this surface exists to prevent, the open-ask count is rendered at the top of the page beside the other tallies and links to the asks index.
-It lives in rendered content deliberately: the board is regenerated whenever the ledger changes, and rendered content is the only surface a redraw is guaranteed to refresh.
+1. **Your decisions** - one card per open ask, criticals first and then longest-waiting.
+2. **With the co-captain** - items routed away, one compact row each, shown so the captain can see where work went.
+3. **Lanes in flight** - grouped by project, from `state/` at fold time.
+4. **Admission** - the denominators, read live, and one verdict.
+
+**History** holds everything the board excludes: resolved and landed items, closed criticals, events, the two axis tallies, the glossary, unrecognized records, and the check commands.
+The board links to it and it links back, because the captain must never have to scroll their way back to the decisions.
+
+The board's contract is six rendering laws, stated in full in [`docs/verification/bridge-board-v2.md`](verification/bridge-board-v2.md) and implemented by `bin/fm-bridge-render.sh`, which marks each law at the code that keeps it.
+The two that shape everything else:
+
+- **Everything history holds is ABSENT from the board, not collapsed.** A collapsed section is still a row of chrome above the next decision.
+- **Board length scales with open asks and nothing else.** Measured: sixty non-ask records add zero pixels, and one further ask adds one card.
+
+The acceptance test is mechanical rather than judged - at 1080px wide the first decision is fully visible with zero scrolling - and it is measured in the browser, hosted and standalone, in that same verification record.
+
+**Nothing on either page is out of flow.**
+Chrome that travels with a vertically scrolling page and spans the content column ends up over every row that passes it, and parks an anchor target underneath itself - two browser layout audits proved exactly that.
+The rule is kept by having nothing viewport-fixed left to place: `tests/fm-bridge.test.sh` parses the emitted stylesheet and fails on any `fixed`, `absolute`, or `sticky` rule, and on a reserved gutter with nothing to put in it.
+
+The open-ask count is rendered content on the header's counts line.
+It lives there deliberately: the board is regenerated whenever the ledger changes, and rendered content is the only surface a redraw is guaranteed to refresh.
 The hosted board's browser tab is not one - Lavish copies the artifact's `<title>` into the hosting page when the page loads and never again, so a count kept there would still read the old number after the redraw that changed it (`docs/verification/bridge-hosted-input.md`, section 4).
-The title names the board and states no count at all.
+The title names the page and states no count at all.
 
-**Nothing on the board is out of flow.**
-Chrome that travels with a vertically scrolling page and spans the content column ends up over every row that passes it, and parks an anchor target underneath itself - two browser layout audits proved exactly that, on rows in two different zones.
-That was answered for a while by a reserved right-hand gutter no content was ever laid out inside, which viewport-fixed chrome could occupy without covering anything.
-Once the ruling composer was removed, the only thing left in that gutter was a number, and a number that links to the index it counts does not need chrome of its own.
-So the gutter went too.
-The header count is an ordinary tally that jumps to the asks index, which is the one thing a bare number would have lost, and the rule the gutter existed to satisfy is now kept by having nothing viewport-fixed left to place.
-`tests/fm-bridge.test.sh` parses the emitted stylesheet and fails on any `fixed`, `absolute`, or `sticky` rule, and on a reserved gutter with nothing to put in it.
 Asks carry their age, and one older than `FM_BRIDGE_AGING_SECONDS` (default 24h) is flagged: an ask that old is usually one that was already answered and never closed, and nothing about "open" distinguishes those from the rest.
 
-Answer forms are mandatory on asks, and they are shown rather than offered as controls: the board has no send of its own, so an option that looked clickable would promise an egress this page does not have.
-There is deliberately **no ack machinery** - no read receipts, no dismissal state, no interactivity at all.
-The board runs no script; the only `<script>` on it is the state document it embeds for audit.
+### What the board reads that the ledger does not carry
+
+Lanes and the admission gauges are **live readings**, collected beside the fold and handed to the renderer as a second document.
+They never enter `--state`, which stays a pure function of the ledger for the linter, the co-captain's audit and every lifecycle query - putting a quota CLI behind that call would put a subprocess behind all of them.
+
+| Region | Read from |
+| --- | --- |
+| Lanes | `state/*.meta` for the lane and its project, the last line and mtime of `state/<id>.status` for what it last reported, and the watcher's own `.stale-since-*` / `.wedge-escalations-*` markers for health |
+| Admission | `/proc/meminfo` for memory headroom, `powershell.exe` for host memory where a host exists, `quota-axi --json` for provider headroom |
+
+Lane health is the **watcher's** verdict, read from the markers it maintains rather than recomputed - two readers of one fact drift apart.
+Which means the absence of a warning marker is only good news while something is maintaining them, so a lapsed `state/.last-watcher-beat` makes every lane read `unknown` rather than inheriting a green nobody stands behind.
+Health is never CPU: CPU measures whether a process is busy, not whether the work is moving.
+
+**A reading that could not be taken says so, and is never rounded toward comfort or toward alarm.**
+A gauge that cannot be read prints the reason; the admission verdict names what it could not account for, so "admissible" and "admissible as far as anything here can tell" are never the same sentence.
+Where the memory floor itself is unreadable the verdict is `UNKNOWN`, not `ADMISSIBLE`.
+
+Because the tick only re-renders when the ledger content changed, these readings are as of the last render, which is exactly what the header's fold time states.
+Re-rendering on a changed gauge would mean writing the file - and writing is what reloads the hosted page out from under a ruling in progress.
 
 ### The input path
 
-The board is a read surface. Rulings come back through Lavish's annotation layer and its conversation panel, and the board says so where the asks are.
+There are two, and the board states both.
 
-That is one owner, not two.
-The board carried a composer of its own until it was removed: a textarea whose only egress was `copy` and `clear`, on a page regenerated underneath it.
-It could not send, and the redraw the captain has to perform to see fresh state wiped whatever they had typed - so a ruling could be believed answered and never heard.
+**Click and queue.** Selecting an answer sets local state only; a per-card **Queue answer** button then calls `window.lavish.queuePrompt` exactly once with `queueKey` set to the ask's ref.
+Selecting is deliberately not queueing: the captain can still change their mind, and the card shows selected and queued as different states so they can trust what will be sent.
+Because the key is the ref, re-queueing **replaces** that ask's unsent entry rather than adding a second one - one entry per ask, always the latest - and the button relabels itself to "Update queued answer".
+One **Send to Agent** delivers every queued ruling.
 
-What that leaves is measured, not assumed (`docs/verification/bridge-hosted-input.md`):
+**Annotate.** For anything the options cannot say, annotate the card and send from the conversation panel, exactly as in v1.
 
-- A **queued** ruling survives the board being redrawn and is still delivered on `lavish-axi poll`.
-- A ruling **typed into the annotation box and not queued** is destroyed by the redraw, silently.
-- A delivered ruling still lands on the ask it was placed on, because the annotation is rooted at the per-item anchor `id="item-<id>"` rather than at a position on the page.
+Both are measured against a real hosted session in [`docs/verification/bridge-board-v2.md`](verification/bridge-board-v2.md), including the `queueKey` replacement behaviour and the `lavish-axi` version it was measured against.
+Three facts from that record shape what the board promises:
 
-Those three facts are what the board's footer states, in the captain's words, and the board promises nothing beyond them.
-They are also why two things are load-bearing markup rather than decoration: the per-item anchors, and the visible ref carried into each answer option (`O1: A: retire it`).
-Strip either and the input path breaks as completely as removing the composer fixed it - which is why both are pinned by `tests/fm-bridge.test.sh`.
+- A queued ruling **survives** the page being redrawn - it stays in the conversation panel - though the card stops showing its tick, because that tick is DOM state.
+  Re-queueing the same decision replaces the entry rather than sending twice, which is what makes the lost tick harmless.
+- A ruling typed into the annotation box and **not** queued is destroyed by the redraw, silently. The board says so.
+- Lavish reloads the hosted frame itself when the file changes, and the frame - sandboxed without `allow-same-origin` - cannot see whether an annotation card is open.
+  So **the board never reloads itself**: its freshness bar reports the gap and offers a button, for the case Lavish's own reload does not cover.
+
+Recommender attribution rides inside an answer option as a muted `rec:` chip, never as a colour state, so a recommendation can never be mistaken for something the captain selected.
+Green means queued on that card and nothing else.
+More than one option may carry a chip when the worker and firstmate disagree, and that disagreement is shown rather than resolved: the captain is being asked precisely because two readings exist.
+
+The board still renders **no free-text input of its own**.
+The composer it once carried - a textarea whose only egress was `copy` and `clear`, on a page regenerated underneath it - could not send, and the redraw wiped whatever had been typed, so a ruling could be believed answered and never heard.
+`tests/fm-bridge.test.sh` pins that no `input`, `textarea` or `contenteditable` returns, that every button it does render has a stated role, and that an option is only marked queued after the queue call was observed to succeed.
+
+Two things stay load-bearing markup rather than decoration, and both are pinned: the per-item anchors, and the visible ref and title kept **outside** every control, so a free-text annotation still names the ask it was placed on.
 
 Opened as a plain file with no session behind it, the board has no input path at all, and says that too.
 That is honest for a static document: the captain simply tells firstmate directly.
 
 The board embeds the exact state document it was drawn from in `<script type="application/json" id="fm-bridge-state">`, so it can be audited without trusting the renderer, and so `--state` and the board provably cannot diverge.
+The live readings ride alongside in `<script type="application/json" id="fm-bridge-env">`, so a gauge can be checked against what was actually read.
 
 ### Links, and the Lavish annotation layer
 
 The board is read inside Lavish, whose annotation layer installs a capture-phase click handler that calls `preventDefault()` on everything except `[data-lavish-ui]`, `[data-lavish-action]`, and native controls (`button`, `input`, `select`, `textarea`, `option`, `optgroup`, `label`, `summary`, `[contenteditable]`).
 
-**`a` is not on that list**, so a plain anchor swallows left-clicks - both the PR links and the in-page asks-index jumps.
+**`a` is not on that list**, so a plain anchor swallows left-clicks - the PR links, and the board's link to history.
 This is not a blocker: right-click still opens a link.
 But `data-lavish-action` is Lavish's own pass-through, so making left-click work is a one-attribute authoring fix, and there is no reason to leave it unused.
-It exempts that one anchor from annotation capture and nothing else, so every other element stays annotatable and rulings still queue through the annotation layer.
+It exempts that one anchor from annotation capture and nothing else, so every other element stays annotatable.
 
-The same list runs the other way, and that direction is what the board is authored against: a native control, and everything inside it, is invisible to annotation.
-On a surface whose only input path IS annotation, a control is either an input the board cannot send or a dead spot on a row the captain has to rule on.
-So the board renders none - no `button`, no `input`, no `textarea` - and its answer options are plain elements.
-`tests/fm-bridge.test.sh` pins that portably; `tests/fm-bridge-lavish-annotation-live-e2e.test.sh` (opt-in, `FM_BRIDGE_LAVISH_LIVE_E2E=1`) checks the same rules against the INSTALLED lavish-axi and a real hosted session, and fails naming the version if upstream moves them.
+The same list runs the other way, and that direction is what the two pages are authored against: a native control, and everything inside it, is invisible to annotation.
+v2 spends that deliberately and narrowly - the answer options, the Queue button, the context disclosure, the freshness bar's reload - and nothing else.
+The context dropdowns are native `details`/`summary` rather than a custom disclosure widget, which is what keeps them annotation-safe by Lavish's own exclusion list without any attribute of their own.
 
 Every anchor goes through one `link()` helper in `bin/fm-bridge-render.sh`, which also opens external links with `target="_blank" rel="noopener noreferrer"` - the board is served in an iframe, so a same-tab navigation would replace it.
 External link text is the full URL because that is the most useful label for a pointer, not as a fallback affordance; there is deliberately no second link mechanism.
@@ -368,11 +406,11 @@ Ordinary secondary text, including a record's `note`, is dim rather than accente
 - The renderer is a deterministic script with **zero model involvement**.
   A model is never woken to update the Bridge and never hand-writes the HTML.
 - The supervision cycle owns the tick, every `FM_BRIDGE_INTERVAL` seconds (default 180, inside the captain's 2-5 minute window).
-- When the ledger content is unchanged the tick writes **nothing at all** - not a body, not a timestamp, not the same bytes again.
+- When the ledger content is unchanged the tick writes **nothing at all** - not a body, not a timestamp, not the same bytes again, and not a page whose live readings happened to move.
   The change stamp is a digest of the ledger's content, so a ledger merely touched is not a change.
 - Writing is the cost being avoided, not rendering: Lavish reloads the hosted page on any write to the file, including a byte-identical one, and the reload discards an in-progress annotation.
   The writer therefore compares before it replaces, and an unchanged board keeps its mtime.
-- The board shows one time, `content as of`, and it moves only when the content did.
+- Both pages show one time, the fold they were drawn from, and it moves only when the ledger content did.
   Supervision liveness is the beacon's and the guard's to answer, not this page's.
 
 ### When the render itself stops working
@@ -398,6 +436,7 @@ Silence there would be a stale surface wearing a freshness promise, so the tick 
 The board carries these commands in its own footer.
 
 ```sh
+bin/fm-bridge-render.sh --history                            # the history page
 bin/fm-bridge-render.sh --state | jq '.counts, .conserved'   # conservation
 bin/fm-bridge.sh lint                                        # record hygiene
 bin/fm-bridge.sh lint --strict                               # same, non-zero on problems
@@ -426,4 +465,5 @@ Because the board is a pure function of the ledger, it cannot happen - which is 
 - `bin/fm-bridge-render.sh` - the fold, the query modes, the board, the tick.
 - `bin/fm-bridge.sh --help` - current command syntax.
 - `tests/fm-bridge.test.sh` - the guard-class tests behind every claim above.
+- `docs/verification/bridge-board-v2.md` - the six rendering laws, and the measured acceptance and queue-path facts behind v2.
 - `docs/verification/bridge-hosted-input.md` - the measured Lavish hosting facts the board and its writer are built on.

@@ -556,22 +556,54 @@ FM_BRIDGE_NOW=2026-07-31T12:07:00Z FM_HOME=$HOME11 "$RENDER" --tick \
 pass "touching the ledger without changing it does not rewrite the board"
 
 # The backstop under the tick's own skip: whatever asks for a write, a render
-# that comes out byte-identical to the board already on disk must not replace
-# it. An explicit --write at a fixed clock is that case, and it is the only
-# rewrite path the tick's signature does not already stand in front of.
-before_mtime=$(board_mtime "$BOARD")
+# that comes out byte-identical to the page already on disk must not replace it.
+#
+# It is measured on HISTORY rather than the board, and the reason is the v2
+# split. History is a pure function of the fold, so two renders of one fold are
+# the same bytes and the guard has something to prove. The board is not: it also
+# draws live readings - memory headroom, provider quota - which move between any
+# two calls, so a board rendered twice legitimately differs and `cmp` would be
+# comparing a clock to itself.
+#
+# What protects the hosted board from those readings is the assertion below it:
+# a moving gauge never earns a render at all, because the tick asks the LEDGER
+# whether anything changed and skips before it draws.
+HISTORY=$(FM_HOME=$HOME11 "$RENDER" --history-path)
+[ -f "$HISTORY" ] || fail "write: the tick rendered no history page beside the board"
+before_mtime=$(board_mtime "$HISTORY")
 sleep 1
 FM_BRIDGE_NOW=2026-07-31T12:09:00Z FM_HOME=$HOME11 "$RENDER" --write >/dev/null \
   || fail "write: explicit write failed"
-first_write=$(board_mtime "$BOARD")
+first_write=$(board_mtime "$HISTORY")
 [ "$first_write" != "$before_mtime" ] \
-  || fail "write: an explicit write at a new clock did not rewrite the board, so this guard proves nothing"
+  || fail "write: an explicit write at a new clock did not rewrite the page, so this guard proves nothing"
 sleep 1
 FM_BRIDGE_NOW=2026-07-31T12:09:00Z FM_HOME=$HOME11 "$RENDER" --write >/dev/null \
   || fail "write: repeat write failed"
-[ "$(board_mtime "$BOARD")" = "$first_write" ] \
-  || fail "write: a byte-identical render replaced the board file anyway, which reloads the hosted page for nothing"
-pass "a byte-identical render never replaces the board file"
+[ "$(board_mtime "$HISTORY")" = "$first_write" ] \
+  || fail "write: a byte-identical render replaced the page anyway, which reloads the hosted copy for nothing"
+pass "a byte-identical render never replaces the page file"
+
+# THE PROPERTY THE LIVE READINGS COULD HAVE COST. Memory headroom and quota
+# move constantly, and a board redrawn every time one of them twitched would
+# reload the hosted page out from under whatever ruling the captain was
+# annotating - several times a minute, for a number nobody was waiting on.
+#
+# They cannot, because the tick's question is about the LEDGER: unchanged
+# content, no render, whatever the gauges say. Ten ticks in a row over a quiet
+# ledger must leave both files exactly as they were.
+before_board=$(board_mtime "$BOARD")
+before_history=$(board_mtime "$HISTORY")
+sleep 1
+for round in 1 2 3 4 5 6 7 8 9 10; do
+  FM_BRIDGE_NOW=2026-07-31T12:1$((round % 10)):00Z FM_HOME=$HOME11 "$RENDER" --tick \
+    || fail "tick: a quiet-ledger tick failed on round $round"
+done
+[ "$(board_mtime "$BOARD")" = "$before_board" ] \
+  || fail "tick: a live reading moved and the board was rewritten for it, reloading the hosted page for nothing"
+[ "$(board_mtime "$HISTORY")" = "$before_history" ] \
+  || fail "tick: the history page was rewritten over a quiet ledger"
+pass "moving live readings never earn a render: a quiet ledger leaves both pages alone"
 
 # The board is generated. A hand edit is not a place to put facts, and the next
 # tick says so by overwriting it.
@@ -659,8 +691,8 @@ grep -q 'render FAILED (3 in a row)' "$TICKLOG" \
   || fail "tick: the failures are not in the log, so the episode cannot be reconstructed"
 
 # Evidence of health, not the passage of time, is what clears an alarm.
-FM_HOME=$HOME11B "$RENDER" --tick >/dev/null 2>&1 \
-  || fail "tick: the render did not recover once the board path was writable again"
+recovery_out=$(FM_HOME=$HOME11B "$RENDER" --tick 2>&1) \
+  || fail "tick: the render did not recover once the board path was writable again: $recovery_out"
 [ -f "$FAILURES" ] && fail "tick: a successful render left the failure count standing"
 grep -q 'render RECOVERED after 3 consecutive failures' "$TICKLOG" \
   || fail "tick: the reset was not logged, so the alarm history stops being reconstructable"
@@ -841,6 +873,31 @@ case "$gloss" in
   *) fail "glossary: the definition is not repeated locally in the project section" ;;
 esac
 pass "a colliding term is defined up front and repeated in its project section"
+
+# AND REPEATED WHERE THE RULING IS ACTUALLY MADE. The reason for the rule is
+# that a reader arriving at a decision must never scroll back to find out which
+# meaning of a word is in play - and on the board they cannot scroll back at
+# all, because the definitions list is on the other page. It rides in the
+# card's context dropdown, which costs the board no height while closed.
+board_of "$HOME14" > "$TMP_ROOT/gloss-board.html"
+python3 - "$TMP_ROOT/gloss-board.html" <<'LOCAL' || fail "glossary: see the reported card"
+import re, sys
+html = open(sys.argv[1]).read()
+if 'id="item-g1"' not in html:
+    sys.exit("the orca ask is not on the board, so this guard proves nothing")
+card = re.split(r'<div class="ask" id=|</section>',
+                html.split('id="item-g1"', 1)[1], maxsplit=1)[0]
+if 'class="local-terms"' not in card:
+    sys.exit("the ask card does not repeat the colliding term, so the captain "
+             "must leave the board to find out which meaning is in play")
+if "the workspace layout file" not in card:
+    sys.exit("the card repeats a term but not THIS project's meaning of it")
+if "the shell test contract" in card:
+    sys.exit("the card carries another project's meaning of the term, which is "
+             "the collision rather than the definition")
+sys.exit(0)
+LOCAL
+pass "a colliding term is repeated on the ask card itself, in this project's meaning"
 
 # --- 15. routing: an item addressed elsewhere never costs captain attention --
 #
@@ -2122,6 +2179,76 @@ if not re.search(r"re-propagat", record):
 sys.exit(0)
 TABDOC
 pass "the documentation states the title is propagated at load, and promises no freshness past it"
+
+# --- 29b. between the two pages there is no gap -----------------------------
+#
+# The v2 split is the exact shape of a losing move: one page renders a subset,
+# the other renders "the rest", and "the rest" gets written as a LIST of closed
+# zones rather than as the complement. Anything that is in neither list then
+# appears on neither page - and unlike a fold that drops a line, nothing counts
+# it, so the surface looks complete while an item has silently left it.
+#
+# The fixture is the shape that actually falls through: a decision marked
+# resolved on the state axis that nothing has yet observed to end on the outcome
+# axis. It is not an ask, so the board excludes it; it is not closed, so a
+# closed-zone list excludes it too.
+
+HOME29B=$(new_home)
+FM_HOME=$HOME29B "$BRIDGE" ask -q --id gap-ask --project orca \
+  --title "a live ask, so the board has something too" --answer "A: yes" >/dev/null
+FM_HOME=$HOME29B "$BRIDGE" append -q id=gap-resolved kind=decision project=orca \
+  state=resolved title="resolved on one axis, unended on the other" >/dev/null
+FM_HOME=$HOME29B "$BRIDGE" append -q id=gap-fm kind=decision project=orca \
+  state=fm-handling title="firstmate has it, so it is not an ask" >/dev/null
+FM_HOME=$HOME29B "$BRIDGE" append -q id=gap-crit kind=critical project=fleet \
+  state=fm-handling title="an open critical firstmate is already handling" >/dev/null
+FM_HOME=$HOME29B "$BRIDGE" task -q --id gap-task --project orca --phase validating >/dev/null
+FM_HOME=$HOME29B "$BRIDGE" ask -q --id gap-co --project machine \
+  --title "routed away" --answer "A: yes" --to cocaptain >/dev/null
+
+FM_HOME=$HOME29B "$RENDER" --state > "$TMP_ROOT/gap-state.json"
+board_of "$HOME29B" > "$TMP_ROOT/gap-board.html"
+history_of "$HOME29B" > "$TMP_ROOT/gap-history.html"
+
+python3 - "$TMP_ROOT/gap-state.json" "$TMP_ROOT/gap-board.html" \
+         "$TMP_ROOT/gap-history.html" <<'GAP' || fail "pages: see the reported item"
+import json, sys
+doc = json.load(open(sys.argv[1]))
+board = open(sys.argv[2]).read()
+history = open(sys.argv[3]).read()
+
+BOARD_KINDS = ("critical", "decision", "event", "task")
+missing, doubled = [], []
+for key, item in doc["items"].items():
+    if item["kind"] not in BOARD_KINDS:
+        continue                      # substrate renders on neither page, by contract
+    anchor = 'id="item-%s"' % key
+    on_board, on_history = anchor in board, anchor in history
+    if not on_board and not on_history:
+        missing.append((key, item["state"], item["outcome"]))
+    if on_board and on_history:
+        doubled.append(key)
+
+if missing:
+    sys.exit("these items are on NEITHER page, so the record holds them and no "
+             "surface shows them: %s" % missing)
+# The split is a partition, not an overlap: an item triaged twice is the cost
+# the asks index was removed to avoid.
+if doubled:
+    sys.exit("these items render on BOTH pages, so the captain triages them "
+             "twice: %s" % doubled)
+
+# And the fixture has to have contained the awkward case, or it proved nothing.
+gap = doc["items"]["gap-resolved"]
+if gap["state"] != "resolved" or gap["ended"]:
+    sys.exit("the fixture item is no longer resolved-but-unended (%s/%s), so "
+             "this guard no longer covers the case it was built for"
+             % (gap["state"], gap["outcome"]))
+if "item-gap-ask" not in board:
+    sys.exit("the live ask is not on the board, so the fixture proves nothing")
+sys.exit(0)
+GAP
+pass "every board-kind item lands on exactly one of the two pages"
 
 # --- 30. the renderer leaves nothing behind --------------------------------
 #
