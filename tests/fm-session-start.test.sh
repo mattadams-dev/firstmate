@@ -785,8 +785,15 @@ SH
       while [ "$(find "$ready" -type f | wc -l | tr -d ' ')" -lt 40 ]; do
         sleep 0.01
       done
+      # Distinct session ids, because these are 40 competing SESSIONS. Mutual
+      # exclusion is a property of sessions, not of processes: one session
+      # legitimately spans several harness processes (its CLI and the harness
+      # behind a pty host), which is exactly what the identity basis exists to
+      # tolerate. Letting all 40 share one id would model one session with 40
+      # layers and prove nothing about exclusion.
       if FM_HOME="$home" FM_FAKE_LOCK_STATE="$home/state" \
         FM_FAKE_HARNESS_PID="$harness_pid" PATH="$fakebin:$BASE_PATH" \
+        CLAUDE_CODE_SESSION_ID="sess-$i" \
         "$ROOT/bin/fm-lock.sh" >/dev/null 2>&1; then
         printf '%s\n' "$harness_pid" >> "$winners"
       fi
@@ -804,7 +811,89 @@ SH
   count=$(awk 'NF { count++ } END { print count + 0 }' "$winners")
   [ "$count" -eq 1 ] || fail "concurrent session-lock acquisition produced $count winners"
 
-  pass "concurrent session-lock acquisition admits exactly one live harness"
+  pass "concurrent session-lock acquisition admits exactly one live session"
+}
+
+# The other half of the same property, and the reason the test above hands out
+# distinct ids. Concurrent acquirers belonging to ONE session must all succeed -
+# refusing them is the deadlock - and must still leave one coherent record
+# rather than an interleaved one.
+test_session_lock_concurrent_same_session_all_admitted() {
+  local rec root home fakebin ready completed winners pids i pid count
+  rec=$(new_world lock-concurrency-same-session)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  ready="$home/ready"
+  completed="$home/done"
+  winners="$home/winners"
+  mkdir -p "$ready" "$completed"
+  : > "$winners"
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+set -u
+pid=
+previous=
+for argument in "$@"; do
+  [ "$previous" = -p ] && pid=$argument
+  previous=$argument
+done
+case "$*" in
+  *"comm="*)
+    if [ -f "$FM_FAKE_LOCK_STATE/harness-$pid" ]; then
+      printf '%s\n' /usr/local/bin/claude
+    else
+      printf '%s\n' /bin/bash
+    fi
+    ;;
+  *"args="*)
+    if [ -f "$FM_FAKE_LOCK_STATE/harness-$pid" ]; then
+      printf '%s\n' claude
+    else
+      printf '%s\n' bash
+    fi
+    ;;
+  *"ppid="*) printf '%s\n' "$FM_FAKE_HARNESS_PID" ;;
+  *) exit 1 ;;
+esac
+SH
+  chmod +x "$fakebin/ps"
+
+  pids=
+  i=1
+  while [ "$i" -le 12 ]; do
+    (
+      harness_pid=$(sh -c 'printf "%s\n" "$PPID"')
+      : > "$home/state/harness-$harness_pid"
+      : > "$ready/$i"
+      while [ "$(find "$ready" -type f | wc -l | tr -d ' ')" -lt 12 ]; do
+        sleep 0.01
+      done
+      if FM_HOME="$home" FM_FAKE_LOCK_STATE="$home/state" \
+        FM_FAKE_HARNESS_PID="$harness_pid" PATH="$fakebin:$BASE_PATH" \
+        CLAUDE_CODE_SESSION_ID=one-session \
+        "$ROOT/bin/fm-lock.sh" >/dev/null 2>&1; then
+        printf '%s\n' "$harness_pid" >> "$winners"
+      fi
+      : > "$completed/$i"
+      while [ "$(find "$completed" -type f | wc -l | tr -d ' ')" -lt 12 ]; do
+        sleep 0.01
+      done
+    ) &
+    pids="$pids $!"
+    i=$((i + 1))
+  done
+  for pid in $pids; do
+    wait "$pid" 2>/dev/null || true
+  done
+  count=$(awk 'NF { count++ } END { print count + 0 }' "$winners")
+  [ "$count" -eq 12 ] || fail "one session's own concurrent acquirers were refused: $count of 12 succeeded"
+  [ "$(wc -l < "$home/state/.lock")" -eq 2 ] \
+    || fail "concurrent same-session acquisition left an interleaved lock record"
+  [ "$(sed -n 2p "$home/state/.lock")" = "session=one-session" ] \
+    || fail "the settled record does not name the acquiring session"
+
+  pass "concurrent same-session acquisition admits every layer and settles one coherent record"
 }
 
 # --- output ordering ----------------------------------------------------------
@@ -1446,6 +1535,7 @@ test_lock_refusal_read_only_path
 test_lock_write_failure_read_only_path
 test_trace_context_effective_state_is_frozen_after_lock
 test_session_lock_concurrent_single_winner
+test_session_lock_concurrent_same_session_all_admitted
 test_output_ordering_diagnostics_lead
 test_herdr_backend_diagnostics_follow_real_session_start
 test_session_start_relaunches_missing_pi_secondmate
