@@ -562,7 +562,7 @@ brief_failed() {
 # on stderr and marked MANUAL=<step>[+<step>] on the reading itself.
 ensure_sync_task() {
   local slug=$1 up=$2 fork_branch=$3 up_branch=$4 behind=$5 ahead=$6 status=$7
-  local id brief taken harness clone manual="" name archived="" verb
+  local id brief taken harness clone manual="" name archived=""
   local standing need rc=0 confirmed title note
   id=$(sync_task_id "$slug")
   brief="$DATA/$id/brief.md"
@@ -660,13 +660,17 @@ ensure_sync_task() {
   # Never inferred from $rc: confirmed.
   confirmed=$(task_liveness "$id")
 
+  # Anything but a confirmed open task leaves the backlog needing a hand, so the
+  # marker is added once and the whole set formatted once, whichever way this
+  # reading ends.
+  case "$confirmed" in 'open '*) ;; *) manual="$manual+backlog" ;; esac
+  [ -z "$manual" ] || manual=" MANUAL=${manual#+}"
+
   case "$confirmed" in
-    'open '*) verb="queued" ;;
+    'open '*) ;;
     'unknown '*)
       printf 'TASK_UNCONFIRMED: %s is behind and the %s of sync task %s could not be confirmed afterwards (%s); check the backlog by hand rather than reading this as queued\n' \
         "$slug" "$need" "$id" "${confirmed#unknown }" >&2
-      manual="$manual+backlog"
-      [ -z "$manual" ] || manual=" MANUAL=${manual#+}"
       printf 'task %s queue-state unknown after %s (%s)%s%s\n' \
         "$id" "$need" "${confirmed#unknown }" "$manual" "$archived"
       return 0
@@ -674,32 +678,29 @@ ensure_sync_task() {
     *)
       printf 'TASK_MANUAL: %s is behind but sync task %s did not %s - %s; queue it by hand\n' \
         "$slug" "$id" "$need" "$(standing_phrase "$confirmed")" >&2
-      manual="$manual+backlog"
-      [ -z "$manual" ] || manual=" MANUAL=${manual#+}"
       printf 'task %s NOT queued: %s after %s%s%s\n' \
         "$id" "$(standing_phrase "$confirmed")" "$need" "$manual" "$archived"
       return 1
       ;;
   esac
-  [ -z "$manual" ] || manual=" MANUAL=${manual#+}"
 
   harness=$(dispatch_harness)
   if [ "$DISPATCH" != 1 ]; then
-    printf 'task %s %s%s%s\n' "$id" "$verb" "$manual" "$archived"
+    printf 'task %s queued%s%s\n' "$id" "$manual" "$archived"
     return 0
   fi
   if ! clone=$(clone_dir_for "$slug"); then
-    printf 'task %s %s (no local copy of %s in this home)%s%s\n' "$id" "$verb" "${slug##*/}" "$manual" "$archived"
+    printf 'task %s queued (no local copy of %s in this home)%s%s\n' "$id" "${slug##*/}" "$manual" "$archived"
     return 0
   fi
   if [ -z "$harness" ]; then
-    printf 'task %s %s (no fork-sync-harness configured)%s%s\n' "$id" "$verb" "$manual" "$archived"
+    printf 'task %s queued (no fork-sync-harness configured)%s%s\n' "$id" "$manual" "$archived"
     return 0
   fi
   if "$SCRIPT_DIR/fm-spawn.sh" "$id" "$clone" --harness "$harness" >/dev/null 2>&1; then
     printf 'task %s dispatched%s%s\n' "$id" "$manual" "$archived"
   else
-    printf 'task %s %s (worker could not be launched)%s%s\n' "$id" "$verb" "$manual" "$archived"
+    printf 'task %s queued (worker could not be launched)%s%s\n' "$id" "$manual" "$archived"
   fi
 }
 
