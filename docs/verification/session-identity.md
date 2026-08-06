@@ -113,13 +113,14 @@ A mutant that weakens the identity comparison must break its own test, and a mut
 A guard that refuses everything is not safe; it is the same failure one mirror over, because it is disabled by the next person under time pressure.
 
 Every mutant below was applied one at a time to a clean tree, with each test run in its own shell and the tree restored before the next.
+The table was re-measured in full against the final branch state on 2026-08-05, so no row records a verdict from an earlier revision.
 `tests/fm-session-identity.test.sh` owns these fixtures unless another suite is named.
 
 Weakening - the identity check admits something it must refuse:
 
 | Mutant | File | Change | Broke |
 | --- | --- | --- | --- |
-| W1 | `bin/fm-session-lock-lib.sh` | any established session matches the lock | `test_refuse_lock_naming_another_session` |
+| W1 | `bin/fm-session-lock-lib.sh` | any established session matches the lock | `test_refuse_lock_naming_another_session`, and `test_identity_refusal_is_recorded` |
 | W2 | `bin/fm-session-lock-lib.sh` | a caller whose own session id is unestablishable inherits the lock's | `test_refuse_when_own_session_unestablishable` |
 | W3 | `bin/fm-safe-kill.sh` | read the lock file whole again instead of its pid line | `test_safe_kill_still_refuses_the_lock_holder` |
 | W4 | `bin/fm-lock.sh` | acquire over a live holder naming another session | `test_lock_refuses_a_different_live_session` |
@@ -136,6 +137,8 @@ Over-refusal - the identity check refuses something it must admit:
 | R3 | `bin/fm-lock.sh` | refuse to acquire at all when no session id is observable | `test_lock_without_a_session_id_stays_on_the_pid_basis` |
 | R4 | `bin/fm-lock.sh` | refuse a session's own lock whenever the recorded pid is live | `test_lock_is_reacquired_by_its_own_session` |
 | R5 | `bin/fm-claude-stop-autoarm.sh` | refuse before ownership is tested at all | `tests/fm-claude-stop-autoarm.test.sh`, nested-ancestry arm |
+
+R5 is killed by the auto-arm suite rather than by this one, and that is the right owner: "a legitimate owner still arms" is the auto-arm's own contract, and duplicating its fixture here would give the two copies room to drift.
 
 R4 is worth keeping in mind when editing these fixtures.
 It survived the first version of `test_lock_is_reacquired_by_its_own_session`, because that fixture recorded an ordinary live shell as the prior holder and the harness-liveness predicate rejects a shell - so the live-holder branch the mutant changes was never reached.
