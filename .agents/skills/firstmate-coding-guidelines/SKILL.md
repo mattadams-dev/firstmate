@@ -121,6 +121,10 @@ Run `bin/fm-doc-audience-check.sh`; it enforces classification, README setup rou
 - Run `bin/fm-lint.sh` before treating a script change as done; it is the single owner of the lint definition (file set, config, and pinned shellcheck version) that CI and the no-mistakes pre-push gate both invoke, and it refuses to run under any other shellcheck version.
 - Colocate tests with the existing pattern in `tests/`, name them `<subject>.test.sh`, and extend an existing script rather than inventing a new runner.
 - Tests must exercise behavior through an executable or public interface and must never assert implementation-source bytes, including through parsers, regexes, snapshots, or indirect wrappers.
+- Build a timing-dependent assertion so that load moves it away from failing, and never rest its verdict on whether some work finished inside a margin.
+  A margin that load can close makes the test a stopwatch on the runner: a slow machine and a broken product then produce the identical reading, so the failure names a defect that did not occur and trains the next reader to re-run rather than look.
+  Prefer reading the durable record the behavior already writes over inferring the answer from whether something fit in time.
+  Where a fixture must arrange an ordering, check its precondition and fail naming the fixture, so a machine too slow to establish it is never reported as a product fault.
 - A maintainer-verification record under `docs/verification/` records active empirical facts, not assumptions or task chronology.
 - Include the date, version, exact commands run, and exact output needed to support the current guarantee.
 - Keep incident chronology and delivery evidence in private task reports or PR evidence unless a concise rationale is required to maintain a current safety boundary.
