@@ -219,33 +219,7 @@ So point `CHROME_DEVTOOLS_AXI_BROWSER_URL` at a browser that renders in the fore
 
 ## The guards, proven to fire
 
-Each mutation was applied to `bin/fm-bridge-render.sh` on its own, the suite run, and the renderer restored.
-"First failing guard" is what `tests/fm-bridge.test.sh` reported; the suite stops at the first failure, so a mutant reaching its own guard means nothing earlier caught it by accident.
+The mutation matrix and the live guard's own mutation check now live in [`bridge-board-v2.md`](bridge-board-v2.md), section 9, re-measured against the v2 board and its guards on 2026-08-05.
 
-These runs were taken against the **v1** board and have not been re-measured since.
-Every guard named here still exists in `tests/fm-bridge.test.sh`, but two of the mutations describe a rule v2 replaced; they are marked rather than dropped, because a recorded result is worth more than a tidy table.
-What the guards forbid now is in [`bridge-board-v2.md`](bridge-board-v2.md), section 6.
-
-| mutation | first failing guard |
-|---|---|
-| a sendable-looking composer returns to the board | `input path: see the reported element` |
-| answer options go back to being controls (**v1 rule; v2 renders them as controls on purpose**) | `input path: see the reported element` |
-| the per-item anchors are stripped from the cards | `mode drift: an ask present in folded state is missing from the board` |
-| the visible ref is dropped from the ask cards | `annotation anchors: see the reported ask` |
-| the answer options stop naming their own ask (**v1 rule; in v2 the ref and title carry that, outside the control**) | `annotation anchors: see the reported ask` |
-| the signpost is removed with the composer | `signpost: see the reported gap` |
-| the tick rewrites the board on an unchanged ledger | `tick: an unchanged ledger rewrote the board file` |
-| the writer stops comparing before it replaces | `write: a byte-identical render replaced the board file anyway` |
-
-The live guard was mutation-checked the same way, against the real vendor and a real browser rather than against the pinned list:
-
-| mutation | live guard verdict |
-|---|---|
-| none - the v1 board as it shipped | `all live Lavish annotation guards passed against lavish-axi 0.1.43` |
-| answer options rendered as `<button>` | `the board renders its answer option as a native control: uid=... button "O1: A: retire it"` |
-
-That second row is the one v2 inverted: the same shape is now what the guard requires rather than what it rejects, and its current output is recorded in [`bridge-board-v2.md`](bridge-board-v2.md), section 8.
-
-The ref mutant is the one worth keeping in mind: it passed the first version of the anchor guard, because the refs also appeared in the v1 asks index at the top of the page and a document-wide search found them there.
-An annotation is rooted where it was placed and never sees the index, so the guard now searches the ask's own card or row.
-A guard that reads the whole page answers a question nobody asked.
+The v1 results that stood here have been dropped rather than marked, because they were verdicts about dead code: two of their rows described rules v2 inverted, so the mutation each recorded as a failure is the shipped state now.
+Section 9 records what was observed on the current renderer, including two invariants that turned out to have no guard behind them at all.

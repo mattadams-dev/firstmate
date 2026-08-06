@@ -476,6 +476,6 @@ Because the board is a pure function of the ledger, it cannot happen - which is 
 - `bin/fm-bridge-lib.sh` - writer contract, normalization, the append primitive.
 - `bin/fm-bridge-render.sh` - the fold, the query modes, the board, the tick.
 - `bin/fm-bridge.sh --help` - current command syntax.
-- `tests/fm-bridge.test.sh` - the guard-class tests behind every claim above.
-- `docs/verification/bridge-board-v2.md` - the six rendering laws, and the measured acceptance and queue-path facts behind v2.
+- `tests/fm-bridge.test.sh` - the guard-class tests behind the claims above, with two measured exceptions: the lane-health `unknown` rule and the history page's freshness bar are stated here and guarded nowhere ([`docs/verification/bridge-board-v2.md`](verification/bridge-board-v2.md), section 9b).
+- `docs/verification/bridge-board-v2.md` - the six rendering laws, the measured acceptance and queue-path facts behind v2, and the mutation sweep that proves which of its guards actually fire.
 - `docs/verification/bridge-hosted-input.md` - the measured Lavish hosting facts the board and its writer are built on.

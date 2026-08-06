@@ -253,6 +253,96 @@ It cannot: the artifact frame is sandboxed without `allow-same-origin`, so the h
 The behavioural measurement is section 3 above, taken by attaching to the frame's own CDP target, and the binary pin is what says whether that measurement is still about the version installed.
 If those names leave the binary, the guard fails naming the version rather than passing quietly over a queue path nobody has re-measured.
 
+## 9. The guards, proven to fire against v2
+
+A guard whose failing direction has never been observed under the rules it now enforces is unproven, and these guards protect the integrity of the captain's decision record.
+The matrix that stood in `docs/verification/bridge-hosted-input.md` was recorded against the v1 board, and v1 is dead code: two of its rows described rules v2 inverted, so the mutation each recorded as a failure is now the shipped state.
+That file now points here, and this section is the matrix's one home.
+Every verdict below was observed on this branch on 2026-08-05.
+Nothing is carried forward from the v1 sweep.
+
+**Method, unchanged from how the v1 table was built.**
+Each mutation was applied to `bin/fm-bridge-render.sh` on its own, `bash tests/fm-bridge.test.sh` was run, and the FIRST failing guard was recorded as the suite reported it.
+The renderer was restored from git before and after every mutation, so no mutant could survive into the branch or contaminate the next one.
+The suite stops at the first failure, so a mutant reaching its own guard is what proves nothing earlier caught it by accident.
+Baseline before and after the sweep: 100 assertions, all passing, and `git status` clean.
+
+### 9a. The portable matrix
+
+| mutation | first failing guard |
+| --- | --- |
+| a sendable-looking composer returns to the board | `input path: see the reported element` - `the board renders textarea, which is either an input it cannot send or a spot the captain cannot annotate` |
+| answer options go back to being inert spans | `mode drift: a task-kind ask is shown but not answerable where it lands` - `the PR card lists its answers but offers no way to queue one` |
+| a button with no accounted-for role is added to the board | `input path: see the reported element` - `the board renders a button with no accounted-for role, so something on it promises an action nobody has checked` |
+| the queue key is dropped from the ask card | `annotation anchors: see the reported ask` - `ask l1 carries no queue key, so a queued ruling could not name the ask it answers, or replace its own earlier answer` |
+| the per-item anchors are stripped from the cards | `mode drift: an ask present in folded state is missing from the board` |
+| the visible ref is dropped from the ask cards | `annotation anchors: see the reported ask` - `ask l1 renders no visible ref outside its controls, so a free-text ruling on it arrives unquotable` |
+| the signpost is removed with the composer | `signpost: see the reported gap` - `the board never names where a queued or annotated ruling is sent from` |
+| the tick rewrites the board on an unchanged ledger | `tick: an unchanged ledger changed the board's bytes` |
+| the writer stops comparing before it replaces | `write: a byte-identical render replaced the page anyway, which reloads the hosted copy for nothing` |
+| a board-kind item renders on neither page (decisions zone) | `pointer: see the report` - caught, but by a different guard; see below |
+| a board-kind item renders on neither page (fleet zone) | `pages: see the reported item` - `these items are on NEITHER page, so the record holds them and no surface shows them: [('gap-task', 'fm-handling', 'in-flight')]` |
+| a board-kind item renders on both pages | `pages: see the reported item` - `these items render on BOTH pages, so the captain triages them twice: ['gap-ev-cap', 'gap-ev-co']` |
+| the decisions-zone label drifts from the severity-first sort | `sort label: see the report` - `the label does not say the queue is ordered by severity` |
+| an option is marked queued without an observed queue verdict | `queueing: see the reported path` - `an answer is marked queued without checking that the queue call actually succeeded` |
+| the renderer leaks the fold program it staged | `--state left 1 file(s) behind in its temp dir: fm-bridge-prog.NxrefL.py` |
+| the probe cache is bypassed, so every render spawns the subprocess again | `the second render ignored the cached reading and probed again, so every render on the watcher's poll pays the subprocess cost` |
+| the critical chip is rendered twice | `criticals: see the report` - `the critical card carries the same chip twice (['critical', 'critical']), which reads as two facts where the record made one` |
+
+Two of these rows are the ones v2 inverted, and they are stated in their v2 direction rather than carried over.
+v1 failed a board that rendered answer options as controls; v2 ships them as controls deliberately, so the mutation worth proving is the return of the inert span - and it breaks the queue path, which is what the suite reported.
+v1 carried the ask's visible ref inside the option text; v2 carries ask identity in `data-ask-ref`, so the mutation worth proving is dropping the queue key from the card.
+
+**The partition guard, and why it has two rows.**
+The first neither-page mutation dropped every open-elsewhere decision from the history page, which is the complement-vs-zone-list error the guard exists for.
+It was caught, but by the pointer guard rather than the partition guard: the pointer guard's own fixture contains a resolved-with-no-pointer decision, that decision is exactly the item the mutation hid, and its warning left the page along with it.
+So the mutation is caught twice over, and the partition guard's own missing-direction had still not been observed.
+The second row narrows the same error to the fleet zone, where it disturbs no earlier fixture, and it reaches the partition guard.
+Both rows are kept: the first is the honest record of what fired, the second is the proof the guard fires at all.
+
+**The blind spot this matrix has already caught once**, carried here with the table it belongs to.
+The dropped-ref mutant passed the FIRST version of the anchor guard, because the refs also appeared in the v1 asks index at the top of the page and a document-wide search found them there.
+An annotation is rooted where it was placed and never sees an index, so the guard now searches the ask's own card or row.
+A guard that reads the whole page answers a question nobody asked.
+
+### 9b. Two invariants with no guard behind them
+
+These three mutations SURVIVED: the full suite passed with each of them applied.
+This is an observed negative result, not a reading that could not be taken - no guard failed to answer, there is no guard.
+They cover two invariants, each stated in the renderer's own comments and in this record, and neither is enforced by anything.
+
+| mutation | result |
+| --- | --- |
+| lane health falls through to green when the watcher key does not resolve | SURVIVED - 100 assertions passed |
+| a lapsed supervision beacon no longer forces lane health to unknown | SURVIVED - 100 assertions passed |
+| the freshness bar is removed from the history page | SURVIVED - 100 assertions passed |
+
+The first two are the two arms of one rule, and neither is guarded, so the whole rule is unguarded rather than half of it.
+`if not live or key is None: health = "unknown"` is the line, and each arm was deleted on its own.
+An unresolved key matches no marker, so the watcher's verdict was never read; a lapsed beacon means nobody is maintaining the markers, so the absence of a warning stopped being good news.
+A green dot over a lane supervision has flagged as wedged is precisely the state both arms exist to prevent, and either deletion restores that green with the suite still green too.
+`docs/bridge.md` states the beacon half of this rule as a property of the board; nothing enforces it.
+
+The third is the rule section 5 above ends on: both pages carry the bar because both run the poll, and a page that changes its freshness dot without the bar signals a state it can neither explain nor let the reader act on.
+`tests/fm-bridge.test.sh` checks the bar on the board only; the history page's copy can be deleted and the suite stays green.
+
+Closing either gap is a test change and therefore not this change's to make.
+They are recorded here so the next hand starts from the measurement rather than from the assumption that a documented invariant is a guarded one.
+
+### 9c. The live guard
+
+Measured against the INSTALLED `lavish-axi` 0.1.43 and Chromium 150.0.7871.128, headless, with `FM_BRIDGE_LAVISH_LIVE_E2E=1` and `CHROME_DEVTOOLS_AXI_BROWSER_URL` pointed at its remote-debugging port.
+The guard reached its browser assertions in both runs, so neither verdict is a COULD NOT OBSERVE.
+
+| mutation | live guard verdict |
+| --- | --- |
+| none - the v2 board as it ships | `all live Lavish annotation guards passed against lavish-axi 0.1.43` |
+| answer options rendered as inert spans | `not ok - the board renders its answer option as something other than a native control: uid=g3:1_29 StaticText "A: retire it"` |
+
+That second row is the v1 row inverted.
+v1 failed when an option rendered as `<button>`; v2 requires exactly that shape, so the failing direction to prove is the span, and it fires.
+Section 8 above records the guard's full passing output; this sweep re-ran it and got that output back byte for byte, which is the baseline the second row is measured against.
+
 ## Refreshing these measurements
 
 Re-run after any `lavish-axi` upgrade, and after any change to the board's layout or queue path.
