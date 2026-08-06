@@ -432,27 +432,61 @@ pass "a queued job that expires before the worker starts is never executed"
 
 FIRST_DELAYED_SIDE_EFFECT="$TMP_ROOT/first-delayed-side-effect"
 SECOND_DELAYED_SIDE_EFFECT="$TMP_ROOT/second-delayed-side-effect"
-FM_REMOTE_JOB_QUEUE_TIMEOUT=5
-FM_REMOTE_JOB_TIMEOUT=3
+# The guarantee is that a queued job's execution window opens when the worker
+# claims it, not when it was staged: queue time must not be subtracted from the
+# execution timeout.
+#
+# That used to be inferred from whether a 1.8-second sleep happened to fit inside
+# a 3-second window, which left 1.2 seconds of slack to cover process startup,
+# tracked-command validation and the worker's own poll latency. Under load the
+# slack went first and the job was killed at its timeout, and the assertion then
+# announced "queue time consumed the second job's execution timeout" - naming a
+# defect that had not occurred, because a slow machine and a subtracted window
+# produce the identical reading through a stopwatch.
+#
+# The durable record answers the question directly. The window's opening time is
+# recorded, so compare it against when the job was staged: the difference is the
+# queue wait the window was granted ON TOP of its timeout, which is exactly the
+# quantity a subtracting implementation would drive to zero. A slow machine makes
+# the queue wait longer, so this reading moves away from the failure threshold
+# under the conditions that used to cross it.
+FM_REMOTE_JOB_QUEUE_TIMEOUT=30
+FM_REMOTE_JOB_TIMEOUT=10
 fm_remote_job_stage "$ACCOUNT_HOME" "$REMOTE_ROOT" "$REMOTE_HOME" \
-  fm-delay-job.sh 1.8 "$FIRST_DELAYED_SIDE_EFFECT" < /dev/null > /dev/null
+  fm-delay-job.sh 2 "$FIRST_DELAYED_SIDE_EFFECT" < /dev/null > /dev/null
 FIRST_JOB_ID=$FM_REMOTE_JOB_ID
 FIRST_JOB_DIR="$STATE_ROOT/jobs/$FIRST_JOB_ID"
-for _ in $(seq 1 100); do
+for _ in $(seq 1 200); do
   [ "$(fm_remote_job_read_state "$FIRST_JOB_DIR" 2>/dev/null || true)" = running ] && break
   sleep 0.05
 done
 [ "$(fm_remote_job_read_state "$FIRST_JOB_DIR" 2>/dev/null || true)" = running ] \
   || fail "the first delayed job did not begin running"
+SECOND_STAGED_AT=$(date +%s)
 fm_remote_job_stage "$ACCOUNT_HOME" "$REMOTE_ROOT" "$REMOTE_HOME" \
-  fm-delay-job.sh 1.8 "$SECOND_DELAYED_SIDE_EFFECT" < /dev/null > /dev/null
+  fm-delay-job.sh 1 "$SECOND_DELAYED_SIDE_EFFECT" < /dev/null > /dev/null
 JOB_ID=$FM_REMOTE_JOB_ID
+JOB_DIR="$STATE_ROOT/jobs/$JOB_ID"
+for _ in $(seq 1 600); do
+  [ "$(fm_remote_job_read_state "$JOB_DIR" 2>/dev/null || true)" = running ] && break
+  sleep 0.05
+done
+[ "$(fm_remote_job_read_state "$JOB_DIR" 2>/dev/null || true)" = running ] \
+  || fail "the queued job never began running behind the first"
+SECOND_DEADLINE=$(fm_remote_job_read_deadline "$JOB_DIR") \
+  || fail "the claimed queued job did not record an execution deadline"
+SECOND_TIMEOUT=$(fm_remote_job_read_number "$JOB_DIR" timeout) \
+  || fail "the claimed queued job did not record an execution timeout"
+GRANTED_AFTER_QUEUE_WAIT=$((SECOND_DEADLINE - SECOND_STAGED_AT - SECOND_TIMEOUT))
+[ "$GRANTED_AFTER_QUEUE_WAIT" -ge 1 ] \
+  || fail "queue time consumed the second job's execution timeout"
 fm_remote_job_wait "$ACCOUNT_HOME" "$FIRST_JOB_ID" || fail "$FM_REMOTE_JOB_ERROR"
 fm_remote_job_wait "$ACCOUNT_HOME" "$JOB_ID" || fail "$FM_REMOTE_JOB_ERROR"
-[ "$FM_REMOTE_JOB_EXIT" -eq 0 ] || fail "queue time consumed the second job's execution timeout"
+[ "$FM_REMOTE_JOB_EXIT" -eq 0 ] || fail "the queued job did not complete inside its own execution window"
 assert_present "$SECOND_DELAYED_SIDE_EFFECT" "the queued job did not receive its full execution timeout"
 fm_remote_job_reap "$ACCOUNT_HOME" "$FIRST_JOB_ID" || fail "the first delayed job could not be reaped"
 fm_remote_job_reap "$ACCOUNT_HOME" "$JOB_ID" || fail "the second delayed job could not be reaped"
+FM_REMOTE_JOB_QUEUE_TIMEOUT=5
 pass "queued jobs receive a fresh bounded execution window"
 
 STARTED="$TMP_ROOT/shutdown-started"
