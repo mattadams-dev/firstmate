@@ -37,8 +37,9 @@ They resolve per home, so a secondmate reads and writes its own and never the pa
 | Change stamp | `$FM_HOME/state/.bridge-render` | content digest of the ledger; drives skip-when-unchanged |
 | Failure count | `$FM_HOME/state/.bridge-tick-failures` | consecutive failed renders and the reason; absent means the last render landed |
 | Tick log | `$FM_HOME/state/.bridge-tick.log` | bounded history of render failures and recoveries |
+| Probe cache | `$FM_HOME/state/.bridge-probe-host`, `.bridge-probe-quota` | last host-memory and quota readings with their timestamps; keeps a subprocess off the supervision loop |
 
-Ask the scripts rather than hardcoding: `bin/fm-bridge.sh path ledger` and `bin/fm-bridge.sh path board`; `bin/fm-bridge-render.sh --history-path` prints the history page.
+Ask the scripts rather than hardcoding: `bin/fm-bridge.sh path ledger`, `path board`, and `path history`.
 History is derived from the board's own directory, so an `FM_BRIDGE_BOARD` override moves both pages together rather than breaking the link between them.
 
 ## Reading it: `--state` is the only supported reader
@@ -339,6 +340,12 @@ Where the memory floor itself is unreadable the verdict is `UNKNOWN`, not `ADMIS
 
 Because the tick only re-renders when the ledger content changed, these readings are as of the last render, which is exactly what the header's fold time states.
 Re-rendering on a changed gauge would mean writing the file - and writing is what reloads the hosted page out from under a ruling in progress.
+
+**The two probes that spawn a process are cached, because this renders on the watcher's own poll.**
+A second spent probing is a second the watcher is not watching: measured, the host probe alone cost 0.5s and took the whole render from 0.2s to 1.4s, enough to push a one-second poll past a three-second guard.
+So the host-memory and quota readings are cached in `state/` for five minutes with a two-second probe timeout, and a reused reading carries its age on the gauge - a cached number shown as a live one is the capacity lesson with a shorter half-life.
+Memory headroom is a file read and is always taken fresh.
+A failed refresh falls back to the last good reading with its real age attached, rather than blanking a gauge that has an answer.
 
 ### The input path
 

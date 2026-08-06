@@ -22,7 +22,7 @@
 #   fm-bridge.sh state [--id ID]        -> bin/fm-bridge-render.sh --state
 #   fm-bridge.sh lifecycle ID           -> bin/fm-bridge-render.sh --lifecycle
 #   fm-bridge.sh lint [--strict]        record hygiene, over folded state
-#   fm-bridge.sh path [ledger|board]
+#   fm-bridge.sh path [ledger|board|history]
 #
 # --to is the ROUTING decision: which reader's queue the item lands on.
 # `--to cocaptain` addresses machine and repo-infrastructure work to the
@@ -209,7 +209,8 @@ case "$COMMAND" in
     case "${1:-ledger}" in
       ledger) fm_bridge_ledger_path; echo ;;
       board) fm_bridge_board_path; echo ;;
-      *) die "path takes ledger or board" ;;
+      history) fm_bridge_history_path; echo ;;
+      *) die "path takes ledger, board, or history" ;;
     esac
     ;;
   state)

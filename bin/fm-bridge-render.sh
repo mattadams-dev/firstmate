@@ -1497,7 +1497,58 @@ WATCHER_BEACON_MAX_AGE = 600
 # available"), and the ceiling it is compared against is read live every time.
 ADMISSION_FLOOR_MIB = 2048
 
-PROBE_TIMEOUT = 8
+# A SUBPROCESS ON THIS PATH IS A SUBPROCESS ON THE SUPERVISION LOOP.
+#
+# The board renders from bin/fm-watch.sh's own poll, so every second spent
+# probing here is a second the watcher is not watching. Measured: the host
+# probe alone cost 0.5s and the whole render went from 0.2s to 1.4s, which was
+# enough to push a one-second poll past a three-second guard.
+#
+# So the two subprocess probes are cached in state/ with a TTL, and their
+# timeout is short. A render reuses a recent reading; at most one render per
+# TTL window pays for a fresh one, and it pays at most PROBE_TIMEOUT. The
+# gauges say how old a reused reading is, because a cached number presented as
+# a live one is the capacity lesson with a shorter half-life.
+PROBE_TIMEOUT = 2
+PROBE_CACHE_TTL = 300
+
+
+def _cache_path(state_dir, name):
+    return os.path.join(state_dir, ".bridge-probe-%s" % name)
+
+
+def _cached_probe(state_dir, name, reader, now_epoch):
+    """A recent reading and its age, or a fresh one, or an honest reason.
+
+    A stale cache is never served silently: `age_seconds` travels with the
+    value so the gauge can say when it was taken, and a failed refresh falls
+    back to the last good reading rather than blanking the gauge - with its
+    real age attached, so nothing about it reads as current.
+    """
+    path = _cache_path(state_dir, name)
+    cached, age = None, None
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            record = json.load(handle)
+        age = max(0, now_epoch - int(record["at"]))
+        cached = record["value"]
+    except (OSError, ValueError, KeyError, TypeError):
+        cached, age = None, None
+
+    if cached is not None and age is not None and age < PROBE_CACHE_TTL:
+        return cached, "", age
+
+    value, why = _probe(reader)
+    if value is None:
+        if cached is not None:
+            return cached, "", age
+        return None, why, None
+    try:
+        with open(path, "w", encoding="utf-8") as handle:
+            json.dump({"at": now_epoch, "value": value}, handle)
+    except OSError:
+        pass                      # a cache that cannot be written is not fatal
+    return value, "", 0
 
 
 def _run(argv, timeout=PROBE_TIMEOUT):
@@ -1706,7 +1757,9 @@ def collect_env(fm_home, state_dir, folded_at):
             "admission": {"floor_mib": ADMISSION_FLOOR_MIB,
                           "memory": None, "memory_unreadable_because": reason,
                           "host": None, "host_unreadable_because": reason,
-                          "quota": None, "quota_unreadable_because": reason},
+                          "host_age_seconds": None,
+                          "quota": None, "quota_unreadable_because": reason,
+                          "quota_age_seconds": None},
         }
 
 
@@ -1781,9 +1834,11 @@ def _collect_env(fm_home, state_dir, folded_at):
     for slug in sorted(lanes):
         projects.append({"project": slug, "lanes": lanes[slug]})
 
+    # Memory is a file read, so it is always taken fresh. The two that spawn a
+    # process are cached, because this runs on the supervision loop's thread.
     memory, memory_why = _probe(_meminfo)
-    host, host_why = _probe(_host_memory)
-    quota, quota_why = _probe(_quota)
+    host, host_why, host_age = _cached_probe(state_dir, "host", _host_memory, now_epoch)
+    quota, quota_why, quota_age = _cached_probe(state_dir, "quota", _quota, now_epoch)
     return {
         "collected_at": folded_at,
         "lanes": {
@@ -1796,7 +1851,9 @@ def _collect_env(fm_home, state_dir, folded_at):
             "floor_mib": ADMISSION_FLOOR_MIB,
             "memory": memory, "memory_unreadable_because": memory_why,
             "host": host, "host_unreadable_because": host_why,
+            "host_age_seconds": host_age,
             "quota": quota, "quota_unreadable_because": quota_why,
+            "quota_age_seconds": quota_age,
         },
     }
 
@@ -2072,9 +2129,19 @@ def ask_card(item, glossary=()):
             '<span class="proj">%s</span>' % esc(item["project"])]
     # Law 3: an open critical is an ask card with a critical chip. It is not a
     # separate zone, and a resolved one does not render at all.
+    #
+    # ONE CHIP, NOT TWO. A critical's severity defaults to critical, so kind and
+    # severity say the same word - and two identical chips side by side read as
+    # two separate facts, which is the reader inventing a distinction the record
+    # never made. The severity chip is dropped only when it would repeat the
+    # kind; a critical marked at some other severity still shows both, because
+    # then they genuinely differ.
     if item["kind"] == "critical":
         head.append('<span class="chip critical">critical</span>')
-    head.append(sev_chip(item))
+        if item["severity"] != "critical":
+            head.append(sev_chip(item))
+    else:
+        head.append(sev_chip(item))
     if item.get("aging"):
         head.append('<span class="chip aging">waiting %s</span>' % esc(item["age_label"]))
     head.append('<span class="age">%s</span>' % esc(item["age_label"]))
@@ -2184,6 +2251,17 @@ def lanes_section(env):
     return "".join(out)
 
 
+def _as_of(age_seconds):
+    """How old a reused reading is, whenever it is not from this fold.
+
+    A cached number shown without its age is the capacity lesson again: a value
+    that was true once, presented as a value that is true now.
+    """
+    if not age_seconds:
+        return ""
+    return " · read %s ago" % _age_label(age_seconds)
+
+
 def admission_section(env):
     """The denominators, read live, and one verdict that accounts for all three.
 
@@ -2217,8 +2295,9 @@ def admission_section(env):
     if host:
         out.append('<div class="gauge ok"><div class="lbl">Host memory</div>'
                    '<div class="val">%.1f / %.1f GiB used</div>'
-                   '<div class="sub">the machine underneath</div></div>'
-                   % (host["used_mib"] / 1024.0, host["total_mib"] / 1024.0))
+                   '<div class="sub">the machine underneath%s</div></div>'
+                   % (host["used_mib"] / 1024.0, host["total_mib"] / 1024.0,
+                      _as_of(adm.get("host_age_seconds"))))
     else:
         out.append('<div class="gauge unknown"><div class="lbl">Host memory</div>'
                    '<div class="val">not read</div><div class="sub">%s</div></div>'
@@ -2252,7 +2331,8 @@ def admission_section(env):
         out.append('<div class="gauge %s"><div class="lbl">Provider headroom</div>'
                    '<div class="val">%s</div><div class="sub">%s</div></div>'
                    % ("warn" if tight or not read else "ok", esc(lead),
-                      esc(" · ".join(rest) if rest else "quota-axi")))
+                      esc((" · ".join(rest) if rest else "quota-axi")
+                          + _as_of(adm.get("quota_age_seconds")))))
     else:
         tight = False
         unknowns.append("provider headroom")

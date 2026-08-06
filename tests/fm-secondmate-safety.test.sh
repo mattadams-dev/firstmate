@@ -1893,21 +1893,34 @@ EOF
   grep -F '"kind":"task"' "$home/data/bridge/ledger.jsonl" >/dev/null \
     && fail "forced secondmate retirement wrote a task row for a persistent secondmate"
   # Recorded is not the same as readable. This is the most destructive override
-  # in the script, so its reason has to reach the board the captain reads, not
-  # only the ledger and the state document behind it.
+  # in the script, so its reason has to reach the rendered surface the captain
+  # reads, not only the ledger and the state document behind it.
+  #
+  # It lands on HISTORY rather than the board, and that is the right page: a
+  # retirement that already happened is not a decision anyone owes, and the
+  # board renders only what is waiting on the captain. Both pages are read here,
+  # so this cannot pass by the reason being on neither.
   if command -v python3 >/dev/null 2>&1; then
     FM_HOME="$home" "$ROOT/bin/fm-bridge-render.sh" --html > "$TMP_ROOT/secondmate-board.html"
-    python3 - "$TMP_ROOT/secondmate-board.html" <<'PY' \
-      || fail "forced secondmate retirement: the reason never reaches the board"
+    FM_HOME="$home" "$ROOT/bin/fm-bridge-render.sh" --history > "$TMP_ROOT/secondmate-history.html"
+    python3 - "$TMP_ROOT/secondmate-board.html" "$TMP_ROOT/secondmate-history.html" <<'PY' \
+      || fail "forced secondmate retirement: the reason never reaches a rendered page"
 import re, sys
-html = open(sys.argv[1]).read()
-visible = re.sub(r"<script.*?</script>", "", html, flags=re.S)
+
+def visible(path):
+    return re.sub(r"<script.*?</script>", "", open(path).read(), flags=re.S)
+
+board, history = visible(sys.argv[1]), visible(sys.argv[2])
 for fragment in ("secondmate domain retired under --force",
                  "in-flight-work check skipped",
                  "test: captain approved discarding this work"):
-    if fragment not in visible:
-        sys.exit("the board never shows %r" % fragment)
-if re.search(r'<tr id="item-domain"', visible):
+    if fragment not in board and fragment not in history:
+        sys.exit("neither rendered page shows %r" % fragment)
+# The override accent carries one meaning, and this is the event that earns it.
+if 'class="why override"' not in history:
+    sys.exit("the retirement's provenance renders without the accent that marks "
+             "an override, so it reads as a routine note")
+if re.search(r'<tr id="item-domain"', board + history):
     sys.exit("the retirement rendered as a fleet-strip row")
 sys.exit(0)
 PY

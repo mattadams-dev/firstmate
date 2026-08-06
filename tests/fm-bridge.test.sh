@@ -358,6 +358,41 @@ sys.exit(0)
 SORTLABEL
 pass "the decisions zone label states the ordering the fold actually uses"
 
+# LAW 3: AN OPEN CRITICAL IS AN ASK CARD WITH A CRITICAL CHIP, SORTED FIRST -
+# not a pinned zone of its own, and a resolved one does not render at all. And
+# ONE chip, not two: a critical's severity defaults to critical, so kind and
+# severity say the same word, and two identical chips side by side invite the
+# reader to infer a distinction the record never made.
+python3 - "$TMP_ROOT/mode-board.html" "$TMP_ROOT/mode-state.json" <<'CRITICAL' \
+  || fail "criticals: see the report"
+import json, re, sys
+html = open(sys.argv[1]).read()
+doc = json.load(open(sys.argv[2]))
+
+if "Pinned criticals" in html:
+    sys.exit("the retired pinned-criticals zone is back; a critical is an ask "
+             "card sorted first, not a section of its own")
+order = re.findall(r'<div class="ask[^"]*" id="item-([^"]+)"', html)
+if not order:
+    sys.exit("the board rendered no ask cards, so this guard proves nothing")
+criticals = [k for k in order if doc["items"][k]["kind"] == "critical"]
+if not criticals:
+    sys.exit("no open critical in the fixture, so this guard proves nothing")
+if order[0] not in criticals:
+    sys.exit("an open critical is not sorted first: order is %s" % order)
+
+card = re.split(r'<div class="ask" id=|</section>',
+                html.split('id="item-%s"' % criticals[0], 1)[1], maxsplit=1)[0]
+chips = re.findall(r'<span class="chip [^"]*">([^<]+)</span>', card)
+if "critical" not in chips:
+    sys.exit("the critical card carries no critical chip: %s" % chips)
+if chips.count("critical") > 1:
+    sys.exit("the critical card carries the same chip twice (%s), which reads "
+             "as two facts where the record made one" % chips)
+sys.exit(0)
+CRITICAL
+pass "an open critical is one ask card, chipped once and sorted first"
+
 # --- 6. an ask that has been waiting says so --------------------------------
 #
 # The captain's evidence: eight captain-kind items queued, two already ruled and
@@ -2281,6 +2316,71 @@ if "item-gap-ask" not in board:
 sys.exit(0)
 GAP
 pass "every board-kind item lands on exactly one of the two pages"
+
+# --- 29c. the board renders on the supervision loop, so it stays cheap ------
+#
+# bin/fm-watch.sh runs the tick from its own poll, so every second the render
+# spends is a second the watcher is not watching. The live gauges made that
+# concrete: the host probe alone cost 0.5s and took a render from 0.2s to 1.4s,
+# which was enough to push a one-second poll past a three-second guard in
+# tests/fm-watch-triage.test.sh - a captain-facing number bought with the
+# fleet's supervision responsiveness.
+#
+# The two probes that spawn a process are therefore cached in state/, and the
+# guard is about the SHAPE rather than a wall-clock number: a second render must
+# not re-run them. Timing an assertion would be flaky on a loaded machine and
+# would pin the machine rather than the design.
+
+HOME29C=$(new_home)
+FM_HOME=$HOME29C "$BRIDGE" ask -q --id cheap --project orca \
+  --title "something to render" --answer "A: yes" >/dev/null
+
+board_of "$HOME29C" >/dev/null
+host_cache="$HOME29C/state/.bridge-probe-host"
+quota_cache="$HOME29C/state/.bridge-probe-quota"
+[ -f "$host_cache" ] || [ -f "$quota_cache" ] \
+  || fail "no probe reading was cached at all, so every render on the watcher's poll pays for a fresh subprocess"
+pass "the subprocess-backed gauges cache their readings beside the board"
+
+# The cached reading is REUSED, not re-taken. A sentinel value proves it: if the
+# second render re-probed, the sentinel would be gone.
+python3 - "$quota_cache" <<'SENTINEL'
+import json, sys
+try:
+    record = json.load(open(sys.argv[1]))
+except (OSError, ValueError):
+    sys.exit(0)
+record["value"] = {"providers": [{"name": "sentinel-provider",
+                                  "remaining_percent": 77, "pace": "", "status": ""}]}
+json.dump(record, open(sys.argv[1], "w"))
+SENTINEL
+if [ -f "$quota_cache" ]; then
+  case "$(board_of "$HOME29C")" in
+    *sentinel-provider*) : ;;
+    *) fail "the second render ignored the cached reading and probed again, so every render on the watcher's poll pays the subprocess cost" ;;
+  esac
+  pass "a second render reuses the cached reading instead of spawning the probe again"
+fi
+
+# AND A REUSED READING SAYS SO. A cached number presented as a live one is the
+# capacity lesson with a shorter half-life, so the gauge carries its age as soon
+# as the reading is not from this fold.
+python3 - "$quota_cache" <<'AGE'
+import json, sys
+try:
+    record = json.load(open(sys.argv[1]))
+except (OSError, ValueError):
+    sys.exit(0)
+record["at"] = int(record["at"]) - 120
+json.dump(record, open(sys.argv[1], "w"))
+AGE
+if [ -f "$quota_cache" ]; then
+  case "$(board_of "$HOME29C")" in
+    *"read 2m ago"*) : ;;
+    *) fail "a two-minute-old cached reading renders with no age, so it reads as current" ;;
+  esac
+  pass "a reused reading carries how old it is, so it never reads as taken just now"
+fi
 
 # --- 30. the renderer leaves nothing behind --------------------------------
 #
