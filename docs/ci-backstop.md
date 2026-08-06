@@ -79,8 +79,6 @@ That unbounded window is what the surfacing rule below closes, and the bound is 
 Wherever a runtime carries that rule and follows it, a red `main` is read within one review interval, because every review reads every cloned project's default branch.
 The condition is evaluable rather than temporal, so a reader can test whether it applies to them: check whether the runtime doing the reading carries an `AGENTS.md` that already contains the unconditional default-branch read.
 A document that has landed is not yet a rule a runtime is carrying, so merging this file does not by itself put the bound in effect for a runtime that started before it.
-Where that read is absent, the gap is covered by hand instead: every merge made on the standing word ends with one manual read of `main`'s run to a concluded result, recorded in that merge's ledger line.
-Both paths read the run the same way, because the format recorded below binds either.
 
 ## Revert procedure
 
@@ -91,7 +89,7 @@ The failing `main` push run's head SHA is the squash commit of the pull request 
 
 ```
 gh-axi api "repos/<owner>/<repo>/actions/workflows/ci.yml/runs?branch=main&event=push&per_page=5" \
-  --jq '.workflow_runs[] | "\(.run_number) \(.head_sha) \(.conclusion) \(.display_title)"'
+  --jq '.workflow_runs[] | "\(.id) \(.head_sha) \(.status) \(.conclusion // "unknown") \(.run_started_at) \(.updated_at)"'
 ```
 
 **2. Do not use `gh-axi pr revert <n>` here.**
