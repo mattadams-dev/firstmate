@@ -153,7 +153,7 @@ if fm_watcher_healthy "$STATE" "$WATCH" "$GRACE" "$FM_HOME"; then
 fi
 
 block_stop() {
-  local afk x_mode reason rule
+  local afk x_mode reason rule outcome
   afk=0
   [ -e "$STATE/.afk" ] && afk=1
   x_mode=0
@@ -172,7 +172,18 @@ block_stop() {
       printf '●  X-mode relay polling needs supervision, but no live watcher holds this home lock (last beat: %s).\n' "$FM_SUP_BEACON_DESC"
     fi
     if [ "$CLAUDE_MODE" -eq 1 ]; then
-      printf '●  The Stop-owned auto-arm did not claim this home either, so recovery is NOT already under way.\n'
+      # Distinguish "did not claim" from "refused". They look identical from
+      # here but are different worlds: an absent auto-arm is a broken mechanism
+      # to repair, while a refusal is a working mechanism reporting that this
+      # session does not own the home - which no amount of repairing the hook
+      # will change. Reporting the second as the first sends the operator after
+      # the wrong defect, and that is what happened on 2026-08-05.
+      outcome=$(sed -n 's/^.*outcome=\([a-z][a-z-]*\) .*$/\1/p' "$STATE/.claude-autoarm-epoch" 2>/dev/null || true)
+      if [ "$outcome" = refused ]; then
+        printf '●  The Stop-owned auto-arm REFUSED this home: this session does not own the home session lock, so it may not arm supervision here. Reacquire the lock or hand the home back to its owning session; repairing the hook will not help.\n'
+      else
+        printf '●  The Stop-owned auto-arm did not claim this home either, so recovery is NOT already under way.\n'
+      fi
     fi
     printf '●  %s\n' "$reason"
     printf '●%s\n' "$rule"
@@ -327,13 +338,25 @@ terminal_fail_open() {
   return 0
 }
 
+# A verified failure episode is one the auto-arm itself recorded: it either
+# exhausted its attempts (failed/failed-suppressed) or established that it may
+# not act at all (refused). "refused" belongs here because a refusal is an
+# outcome - the auto-arm verified that it must not arm, which is a verification
+# and not an absence. Leaving it out is what made this escape unreachable during
+# the 2026-08-05 deadlock: the refusing branch wrote nothing, so the episode was
+# never verified, so the bounded fail-open never progressed and the block became
+# unbounded in practice (docs/verification/session-identity.md).
+#
+# This does NOT loosen the identity gate. The auto-arm still refuses to arm, and
+# reaching the fail-open still costs the full block budget, a one-per-episode
+# operator notice, and a durable alarm that suppresses any repeat.
 failure_episode_verified() {
   local outcome
   [ ! -e "$STATE/.afk" ] || return 1
   [ -e "$FAILURE_NOTICE" ] || return 1
   outcome=$(sed -n 's/^.*outcome=\([a-z][a-z-]*\) .*$/\1/p' "$STATE/.claude-autoarm-epoch" 2>/dev/null || true)
   case "$outcome" in
-    failed|failed-suppressed) return 0 ;;
+    failed|failed-suppressed|refused) return 0 ;;
     *) return 1 ;;
   esac
 }
