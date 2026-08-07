@@ -1202,6 +1202,7 @@ _oldest_line_age() {  # <buf> -> seconds since the oldest buffered item first ar
 #     captain-relevant line the per-wake classifier missed and escalate it.
 housekeeping() {  # <state>
   local state=$1 now due f key task win marker age last max_defer oldest pause_secs
+  local pause_captain_secs backlog class ruled
   now=$(_now)
   migrate_watcher_pause_markers "$state"
 
@@ -1269,7 +1270,17 @@ housekeeping() {  # <state>
   # rot invisibly. Past the window: busy (resumed) or gone -> drop; still idle and
   # still declaring the pause -> escalate a recheck digest and reset the marker so
   # the window repeats.
+  #
+  # A CAPTAIN-GATED wait uses the longer captain cadence instead: away mode is
+  # exactly where the hourly re-ask was measured costing whole night-watch turns
+  # against lanes that could not clear without the captain, and a digest that
+  # re-asks an answered question is the away-mode form of the same tax.
+  # fm-classify-lib.sh's wait_class owns the split and its consultation is gated
+  # behind the bounded window, so the tick stays cheap. An arriving ruling
+  # (wait_recheck_pending) overrides both timers.
   pause_secs=${FM_PAUSE_RESURFACE_SECS:-$FM_PAUSE_RESURFACE_SECS_DEFAULT}
+  pause_captain_secs=${FM_PAUSE_CAPTAIN_RESURFACE_SECS:-$FM_PAUSE_CAPTAIN_RESURFACE_SECS_DEFAULT}
+  backlog="${FM_BACKLOG_OVERRIDE:-${FM_DATA_OVERRIDE:-$FM_HOME/data}/backlog.md}"
   for marker in "$state"/.subsuper-paused-*; do
     [ -e "$marker" ] || continue
     key="${marker##*.subsuper-paused-}"
@@ -1284,7 +1295,16 @@ housekeeping() {  # <state>
       continue
     fi
     age=$(( now - $(cat "$marker" 2>/dev/null || echo "$now") ))
-    [ "$age" -ge "$pause_secs" ] || continue
+    class=''
+    ruled=0
+    wait_recheck_pending "$state" "$task" && ruled=1
+    if [ "$ruled" -eq 0 ]; then
+      [ "$age" -ge "$pause_secs" ] || continue
+      class=$(wait_class "$last" "$backlog" "$task")
+      if [ "$class" = captain ] && [ "$age" -lt "$pause_captain_secs" ]; then
+        continue
+      fi
+    fi
     stale_window_is_busy "$win" "$state"
     case "$?" in
       0) rm -f "$marker" ;;
@@ -1292,13 +1312,23 @@ housekeeping() {  # <state>
       *)
         last=$(last_status_line "$state/$task.status")
         if [ -n "$last" ] && status_is_paused "$last"; then
-          escalate_add "$state" "paused ${age}s (awaiting external, recheck whether the wait still holds): $win"
+          if [ "$ruled" -eq 1 ]; then
+            escalate_add "$state" "ruling landed after a ${age}s wait (recheck this lane now, what was gating it has been decided): $win"
+          elif [ "$class" = captain ]; then
+            escalate_add "$state" "captain-gated ${age}s (waiting on a human ruling, recheck whether the ruling is still outstanding): $win"
+          else
+            escalate_add "$state" "paused ${age}s (awaiting external, recheck whether the wait still holds): $win"
+          fi
           _now > "$marker"
         else
           rm -f "$marker"
         fi
         ;;
     esac
+    # Cleared only once this tick actually acted on the lane - escalated it,
+    # dropped its marker because the wait ended, or found it resumed or gone.
+    # A tick that returned early above leaves the request pending.
+    wait_recheck_clear "$state" "$task"
   done
 
   # (3) heartbeat scan (catch-all for a captain-relevant status the per-wake

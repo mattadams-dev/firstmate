@@ -168,6 +168,18 @@ BUSY_TURN_MAX_SECS=${FM_BUSY_TURN_MAX_SECS:-3600}
 # These cases re-surface once for a recheck every PAUSE_RESURFACE_SECS - far
 # longer than the wedge threshold, but finite so a forgotten hold cannot rot invisibly.
 PAUSE_RESURFACE_SECS=${FM_PAUSE_RESURFACE_SECS:-$FM_PAUSE_RESURFACE_SECS_DEFAULT}
+# A CAPTAIN-GATED wait - one only a human ruling can end - uses this longer
+# cadence instead, because elapsed time cannot clear it and the bounded recheck
+# only re-asks an answered question every hour for as long as the ruling is
+# outstanding. fm-classify-lib.sh's wait_class owns which lanes qualify, and a
+# ruling arriving through bin/fm-decision-hold.sh brings a gated lane due at once
+# rather than leaving it to this timer. Never shorter than the bounded cadence in
+# effect: the bounded gate below is crossed first, so a home that configures this
+# lower simply keeps the bounded cadence.
+PAUSE_CAPTAIN_RESURFACE_SECS=${FM_PAUSE_CAPTAIN_RESURFACE_SECS:-$FM_PAUSE_CAPTAIN_RESURFACE_SECS_DEFAULT}
+# The backlog the wait classifier reads for firstmate's durable record that a
+# human decision gates a lane. Read at most once per lane per bounded window.
+WATCH_BACKLOG="${FM_BACKLOG_OVERRIDE:-${FM_DATA_OVERRIDE:-$FM_HOME/data}/backlog.md}"
 # A parked lane - a declared external wait, or a captain hold whose agent has
 # confidently exited - cannot clear until something outside this fleet acts, so
 # it gets a CHECK-IN CADENCE rather than a standing per-cycle trigger. Each lane
@@ -501,7 +513,7 @@ busy_turn_over_age() {  # <task>
 
 # Absorb a stale pane under a declared external-wait pause (paused:) or a
 # dead-agent captain-held transfer, and mark it due for a recheck once every
-# PAUSE_RESURFACE_SECS so it cannot rot invisibly. Called on any
+# recheck window so it cannot rot invisibly. Called on any
 # stale poll once pause_state_class permits the bounded cadence, so it must be
 # cheap: it NEVER re-reads crew state. The re-surface age is anchored on the
 # status file mtime, not a per-hash marker, so a churny idle pane (a ticking
@@ -511,9 +523,23 @@ busy_turn_over_age() {  # <task>
 # rather than every poll. A due lane is surfaced here only in away mode; in
 # normal mode it is collected for flush_parked_checkin, which owns the home-wide
 # batch and stamps that marker for exactly the lanes it carries.
+#
+# The recheck window is NOT uniform. A bounded wait keeps PAUSE_RESURFACE_SECS
+# because it is expected to clear on its own and so still deserves ordinary
+# attention; a captain-gated wait uses the far longer
+# PAUSE_CAPTAIN_RESURFACE_SECS, because only a human ruling can end it and the
+# hourly re-ask cannot make that ruling arrive. fm-classify-lib.sh's wait_class
+# owns the split, and it is consulted only AFTER the bounded window has already
+# elapsed, so the per-poll path stays free and the backlog is read at most once
+# per lane per bounded window.
+#
+# A ruling that has actually arrived overrides both timers: wait_recheck_pending
+# brings the lane due at the next poll no matter how much cadence remains. That
+# request is cleared by whoever surfaces the lane, never here, so a deferred
+# check-in cannot swallow it.
 # Advances the stale suppressor to <hash> and flags the key paused.
 handle_paused_stale() {  # <window> <task> <hash>
-  local win=$1 task=$2 h=$3 key statusf mtime age rf rf_age reason
+  local win=$1 task=$2 h=$3 key statusf mtime age rf rf_age reason class window_secs ruled=0
   key=$(printf '%s' "$win" | tr ':/.' '___')
   printf '%s' "$h" > "$STATE/.stale-$key"
   : > "$STATE/.paused-$key"
@@ -525,20 +551,42 @@ handle_paused_stale() {  # <window> <task> <hash>
   age=$(( $(date +%s) - mtime ))
   rf="$STATE/.paused-resurfaced-$key"
   rf_age=$(age_of "$rf")   # 999999 when no prior re-surface
-  if [ "$age" -ge "$PAUSE_RESURFACE_SECS" ] && [ "$rf_age" -ge "$PAUSE_RESURFACE_SECS" ]; then
-    reason="stale: $win (paused ${age}s, awaiting external - declared pause, rechecked on a long cadence not a wedge; confirm the wait still holds)"
+  wait_recheck_pending "$STATE" "$task" && ruled=1
+  if [ "$ruled" -eq 1 ] || { [ "$age" -ge "$PAUSE_RESURFACE_SECS" ] && [ "$rf_age" -ge "$PAUSE_RESURFACE_SECS" ]; }; then
+    if [ "$ruled" -eq 1 ]; then
+      reason="stale: $win (ruling landed after a ${age}s wait - recheck this lane now, what was gating it has been decided)"
+    else
+      class=$(wait_class "$(last_status_line "$statusf")" "$WATCH_BACKLOG" "$task")
+      window_secs=$PAUSE_RESURFACE_SECS
+      [ "$class" = captain ] && window_secs=$PAUSE_CAPTAIN_RESURFACE_SECS
+      if [ "$age" -lt "$window_secs" ] || [ "$rf_age" -lt "$window_secs" ]; then
+        # Only a captain-gated lane can reach here: a bounded lane's window is
+        # the gate already crossed above.
+        triage_log "absorbed stale (captain-gated wait, ${window_secs}s cadence, age ${age}s): $win"
+        return 0
+      fi
+      if [ "$class" = captain ]; then
+        reason="stale: $win (captain-gated ${age}s, waiting on a human ruling - long-cadence recheck; confirm the ruling is still outstanding)"
+      else
+        reason="stale: $win (paused ${age}s, awaiting external - declared pause, rechecked on a long cadence not a wedge; confirm the wait still holds)"
+      fi
+    fi
     if afk_present; then
       # The away-mode daemon owns triage and classifies one window per printed
       # reason, so it keeps the unbatched one-shot form it was built to read.
       fm_wake_append stale "$win" "$reason" || exit 1
       date +%s > "$rf"
+      wait_recheck_clear "$STATE" "$task"
       wake "$reason"
     fi
     # Due, but not surfaced here: collect it and let flush_parked_checkin decide
     # once, for the whole fleet, whether this poll is a check-in. One line per
     # lane: flush_parked_checkin reads this back a record at a time.
-    parked_due="${parked_due}${win}"$'\t'"${reason}"$'\n'
-    triage_log "parked check-in due (paused ${age}s): $win"
+    parked_due="${parked_due}${win}"$'\t'"${task}"$'\t'"${reason}"$'\n'
+    # A ruling is a rare real event, not a cadence hit, so it is never deferred
+    # behind the home-wide check-in window.
+    [ "$ruled" -eq 1 ] && parked_ruled=1
+    triage_log "parked check-in due (${class:-ruled} ${age}s): $win"
     return 0
   fi
   triage_log "absorbed stale (paused, awaiting external, age ${age}s): $win"
@@ -546,20 +594,24 @@ handle_paused_stale() {  # <window> <task> <hash>
 
 # Emit at most ONE parked check-in per PARKED_CHECKIN_SECS, carrying every lane
 # that came due in this poll. Only the lanes actually included in an emitted
-# check-in have their per-lane cadence stamped, so a deferred lane stays due and
-# is picked up by the check-in that does fire.
+# check-in have their per-lane cadence stamped and their recheck request cleared,
+# so a deferred lane stays due and is picked up by the check-in that does fire.
+# A poll carrying a lane whose ruling has landed (parked_ruled) skips the
+# home-wide defer entirely: the rate limit exists to stop parked lanes ending
+# every cycle, and a ruling is neither frequent nor a cadence hit.
 flush_parked_checkin() {
-  local win reason combined='' first=1 key
+  local win task reason combined='' first=1 key
   [ -n "$parked_due" ] || return 0
-  if [ "$(age_of "$STATE/.last-parked-checkin")" -lt "$PARKED_CHECKIN_SECS" ]; then
+  if [ "$parked_ruled" -eq 0 ] && [ "$(age_of "$STATE/.last-parked-checkin")" -lt "$PARKED_CHECKIN_SECS" ]; then
     triage_log "deferred parked check-in to its cadence"
     return 0
   fi
-  while IFS=$(printf '\t') read -r win reason; do
+  while IFS=$(printf '\t') read -r win task reason; do
     [ -n "$win" ] || continue
     fm_wake_append stale "$win" "$reason" || exit 1
     key=$(printf '%s' "$win" | tr ':/.' '___')
     date +%s > "$STATE/.paused-resurfaced-$key"
+    [ -n "$task" ] && wait_recheck_clear "$STATE" "$task"
     if [ "$first" -eq 1 ]; then
       combined="$reason"
       first=0
@@ -1220,6 +1272,7 @@ EOF
   # Parked lanes found in this pass accumulate here instead of each ending the
   # cycle on its own; flush_parked_checkin below decides the batch once.
   parked_due=''
+  parked_ruled=0
   while IFS= read -r w; do
     kind=$(window_kind "$w")
     task=$(window_to_task "$w" "$STATE")

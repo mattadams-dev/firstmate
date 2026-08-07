@@ -367,6 +367,30 @@ EOF
   printf 'verified: %s unresolved-decision inventory\n' "$origin"
 }
 
+# A lane parked on a captain-gated wait is rechecked on a long cadence, because
+# elapsed time cannot end such a wait - only the ruling can. So the ruling itself
+# carries the recheck: every lane this decision was durably blocking gets a
+# durable recheck request (fm-classify-lib.sh's wait_recheck_request), and the
+# watcher or away-mode daemon brings that lane due at its very next poll instead
+# of leaving it to the long timer.
+#
+# Called on BOTH the transitioning and the already-resolved paths on purpose. A
+# crash between routing the decision and recording the request would otherwise
+# leave the gated lanes waiting out the full cadence with no way to recover, and
+# a re-run is the operator's natural response; a redundant recheck costs one
+# poll, a missed one costs the whole window this change just widened.
+#
+# Best-effort by design: a recheck request that could not be written must never
+# fail a decision that has already landed durably in the backlog.
+request_gated_lane_rechecks() {  # <space-separated routed task ids>
+  local dep
+  [ -d "$STATE" ] || return 0
+  for dep in $1; do
+    [ -n "$dep" ] || continue
+    wait_recheck_request "$STATE" "$dep" 2>/dev/null || true
+  done
+}
+
 command_resolve() {
   local origin=${1:-} key=${2:-} decision_file='' id='' decision='' decision_digest='' body='' routed='' routed_csv='' dep show blocked state hold_show hold_body resolution_recorded=0
   [ "$#" -ge 2 ] || { usage >&2; exit 2; }
@@ -397,6 +421,7 @@ command_resolve() {
     hold_show=$(task_show "$id")
     hold_body=$(show_field "$hold_show" body)
     verify_resolution_identity "$id" "$hold_body" "$decision_digest" "$routed_csv"
+    request_gated_lane_rechecks "$routed"
     printf 'resolved: %s\n' "$id"
     return 0
   fi
@@ -450,6 +475,7 @@ command_resolve() {
   done
   tasks_axi "done" "$id" >/dev/null || fail "could not close resolved captain hold $id"
   verify_hold_resolved "$id" || fail "captain hold $id did not retain its durable resolution record"
+  request_gated_lane_rechecks "$routed"
   printf 'resolved: %s -> %s\n' "$id" "$routed"
 }
 

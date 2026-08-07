@@ -66,6 +66,16 @@ FM_CLASSIFY_PAUSED_VERB_DEFAULT='paused'
 # shellcheck disable=SC2034 # Read by the watcher and daemon (fm-watch.sh, fm-supervise-daemon.sh), not this lib.
 FM_PAUSE_RESURFACE_SECS_DEFAULT=3600
 
+# Long re-surface cadence for a CAPTAIN-GATED wait, whose holding condition is a
+# human ruling. Elapsed time cannot clear such a wait, so re-asking "does this
+# wait still hold?" on the bounded cadence above only re-asks a question whose
+# answer is already known, once an hour, for as long as the ruling is outstanding.
+# Kept FINITE for the same reason the bounded cadence is - a forgotten hold must
+# not rot invisibly - but it is a BACKSTOP, not the clearing mechanism: the
+# arriving ruling drives the recheck through wait_recheck_request below.
+# shellcheck disable=SC2034 # Read by the watcher and daemon (fm-watch.sh, fm-supervise-daemon.sh), not this lib.
+FM_PAUSE_CAPTAIN_RESURFACE_SECS_DEFAULT=21600
+
 # The resolution verb and durable-backlog-transfer verb that CLOSE a keyed
 # status decision opened by needs-decision or blocked. See status_open_decisions
 # below for the status-fold contract. The transfer verb is written only after
@@ -127,17 +137,137 @@ status_is_paused() {  # <status-line>
   [ "$verb" = "${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT}" ]
 }
 
+# 0 if a status line's leading verb is the verified captain-held transfer verb.
+# Kept separate from status_is_paused because the two declare DIFFERENT waits:
+# a pause is bounded and expected to clear on its own, while a captain-held
+# transfer cannot clear until a human rules. wait_class below is the one owner
+# of what that difference costs.
+status_is_captain_held() {  # <status-line>
+  local line=$1 verb
+  [ -n "$line" ] || return 1
+  verb=$(status_line_verb "$line")
+  [ "$verb" = "${FM_CLASSIFY_CAPTAIN_HELD_VERB:-$FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT}" ]
+}
+
 # 0 if a status line declares either an external-wait pause or a verified
 # captain-held transfer.
 # Both declarations can intentionally leave an exited crew's endpoint idle, so
 # the watcher applies its bounded pause cadence when agent death confirms that
 # no live decision gate is being silenced.
 status_is_paused_or_captain_held() {  # <status-line>
-  local line=$1 verb
-  status_is_paused "$line" && return 0
-  [ -n "$line" ] || return 1
-  verb=$(status_line_verb "$line")
-  [ "$verb" = "${FM_CLASSIFY_CAPTAIN_HELD_VERB:-$FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT}" ]
+  status_is_paused "$1" || status_is_captain_held "$1"
+}
+
+# --- declared-wait cadence class --------------------------------------------
+#
+# The ONE owner of the captain-gated / bounded split. Both consumers of the
+# declared-wait recheck (fm-watch.sh's handle_paused_stale, fm-supervise-daemon.sh's
+# pause re-surface) classify through here, so the cadence policy cannot drift
+# between the always-on watcher and the away-mode daemon.
+#
+# TWO SIGNALS, OR'd, because they carry different facts and each covers a case
+# the other cannot see:
+#   - the STATUS VERB is the worker's own live declaration. Free, always current,
+#     but only as good as whatever that worker last wrote.
+#   - the BACKLOG HOLD KIND is firstmate's durable record that a human decision
+#     gates this work. It survives status-line churn and covers the measured case
+#     of a lane correctly declaring a plain `paused:` while firstmate holds the
+#     item for the captain, plus the lane blocked by a captain hold that some
+#     other lane's decision created.
+# Neither alone is sufficient, so neither alone is used.
+#
+# The class is DERIVED LIVE on every read and never cached. That is what makes a
+# released hold self-healing: the moment the backlog stops recording a captain
+# gate, the lane falls back to the bounded cadence and surfaces on the very next
+# poll, with no invalidation step to forget.
+#
+# UNREADABLE EVIDENCE IS NOT EVIDENCE OF A GATE. An absent, incompatible, or
+# unparseable backlog answers `bounded`, never `captain`: the failure of a signal
+# must never be what quiets a lane, and bounded is the noisier of the two.
+
+# The backlog reader used by the classifier. Overridable so tests can drive the
+# split without a real tasks-axi install.
+FM_TASKS_AXI_BIN="${FM_TASKS_AXI_BIN:-tasks-axi}"
+
+_wait_task_show() {  # <backlog-file> <task-id>
+  command -v "$FM_TASKS_AXI_BIN" >/dev/null 2>&1 || return 1
+  "$FM_TASKS_AXI_BIN" show "$2" --full --file "$1" 2>/dev/null
+}
+
+_wait_show_field() {  # <show-output> <field> -> value, unquoted, empty when absent
+  local value
+  value=$(printf '%s\n' "$1" | sed -n "s/^  $2: //p" | head -1)
+  value=${value#\"}
+  value=${value%\"}
+  printf '%s' "$value"
+}
+
+# 0 when the backlog durably records that a human decision gates <task-id>: the
+# item is itself held for the captain, or it is blocked by an item that is.
+# Depth is deliberately ONE, not a graph walk - a lane blocked by a captain hold
+# is the exact shape fm-decision-hold.sh creates (routed work blocked by
+# <origin>-decision-<key>), so one level covers the designed relationship without
+# turning a supervision poll into a backlog traversal.
+backlog_wait_is_captain_gated() {  # <backlog-file> <task-id>
+  local backlog=$1 task=$2 show blocked dep
+  [ -n "$backlog" ] && [ -f "$backlog" ] || return 1
+  show=$(_wait_task_show "$backlog" "$task") || return 1
+  [ -n "$show" ] || return 1
+  [ "$(_wait_show_field "$show" hold_kind)" = captain ] && return 0
+  blocked=$(_wait_show_field "$show" blocked_by | tr -d '[:space:]')
+  case "$blocked" in ''|none|-) return 1 ;; esac
+  for dep in $(printf '%s' "$blocked" | tr ',' ' '); do
+    show=$(_wait_task_show "$backlog" "$dep") || continue
+    [ -n "$show" ] || continue
+    [ "$(_wait_show_field "$show" hold_kind)" = captain ] && return 0
+  done
+  return 1
+}
+
+# Classify a declared wait: `captain` (only a human ruling can end it),
+# `bounded` (expected to clear on its own), or `none` (not a declared wait).
+# The backlog is consulted ONLY when the verb alone does not already answer
+# captain, so the classifier costs one process at most and only for a lane that
+# has already reached its bounded recheck.
+wait_class() {  # <status-line> <backlog-file> <task-id>
+  local line=$1 backlog=${2:-} task=${3:-}
+  if status_is_captain_held "$line"; then printf 'captain'; return 0; fi
+  if ! status_is_paused "$line"; then printf 'none'; return 0; fi
+  if [ -n "$task" ] && backlog_wait_is_captain_gated "$backlog" "$task"; then
+    printf 'captain'
+  else
+    printf 'bounded'
+  fi
+}
+
+# --- ruling-driven recheck request ------------------------------------------
+#
+# The event that can actually clear a captain-gated wait is the ruling, not the
+# clock, so the ruling records a durable recheck request against every lane it
+# gates and that lane comes due at the very next supervision poll regardless of
+# how much of its long cadence remains. Written by bin/fm-decision-hold.sh when a
+# captain decision is routed to the work it was blocking; consumed by the
+# watcher and the away-mode daemon, each of which clears the request only for a
+# lane it actually surfaced, so a deferred check-in can never swallow a ruling.
+#
+# This is what makes the long captain-gated cadence safe: without it, widening
+# the cadence would just mean a lane that CAN move sits longer before anyone
+# notices.
+_wait_recheck_marker() {  # <state-dir> <task-id>
+  printf '%s/.wait-recheck-%s' "$1" "$(printf '%s' "$2" | tr '/:' '__')"
+}
+
+wait_recheck_request() {  # <state-dir> <task-id>
+  [ -d "$1" ] || return 1
+  : > "$(_wait_recheck_marker "$1" "$2")"
+}
+
+wait_recheck_pending() {  # <state-dir> <task-id>
+  [ -e "$(_wait_recheck_marker "$1" "$2")" ]
+}
+
+wait_recheck_clear() {  # <state-dir> <task-id>
+  rm -f "$(_wait_recheck_marker "$1" "$2")"
 }
 
 # --- durable keyed decisions ------------------------------------------------
