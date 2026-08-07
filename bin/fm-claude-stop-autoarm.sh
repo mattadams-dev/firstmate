@@ -88,18 +88,57 @@ esac
 # shellcheck source=bin/fm-session-lock-lib.sh
 . "$SCRIPT_DIR/fm-session-lock-lib.sh"
 
-write_epoch() {  # <outcome>
-  local outcome=$1 seq tmp
+# The epoch write lock makes read-decide-rename ONE atomic unit. The rename
+# alone was never the defect: without the lock, two writers read the same seq
+# and the last mv wins blind, which is exactly how a bystander's stale refusal
+# could clobber a fresher live claim. ANY future writer of $EPOCH must hold
+# this lock across its read and its rename, or the guarantee is void.
+EPOCH_WRITE_LOCK="$STATE/.claude-autoarm-epoch.write-lock"
+EPOCH_FRESH=${FM_CLAUDE_AUTOARM_EPOCH_FRESH:-15}
+case "$EPOCH_FRESH" in ''|*[!0-9]*|0) EPOCH_FRESH=15 ;; esac
+
+write_epoch() {  # <outcome>  -> 0 recorded, 1 not recorded (subordinated or lock-bounded)
+  local outcome=$1 seq tmp cur rc tries=0
+  while ! fm_lock_try_acquire "$EPOCH_WRITE_LOCK"; do
+    tries=$((tries + 1))
+    # Writers hold this lock for microseconds. A holder that outlives this
+    # bound is dead or wedged, and a Stop hook must never wedge behind it.
+    # Returning 1 reports the truth - not recorded - instead of disguising it.
+    if [ "$tries" -ge 25 ]; then
+      return 1
+    fi
+    sleep 0.04 2>/dev/null || sleep 1
+  done
+  # Under the lock: what is read here cannot change before the rename below.
   seq=$(sed -n 's/^epoch=\([0-9][0-9]*\) .*/\1/p' "$EPOCH" 2>/dev/null || true)
   case "$seq" in
     ''|*[!0-9]*) seq=0 ;;
   esac
+  if [ "$outcome" = refused ]; then
+    # Refusal bias, subordinate half (review-4): a refusal never supersedes a
+    # FRESH non-refused claim - a live owner's recovery outranks a bystander's
+    # refusal. A stale claim (its owner dead or silent past EPOCH_FRESH) is
+    # superseded normally, so a refusal against a dead home still records.
+    cur=$(sed -n 's/^.*outcome=\([a-z][a-z-]*\) .*$/\1/p' "$EPOCH" 2>/dev/null || true)
+    case "$cur" in
+      ''|refused) : ;;
+      *)
+        if [ "$(fm_path_age "$EPOCH")" -lt "$EPOCH_FRESH" ]; then
+          fm_lock_release "$EPOCH_WRITE_LOCK"
+          return 1
+        fi
+        ;;
+    esac
+  fi
   seq=$((seq + 1))
   tmp="$EPOCH.tmp.$$"
+  rc=1
   printf 'epoch=%s owner_pid=%s outcome=%s updated_at=%s\n' \
     "$seq" "${BASHPID:-$$}" "$outcome" "$(date +%s)" > "$tmp" 2>/dev/null \
-    && mv -f "$tmp" "$EPOCH" 2>/dev/null
+    && mv -f "$tmp" "$EPOCH" 2>/dev/null && rc=0
   rm -f "$tmp" 2>/dev/null || true
+  fm_lock_release "$EPOCH_WRITE_LOCK"
+  return $rc
 }
 
 # Consume the Stop payload once. The decisions below are state-based apart from
@@ -165,8 +204,10 @@ need_supervision || exit 0
 # would tell the turn-end guard that recovery is under way, which is the one
 # thing a refusal must never claim.
 if [ -n "$REFUSAL" ]; then
-  write_epoch refused
-  if [ ! -e "$FAILURE_NOTICE" ]; then
+  # The notice follows the record: a subordinated refusal (write_epoch returns
+  # 1 because a fresh non-refused claim stands) means the owner's recovery is
+  # live, and telling the operator the home is unsupervised would be false.
+  if write_epoch refused && [ ! -e "$FAILURE_NOTICE" ]; then
     {
       printf 'firstmate watcher auto-arm REFUSED - %s.\n' "$REFUSAL"
       printf 'Supervision is needed here but this session may not arm it, so the home is unsupervised until the lock owner returns or its session lock is reacquired. This refusal is deliberate: firstmate never arms, rewakes, or ends a session on behalf of a session it cannot prove it is.\n'
