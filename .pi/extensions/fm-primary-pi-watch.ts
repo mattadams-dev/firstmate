@@ -128,7 +128,12 @@ function pidAlive(pid: string): boolean {
 function lockOwnership(): LockOwnership {
   let lockPid = "";
   try {
-    lockPid = readFileSync(`${state}/.lock`, "utf8").trim();
+    // The lock record is LINE-ADDRESSED (bin/fm-session-lock-lib.sh owns the
+    // format): line 1 is the pid, line 2 an optional session= record. Reading
+    // the file whole made a two-line lock fail the pid test below, so a dead
+    // lock reported as merely "someone else's" - the attestation sweep's
+    // one-language-over miss.
+    lockPid = readFileSync(`${state}/.lock`, "utf8").split("\n")[0].trim();
   } catch {
     return "missing";
   }
