@@ -44,7 +44,8 @@
 #     escalated only after it has been idle for STALE_ESCALATE_SECS
 #     (configurable), rechecked once. A wedged crewmate is therefore detected
 #     within STALE_ESCALATE_SECS + a tick, never lost. A declared pause instead
-#     gets its own longer PAUSE_RESURFACE_SECS recheck, never a wedge escalation.
+#     gets its own longer PAUSE_RESURFACE_SECS recheck, never a wedge escalation,
+#     and a wait only the captain can end uses PAUSE_CAPTAIN_RESURFACE_SECS.
 #     Crewmates are autonomous, so a delayed stale response does not stall a
 #     healthy crewmate's own progress.
 #     Buffered escalation delivery also has a max-defer alarm: if a digest stays
@@ -88,8 +89,13 @@
 #                                   kinds.
 #          FM_STALE_ESCALATE_SECS   idle seconds before a stale pane escalates
 #                                   as a possible wedge (default 240)
-#          FM_PAUSE_RESURFACE_SECS  idle seconds before a declared external wait
-#                                   re-surfaces as a recheck (default 3600)
+#          FM_PAUSE_RESURFACE_SECS  idle seconds before a BOUNDED declared
+#                                   external wait re-surfaces as a recheck
+#                                   (default 3600)
+#          FM_PAUSE_CAPTAIN_RESURFACE_SECS
+#                                   idle seconds before a CAPTAIN-GATED wait
+#                                   re-surfaces instead (default 21600); an
+#                                   arriving ruling rechecks it sooner
 #          FM_ESCALATE_BATCH_SECS   buffer window for batched escalation
 #                                   digests; 0 = flush immediately (default 90)
 #          FM_HEARTBEAT_SCAN_SECS   cadence for the catch-all status scan
