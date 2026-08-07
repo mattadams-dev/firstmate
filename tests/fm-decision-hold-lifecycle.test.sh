@@ -276,6 +276,73 @@ EOF
   pass "captain holds are idempotent, distinct, teardown-safe, Bearings-visible, and durably routed before close"
 }
 
+# Part 3 of the captain's 2026-08-07 declared-wait cadence ruling. A lane parked
+# on a captain-gated wait is now rechecked on a long cadence, so the RULING - not
+# the clock - has to bring it back. Resolving a hold therefore leaves a durable
+# recheck request on every lane that hold was blocking, and on nothing else.
+# Without this the widened cadence is a pure regression: a lane that can move
+# sits until the long timer fires.
+# Asked with the captain-gated window as the request's lifetime, exactly as the
+# watcher and the away-mode daemon ask it: the request is a shortcut past that
+# cadence, so it is only ever meaningful inside it.
+recheck_pending() {  # <home> <task>
+  bash -c '. "$1"; wait_recheck_pending "$2" "$3" "$FM_PAUSE_CAPTAIN_RESURFACE_SECS_DEFAULT"' _ \
+    "$ROOT/bin/fm-classify-lib.sh" "$1/state" "$2"
+}
+
+test_resolved_ruling_requests_a_recheck_of_every_gated_lane() {
+  local home id hold
+  home=$(make_home ruling-recheck)
+  id=sample-cadence-review
+  mkdir -p "$home/data/$id"
+  tasks_in "$home" add "$id" "Investigate sample cadence" --kind scout --repo sample --start >/dev/null \
+    || fail "could not create investigation fixture"
+  write_origin_meta "$home" "$id"
+  printf 'needs-decision [key=route]: choose route north or route south\n' > "$home/state/$id.status"
+  hold=$(run_decisions "$home" hold "$id" route \
+    --title "Choose the sample route" --reason "captain route choice pending" --repo sample) \
+    || fail "could not register the route hold"
+  tasks_in "$home" add sample-gated-build "Build the selected sample route" \
+    --kind ship --repo sample --blocked-by "$hold" >/dev/null \
+    || fail "could not create first gated lane"
+  tasks_in "$home" add sample-gated-docs "Document the selected sample route" \
+    --kind ship --repo sample --blocked-by "$hold" >/dev/null \
+    || fail "could not create second gated lane"
+  tasks_in "$home" add sample-unrelated "Unrelated sample work" \
+    --kind ship --repo sample >/dev/null \
+    || fail "could not create unrelated lane"
+  printf 'Use route north for the sample system.\n' > "$home/route-decision.txt"
+
+  recheck_pending "$home" sample-gated-build && fail "a recheck was requested before any ruling landed"
+
+  run_decisions "$home" resolve "$id" route --decision-file "$home/route-decision.txt" \
+    --routed-to sample-gated-build --routed-to sample-gated-docs >/dev/null \
+    || fail "could not resolve the captain hold"
+  recheck_pending "$home" sample-gated-build \
+    || fail "the landed ruling left no recheck request on the first lane it gated"
+  recheck_pending "$home" sample-gated-docs \
+    || fail "the landed ruling left no recheck request on the second lane it gated"
+  recheck_pending "$home" sample-unrelated \
+    && fail "the ruling requested a recheck of a lane it never gated"
+
+  # A crash between routing the decision and recording the request would leave
+  # the gated lanes waiting out the full widened cadence with no way back, and a
+  # re-run is the operator's natural response. So the already-resolved path
+  # re-requests too: a redundant recheck costs one poll, a missed one costs the
+  # whole window this change widened.
+  bash -c '. "$1"; wait_recheck_clear "$2" sample-gated-build; wait_recheck_clear "$2" sample-gated-docs' _ \
+    "$ROOT/bin/fm-classify-lib.sh" "$home/state"
+  recheck_pending "$home" sample-gated-build && fail "the recheck request fixture did not clear"
+  run_decisions "$home" resolve "$id" route --decision-file "$home/route-decision.txt" \
+    --routed-to sample-gated-build --routed-to sample-gated-docs >/dev/null \
+    || fail "identical resolution retry failed"
+  recheck_pending "$home" sample-gated-build \
+    || fail "an already-resolved retry did not re-request the recheck it may have failed to record"
+  recheck_pending "$home" sample-gated-docs \
+    || fail "an already-resolved retry re-requested only part of the gated set"
+  pass "a resolved captain ruling requests a recheck of every lane it gated, and of no other lane"
+}
+
 test_scout_teardown_always_requires_inventory_verification() {
   local home id
   home=$(make_home unconditional-teardown)
@@ -560,3 +627,4 @@ test_none_inventory_and_resolved_prose_do_not_create_holds
 test_terminal_single_owner_status_decision_does_not_block_empty_inventory
 test_secondmate_hold_stays_in_authoritative_home
 test_resolve_matches_quoted_blocked_by_edges
+test_resolved_ruling_requests_a_recheck_of_every_gated_lane

@@ -27,6 +27,7 @@ The `resolve` subcommand requires a decision file and at least one existing depe
 It records the decision digest and routed task identities as a retry identity in the hold body, clears each dependency edge through tasks-axi, and marks the hold Done only after those writes succeed.
 An exact retry can finish a partial routing operation, while a changed decision or routed-task set is rejected.
 A failed intermediate step leaves the hold open.
+Resolving also records a best-effort durable recheck request against every routed lane, on the already-resolved retry as well as the transitioning path, so a lane parked on a captain-gated wait is brought back by the arriving ruling instead of by its long timer; [`architecture.md`](architecture.md#event-driven-supervision) owns that cadence contract and `bin/fm-classify-lib.sh` owns the request's bounded lifetime.
 
 ## Structured read surfaces
 
@@ -43,6 +44,7 @@ The projection remains read-only and does not inspect historical prose.
 Verification date: 2026-07-14.
 Additional quoted `blocked_by` regression verification date: 2026-07-17.
 Plural blocker-readiness and mixed-home projection verification date: 2026-07-22.
+Ruling-driven gated-lane recheck verification date: 2026-08-07, covering only the `tests/fm-decision-hold-lifecycle.test.sh` block below.
 
 The focused end-to-end regression uses only synthetic `sample` identities and decision text.
 It begins with a completed investigation and visual review whose genuine unresolved choice exists only in the report.
@@ -62,6 +64,7 @@ ok - resolved findings and decision-like prose do not create false holds
 ok - terminal single-owner stale status decisions do not block empty inventory
 ok - main-home and secondmate-home captain holds remain correctly routed
 ok - resolve matches first/middle/last in quoted blocked_by and rejects a genuinely absent id
+ok - a resolved captain ruling requests a recheck of every lane it gated, and of no other lane
 
 $ bash tests/fm-fleet-snapshot-view.test.sh
 ok - backlog normalization preserves strict roles and resolves every blocker compatibly

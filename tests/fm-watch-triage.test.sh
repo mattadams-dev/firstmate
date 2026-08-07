@@ -282,6 +282,136 @@ test_status_is_paused_classifier() {
   pass "status_is_paused: only the leading paused verb matches, and paused is not captain-relevant"
 }
 
+# The captain's 2026-08-07 cadence ruling turns on ONE distinction: can this wait
+# end without a human? wait_class is its single owner, and it reads two signals
+# because neither is sufficient alone - the worker's own status verb is free but
+# only as good as what that worker last wrote, and firstmate's durable backlog
+# hold survives status-line churn and covers a lane correctly declaring a plain
+# pause while a human decision actually gates it.
+test_wait_class_splits_captain_gated_from_bounded() {
+  local dir backlog
+  dir=$(make_case wait-class); backlog="$dir/backlog.md"
+  : > "$backlog"
+  install_fake_tasks_axi "$dir"
+  export FM_TASKS_AXI_BIN="$dir/fakebin/tasks-axi"
+  export FM_FAKE_BACKLOG_FIXTURES="$dir/backlog-fixtures"
+
+  # The verb alone can answer captain, with no backlog read at all: the
+  # captain-held transfer verb is written only after the hold was verified.
+  [ "$(wait_class 'captain-held [key=route]: tracked by review-decision-route' "$backlog" absent-item "$dir/state" 0)" = captain ] \
+    || fail "a verified captain-held transfer was not classed captain-gated"
+  # Not a declared wait at all: no cadence question to answer.
+  [ "$(wait_class 'done: shipped' "$backlog" park-bounded "$dir/state" 0)" = none ] || fail "a terminal line was classed as a wait"
+  [ "$(wait_class 'working: step 2' "$backlog" park-bounded "$dir/state" 0)" = none ] || fail "a working line was classed as a wait"
+
+  # A declared pause with nothing in the backlog gating it: bounded, and it keeps
+  # the ordinary cadence because it is expected to clear on its own.
+  write_backlog_item "$dir" park-bounded '"-"' none
+  [ "$(wait_class 'paused: holding for the upstream release' "$backlog" park-bounded "$dir/state" 0)" = bounded ] \
+    || fail "an ordinary declared pause was not classed bounded"
+
+  # The SAME pause verb, separated only by the backlog: firstmate durably holds
+  # this item for the captain, which the verb cannot see and the record can.
+  write_backlog_item "$dir" park-held captain none
+  [ "$(wait_class 'paused: holding for the captain' "$backlog" park-held "$dir/state" 0)" = captain ] \
+    || fail "a pause over a captain-held backlog item was not classed captain-gated"
+
+  # And the routed lane: blocked by a captain hold some other decision created,
+  # which is exactly the shape bin/fm-decision-hold.sh builds.
+  write_backlog_item "$dir" review-decision-route captain none
+  write_backlog_item "$dir" park-routed '"-"' '"review-decision-route,park-bounded"'
+  [ "$(wait_class 'paused: behind an open decision' "$backlog" park-routed "$dir/state" 0)" = captain ] \
+    || fail "a lane blocked by a captain hold was not classed captain-gated"
+  # ... but a lane blocked only by ordinary work is still bounded, so the blocker
+  # edge itself is not what decides it.
+  write_backlog_item "$dir" park-ordinary '"-"' '"park-bounded"'
+  [ "$(wait_class 'paused: behind other work' "$backlog" park-ordinary "$dir/state" 0)" = bounded ] \
+    || fail "an ordinary blocker edge was mistaken for a captain gate"
+
+  # Unreadable evidence is NOT evidence of a gate. An item the backlog does not
+  # know, and a backlog file that is not there at all, both answer bounded, so a
+  # signal that failed to read can never be what quiets a lane.
+  [ "$(wait_class 'paused: holding' "$backlog" absent-item "$dir/state" 0)" = bounded ] \
+    || fail "an unknown backlog item was treated as captain-gated"
+  [ "$(wait_class 'paused: holding' "$dir/no-such-backlog.md" park-held "$dir/state" 0)" = bounded ] \
+    || fail "a missing backlog file was treated as captain-gated"
+
+  unset FM_TASKS_AXI_BIN FM_FAKE_BACKLOG_FIXTURES
+  pass "wait_class: the status verb and the durable backlog hold each answer captain-gated, and unreadable evidence answers bounded"
+}
+
+# The recheck path runs on every poll for as long as a lane stays parked - hours,
+# for a captain-gated one - so the backlog lookup is throttled to the bounded
+# recheck window. Unthrottled it would spend a process per poll per lane to
+# re-answer a question that changes at most once, on a path whose own contract
+# says it must stay cheap.
+test_wait_class_reads_the_backlog_once_per_window() {
+  local dir backlog reads
+  dir=$(make_case wait-class-throttle); backlog="$dir/backlog.md"
+  : > "$backlog"
+  install_fake_tasks_axi "$dir"
+  write_backlog_item "$dir" park-held captain none
+  export FM_TASKS_AXI_BIN="$dir/fakebin/tasks-axi"
+  export FM_FAKE_BACKLOG_FIXTURES="$dir/backlog-fixtures"
+  export FM_FAKE_TASKS_AXI_LOG="$dir/lookups.log"
+  : > "$FM_FAKE_TASKS_AXI_LOG"
+
+  # Three polls inside one window: one lookup, and the same verdict each time.
+  [ "$(wait_class 'paused: holding' "$backlog" park-held "$dir/state" 3600)" = captain ] || fail "first classification was wrong"
+  [ "$(wait_class 'paused: holding' "$backlog" park-held "$dir/state" 3600)" = captain ] || fail "throttled classification changed its answer"
+  [ "$(wait_class 'paused: holding' "$backlog" park-held "$dir/state" 3600)" = captain ] || fail "throttled classification changed its answer"
+  reads=$(wc -l < "$FM_FAKE_TASKS_AXI_LOG" | tr -d '[:space:]')
+  [ "$reads" -eq 1 ] || fail "the backlog was read $reads times across three polls in one window, not once"
+
+  # A new window re-reads, so a released hold is picked up rather than cached
+  # forever - this is a throttle, not a memo.
+  write_backlog_item "$dir" park-held '"-"' none
+  [ "$(wait_class 'paused: holding' "$backlog" park-held "$dir/state" 0)" = bounded ] \
+    || fail "a released hold was not picked up once the window elapsed"
+  reads=$(wc -l < "$FM_FAKE_TASKS_AXI_LOG" | tr -d '[:space:]')
+  [ "$reads" -eq 2 ] || fail "the next window did not re-read the backlog ($reads reads)"
+
+  unset FM_TASKS_AXI_BIN FM_FAKE_BACKLOG_FIXTURES FM_FAKE_TASKS_AXI_LOG
+  pass "wait_class reads the backlog once per recheck window and re-reads on the next one"
+}
+
+# The request's lifetime has two unreadable worlds, and they are not the same
+# world. This is the CALLER being wrong: a home that writes its captain cadence
+# as 6h rather than 21600s. That says nothing about the request, so the answer is
+# still "do not fire" - a misconfigured timer must never fabricate a ruling - but
+# the request itself has to survive for a correctly configured read to judge.
+test_an_unreadable_lifetime_does_not_destroy_a_pending_recheck_request() {
+  local dir
+  dir=$(make_case recheck-unreadable-lifetime)
+  wait_recheck_request "$dir/state" park1 || fail "could not record the recheck request"
+
+  wait_recheck_pending "$dir/state" park1 6h \
+    && fail "an unreadable lifetime reported a pending ruling"
+  wait_recheck_pending "$dir/state" park1 21600s \
+    && fail "a suffixed lifetime reported a pending ruling"
+  # The request outlives the misconfiguration that could not judge it, so fixing
+  # the knob is all it takes to get the recheck back.
+  wait_recheck_pending "$dir/state" park1 21600 \
+    || fail "a readable lifetime found no request after an unreadable one had read it"
+  pass "an unreadable lifetime declines to fire without destroying the request it could not judge"
+}
+
+# The mirror world: the RECORD is what cannot be read. A request that cannot say
+# when its ruling landed can never be judged by any caller, however well
+# configured, so it is reaped where it lies rather than left to be re-read
+# forever by every poll of every lane that takes this id.
+test_a_recheck_request_with_an_unreadable_stamp_is_reaped() {
+  local dir
+  dir=$(make_case recheck-unreadable-stamp)
+  corrupt_wait_recheck_stamp "$dir/state" park1 || fail "could not record the corrupt request"
+
+  wait_recheck_pending "$dir/state" park1 21600 \
+    && fail "a request with an unreadable stamp reported a pending ruling"
+  [ ! -e "$(_wait_recheck_marker "$dir/state" park1)" ] \
+    || fail "a request with an unreadable stamp outlived the read that found it unjudgeable"
+  pass "a recheck request whose stamp cannot be read is reaped by the read that found it"
+}
+
 # crew_absorb_class: the single fm-crew-state.sh read that returns BOTH absorb
 # reasons - working (active run/busy pane), paused (declared external wait), or none
 # (surface it) - so the watcher's stale path gets both for one bounded call.
@@ -796,6 +926,189 @@ test_parked_lanes_batch_into_one_checkin_on_a_shared_cadence() {
   pass "parked lanes batch into one check-in per cadence window, and the cadence still comes due"
 }
 
+# Run one staged parked lane through a real watcher with the wait classifier
+# pointed at fixture backlog data. Every cadence case below differs only in the
+# fixture and the two cadence knobs, so what separated them is never in doubt.
+watch_parked_lane() {  # <dir> <out> <extra env assignments...>
+  local dir=$1 out=$2
+  shift 2
+  PATH="$dir/fakebin:$PATH" FM_FAKE_TMUX_WINDOW="test:fm-park1" \
+    FM_FAKE_TMUX_CAPTURE="$dir/pane.txt" FM_FAKE_TMUX_CURRENT_COMMAND=zsh \
+    FM_STATE_OVERRIDE="$dir/state" FM_CREW_STATE_BIN="$dir/fakebin/fm-crew-state.sh" \
+    FM_TASKS_AXI_BIN="$dir/fakebin/tasks-axi" FM_FAKE_BACKLOG_FIXTURES="$dir/backlog-fixtures" \
+    FM_BACKLOG_OVERRIDE="$dir/backlog.md" \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    env "$@" "$WATCH" > "$out" &
+}
+
+# Stage one parked lane (task park1, window test:fm-park1) declared with a plain
+# pause and already <back-secs> old, plus the fixture backlog the classifier reads.
+stage_classified_park() {  # <name> <hold-kind> <back-secs> -> dir
+  local name=$1 hold_kind=$2 back=$3 dir
+  dir=$(make_case "$name")
+  : > "$dir/backlog.md"
+  install_fake_tasks_axi "$dir"
+  write_backlog_item "$dir" park1 "$hold_kind" none
+  printf 'idle, awaiting a decision' > "$dir/pane.txt"
+  stage_parked_lanes "$dir/state" "$dir/pane.txt" 1 "$back"
+  printf '%s\n' "$dir"
+}
+
+# Captain's ruling, part 2, and it is load-bearing rather than the leftover half:
+# a BOUNDED wait is expected to clear on its own, so it still deserves ordinary
+# attention. Widening both cadences together would buy the quiet by going blind
+# on the waits that can actually end without anyone being told.
+test_bounded_wait_keeps_its_ordinary_cadence() {
+  local dir pid
+  dir=$(stage_classified_park bounded-wait-cadence '"-"' 500)
+  export FM_FAKE_CREW_STATE='state: paused · source: status-log · awaiting an external decision'
+  watch_parked_lane "$dir" "$dir/watch.out" FM_PAUSE_RESURFACE_SECS=240 FM_PAUSE_CAPTAIN_RESURFACE_SECS=999999
+  pid=$!
+  wait_for_exit "$pid" 60 \
+    || fail "a bounded declared wait was not rechecked on its ordinary cadence: $(cat "$dir/watch.out")"
+  grep -F 'awaiting external' "$dir/watch.out" >/dev/null \
+    || fail "the bounded recheck was not labeled a parked recheck: $(cat "$dir/watch.out")"
+  grep -F 'captain-gated' "$dir/watch.out" >/dev/null \
+    && fail "a bounded wait was reported as captain-gated: $(cat "$dir/watch.out")"
+  pass "a bounded declared wait keeps its ordinary recheck cadence however long the captain-gated one is"
+}
+
+# Captain's ruling, part 1. Measured before this split: five lanes rechecked
+# together, twice, one hour apart, four of them unable to clear without the
+# captain. Elapsed time cannot end a wait a human holds, so the hourly re-ask
+# only re-asked an answered question - at the cost of a full supervision turn
+# each time, during a night watch whose stated purpose was quiet.
+test_captain_gated_wait_waits_out_the_long_cadence() {
+  local dir pid
+  dir=$(stage_classified_park captain-gated-cadence captain 500)
+  export FM_FAKE_CREW_STATE='state: paused · source: status-log · awaiting an external decision'
+
+  # Phase A: past the bounded cadence, well inside the captain-gated one. The
+  # lane is absorbed; nothing surfaces and nothing is queued.
+  watch_parked_lane "$dir" "$dir/watch.out" FM_PAUSE_RESURFACE_SECS=240 FM_PAUSE_CAPTAIN_RESURFACE_SECS=999999
+  pid=$!
+  if ! wait_live "$pid" 40; then
+    reap "$pid"; fail "a captain-gated wait was rechecked on the bounded cadence: $(cat "$dir/watch.out")"
+  fi
+  [ ! -s "$dir/watch.out" ] || fail "a captain-gated wait surfaced inside its cadence: $(cat "$dir/watch.out")"
+  [ ! -s "$dir/state/.wake-queue" ] || fail "a captain-gated wait was queued inside its cadence"
+  reap "$pid"
+
+  # Phase B: cadence, not silence. The same lane, the same age, the same
+  # classification - only the captain-gated window is now short enough - and it
+  # comes due, labeled for what it is. This is also what proves phase A's
+  # silence came from the classification rather than from a lane that could
+  # never have surfaced at all.
+  : > "$dir/watch.out"
+  watch_parked_lane "$dir" "$dir/watch.out" FM_PAUSE_RESURFACE_SECS=240 FM_PAUSE_CAPTAIN_RESURFACE_SECS=240
+  pid=$!
+  wait_for_exit "$pid" 60 \
+    || fail "a captain-gated wait never came due once its own cadence elapsed: $(cat "$dir/watch.out")"
+  grep -F 'captain-gated' "$dir/watch.out" >/dev/null \
+    || fail "the captain-gated recheck was not labeled as one: $(cat "$dir/watch.out")"
+  grep -F 'possible wedge' "$dir/watch.out" >/dev/null \
+    && fail "a captain-gated wait was mislabeled a possible wedge: $(cat "$dir/watch.out")"
+  pass "a captain-gated wait waits out the long cadence and still comes due on it"
+}
+
+# Captain's ruling, part 3, and the part that makes parts 1 and 2 safe. Widening
+# a cadence with no event trigger just means a lane that CAN move sits longer
+# before anyone notices. The ruling is the event that carries the information, so
+# it - not the clock - brings the lanes it gated back for a look.
+test_a_landed_ruling_rechecks_the_lane_it_gated() {
+  local dir pid
+  # Only 60s old: deep inside BOTH cadences, so nothing but the ruling can
+  # surface this lane.
+  dir=$(stage_classified_park ruling-triggered-recheck captain 60)
+  export FM_FAKE_CREW_STATE='state: paused · source: status-log · awaiting an external decision'
+
+  # Phase A: no ruling has landed. Silent, as it must be.
+  watch_parked_lane "$dir" "$dir/watch.out" FM_PAUSE_RESURFACE_SECS=240 FM_PAUSE_CAPTAIN_RESURFACE_SECS=999999
+  pid=$!
+  if ! wait_live "$pid" 40; then
+    reap "$pid"; fail "a fresh captain-gated wait surfaced with no ruling: $(cat "$dir/watch.out")"
+  fi
+  [ ! -s "$dir/watch.out" ] || fail "a fresh captain-gated wait surfaced with no ruling: $(cat "$dir/watch.out")"
+  reap "$pid"
+
+  # Phase B: the ruling lands on this lane, and the home-wide check-in window is
+  # freshly closed on top of the long cadence. Neither timer may hold it: a rate
+  # limit that swallows a ruling is the same failure as a cadence that outlasts
+  # one.
+  wait_recheck_request "$dir/state" park1 || fail "could not record the recheck request"
+  touch "$dir/state/.last-parked-checkin"
+  : > "$dir/watch.out"
+  watch_parked_lane "$dir" "$dir/watch.out" FM_PAUSE_RESURFACE_SECS=240 FM_PAUSE_CAPTAIN_RESURFACE_SECS=999999
+  pid=$!
+  wait_for_exit "$pid" 60 \
+    || fail "a landed ruling did not bring the lane it gated back for a recheck: $(cat "$dir/watch.out")"
+  grep -F 'stale: test:fm-park1' "$dir/watch.out" >/dev/null \
+    || fail "the ruling recheck did not surface the gated lane: $(cat "$dir/watch.out")"
+  grep -F 'ruling landed' "$dir/watch.out" >/dev/null \
+    || fail "the recheck was not labeled as a landed ruling: $(cat "$dir/watch.out")"
+  # Consumed by the lane that was actually surfaced, so the next poll does not
+  # re-report the same ruling forever.
+  wait_recheck_pending "$dir/state" park1 "$FM_PAUSE_CAPTAIN_RESURFACE_SECS_DEFAULT" \
+    && fail "a surfaced ruling recheck was not consumed"
+  pass "a landed ruling rechecks the lane it gated at once, past both the long cadence and a closed check-in window"
+}
+
+# The recheck request spans two worlds a clock cannot tell apart: a ruling routed
+# to a lane that will never park, and a ruling routed to a lane that has not been
+# dispatched YET. This is the second one, and it is the one that must not be lost
+# - the ruling is real and the recheck is genuinely owed - so a request recorded
+# well before its lane ever parked still brings that lane back, for as long as
+# the request is inside its lifetime.
+test_a_ruling_recorded_before_its_lane_parked_still_rechecks_it() {
+  local dir pid
+  # 60s old: deep inside both cadences, so only the ruling can surface it.
+  dir=$(stage_classified_park ruling-before-its-lane captain 60)
+  export FM_FAKE_CREW_STATE='state: paused · source: status-log · awaiting an external decision'
+
+  # The ruling landed 5000s ago - long past the bounded window, well inside the
+  # captain-gated one - against a lane no consumer had yet read it for.
+  age_wait_recheck_request "$dir/state" park1 5000 \
+    || fail "could not record the aged recheck request"
+  watch_parked_lane "$dir" "$dir/watch.out" FM_PAUSE_RESURFACE_SECS=240 FM_PAUSE_CAPTAIN_RESURFACE_SECS=999999
+  pid=$!
+  wait_for_exit "$pid" 60 \
+    || fail "a ruling recorded before its lane parked was dropped rather than honored: $(cat "$dir/watch.out")"
+  grep -F 'ruling landed' "$dir/watch.out" >/dev/null \
+    || fail "the lane came due for something other than its landed ruling: $(cat "$dir/watch.out")"
+  pass "a ruling recorded before its lane ever parked still rechecks that lane once it does"
+}
+
+# The other world, and the other direction of the same lifetime. A ruling routed
+# to work no crew is running - queued backlog work - leaves a request nobody ever
+# reads. Kept forever it would fire against whatever takes that id next, reporting
+# a ruling that landed on nothing and costing the very supervision turn this
+# cadence split exists to remove. A wake must never claim an event that did not
+# happen, so the request expires, and is reaped as it is read.
+test_an_expired_ruling_request_is_reaped_rather_than_faking_a_wake() {
+  local dir pid
+  dir=$(stage_classified_park ruling-request-expiry captain 60)
+  export FM_FAKE_CREW_STATE='state: paused · source: status-log · awaiting an external decision'
+
+  # The same 5000s-old request as the case above, against a captain-gated window
+  # it has now outlived. Nothing else can surface this lane, so what the watcher
+  # does here is decided by the lifetime alone.
+  age_wait_recheck_request "$dir/state" park1 5000 \
+    || fail "could not record the aged recheck request"
+  watch_parked_lane "$dir" "$dir/watch.out" FM_PAUSE_RESURFACE_SECS=240 FM_PAUSE_CAPTAIN_RESURFACE_SECS=1200
+  pid=$!
+  if ! wait_live "$pid" 40; then
+    reap "$pid"; fail "an expired recheck request still reported a landed ruling: $(cat "$dir/watch.out")"
+  fi
+  [ ! -s "$dir/watch.out" ] || fail "an expired recheck request surfaced its lane: $(cat "$dir/watch.out")"
+  [ ! -s "$dir/state/.wake-queue" ] || fail "an expired recheck request queued a wake"
+  reap "$pid"
+  # Reaped on the read that found it expired, so it cannot be waiting for the
+  # next crew to take this id either.
+  wait_recheck_pending "$dir/state" park1 999999 \
+    && fail "an expired recheck request outlived the poll that read it"
+  pass "a recheck request no lane ever came back for expires and is reaped instead of faking a ruling"
+}
+
 # The other half of the contract: a cadence must not become silence. A parked
 # lane whose wait has ACTUALLY cleared has to be noticed on the spot, even deep
 # inside a closed check-in window - the pause is a reason to re-check on a
@@ -892,11 +1205,15 @@ test_exited_declared_pause_is_bounded_but_live_gate_surfaces() {
   printf '1\n' > "$state/.count-$key"
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
     FM_FAKE_TMUX_CURRENT_COMMAND=zsh FM_FAKE_CREW_STATE='state: stopped · source: pane · bare shell' \
-    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_PAUSE_RESURFACE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_PAUSE_RESURFACE_SECS=240 \
+    FM_PAUSE_CAPTAIN_RESURFACE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
-  wait_for_exit "$pid" 40 || fail "captain-held dead-agent pane did not re-surface on the bounded cadence"
-  grep -F "awaiting external" "$state/.wake-queue" >/dev/null \
+  # A captain-held transfer is a CAPTAIN-GATED wait, so it re-surfaces on that
+  # cadence rather than the bounded one; both are set short here because the
+  # subject is the classification, not the interval.
+  wait_for_exit "$pid" 40 || fail "captain-held dead-agent pane did not re-surface on its declared-wait cadence"
+  grep -F "captain-gated" "$state/.wake-queue" >/dev/null \
     || fail "captain-held dead-agent pane surfaced as a stopped crew"
 
   dir=$(make_case alive-decision-gate); state="$dir/state"; fakebin="$dir/fakebin"
@@ -2285,6 +2602,15 @@ test_busy_pane_repeated_escalation_reaches_demand_deep_inspection
 test_busy_pane_default_turn_age_bound_is_3600s
 test_nonterminal_stale_not_working_surfaced
 test_nonterminal_stale_paused_absorbed_then_resurfaced
+test_wait_class_splits_captain_gated_from_bounded
+test_wait_class_reads_the_backlog_once_per_window
+test_an_unreadable_lifetime_does_not_destroy_a_pending_recheck_request
+test_a_recheck_request_with_an_unreadable_stamp_is_reaped
+test_bounded_wait_keeps_its_ordinary_cadence
+test_captain_gated_wait_waits_out_the_long_cadence
+test_a_landed_ruling_rechecks_the_lane_it_gated
+test_a_ruling_recorded_before_its_lane_parked_still_rechecks_it
+test_an_expired_ruling_request_is_reaped_rather_than_faking_a_wake
 test_parked_lanes_batch_into_one_checkin_on_a_shared_cadence
 test_a_cleared_park_is_noticed_promptly_inside_a_closed_cadence
 test_exited_declared_pause_is_bounded_but_live_gate_surfaces

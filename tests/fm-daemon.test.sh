@@ -356,6 +356,102 @@ test_housekeeping_paused_resurfaces_and_resets() {
   pass "housekeeping re-surfaces a stale declared pause on the long cadence and resets its window"
 }
 
+# The captain's 2026-08-07 cadence ruling, on the away-mode side - which is where
+# its cost was measured: five parked lanes rechecked hourly through a night watch
+# whose stated purpose was quiet, four of them unable to clear without him. A
+# digest that re-asks an answered question is the away-mode form of the same tax,
+# so housekeeping splits the same way the watcher does, from the same owner.
+test_housekeeping_splits_captain_gated_from_bounded_waits() {
+  local dir state fakebin win pane key
+  dir=$(make_supercase captain-gated-pause)
+  state="$dir/state"; fakebin="$dir/fakebin"
+  win="sess:fm-held-w11c"; pane="$dir/pane.txt"
+  printf 'paused: holding while the captain rules\n' > "$state/held-w11c.status"
+  printf 'idle prompt $\n' > "$pane"
+  : > "$dir/backlog.md"
+  install_fake_tasks_axi "$dir"
+  write_backlog_item "$dir" held-w11c captain none
+  key=$(printf '%s' "held-w11c" | tr ':/.' '___')
+
+  # Part 1: past the bounded cadence, inside the captain-gated one. Silent, and
+  # the lane keeps its marker so it is still being tracked, not dropped.
+  echo $(( $(date +%s) - 5000 )) > "$state/.subsuper-paused-$key"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$win" FM_FAKE_TMUX_CAPTURE="$pane" \
+    FM_STATE_OVERRIDE="$state" FM_BACKLOG_OVERRIDE="$dir/backlog.md" \
+    FM_TASKS_AXI_BIN="$fakebin/tasks-axi" FM_FAKE_BACKLOG_FIXTURES="$dir/backlog-fixtures" \
+    FM_PAUSE_RESURFACE_SECS=240 FM_PAUSE_CAPTAIN_RESURFACE_SECS=999999 housekeeping "$state"
+  [ ! -s "$state/.subsuper-escalations" ] \
+    || fail "a captain-gated wait was re-asked on the bounded cadence: $(cat "$state/.subsuper-escalations")"
+  [ -e "$state/.subsuper-paused-$key" ] || fail "a captain-gated wait lost its tracking marker"
+
+  # Part 1, other half: cadence, not silence. Same lane, same age, only its own
+  # cadence now elapsed - it comes due, labeled for what it is.
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$win" FM_FAKE_TMUX_CAPTURE="$pane" \
+    FM_STATE_OVERRIDE="$state" FM_BACKLOG_OVERRIDE="$dir/backlog.md" \
+    FM_TASKS_AXI_BIN="$fakebin/tasks-axi" FM_FAKE_BACKLOG_FIXTURES="$dir/backlog-fixtures" \
+    FM_PAUSE_RESURFACE_SECS=240 FM_PAUSE_CAPTAIN_RESURFACE_SECS=240 housekeeping "$state"
+  grep -F "captain-gated" "$state/.subsuper-escalations" >/dev/null 2>&1 \
+    || fail "a captain-gated wait never came due on its own cadence: $(cat "$state/.subsuper-escalations")"
+  grep -F "possible wedge" "$state/.subsuper-escalations" >/dev/null 2>&1 \
+    && fail "a captain-gated wait was mislabeled a possible wedge"
+
+  # Part 2: the same fixture with nothing gating it in the backlog keeps the
+  # ordinary cadence, so the widening is genuinely confined to the human-gated
+  # half. Only the backlog record differs between this lane and the one above.
+  dir=$(make_supercase bounded-pause-keeps-cadence)
+  state="$dir/state"; fakebin="$dir/fakebin"
+  win="sess:fm-held-w11b"; pane="$dir/pane.txt"
+  printf 'paused: holding for the upstream tool release\n' > "$state/held-w11b.status"
+  printf 'idle prompt $\n' > "$pane"
+  : > "$dir/backlog.md"
+  install_fake_tasks_axi "$dir"
+  write_backlog_item "$dir" held-w11b '"-"' none
+  key=$(printf '%s' "held-w11b" | tr ':/.' '___')
+  echo $(( $(date +%s) - 5000 )) > "$state/.subsuper-paused-$key"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$win" FM_FAKE_TMUX_CAPTURE="$pane" \
+    FM_STATE_OVERRIDE="$state" FM_BACKLOG_OVERRIDE="$dir/backlog.md" \
+    FM_TASKS_AXI_BIN="$fakebin/tasks-axi" FM_FAKE_BACKLOG_FIXTURES="$dir/backlog-fixtures" \
+    FM_PAUSE_RESURFACE_SECS=240 FM_PAUSE_CAPTAIN_RESURFACE_SECS=999999 housekeeping "$state"
+  grep -F "awaiting external" "$state/.subsuper-escalations" >/dev/null 2>&1 \
+    || fail "a bounded wait lost its ordinary cadence to the captain-gated widening"
+  pass "housekeeping widens only the captain-gated half of the declared-wait recheck"
+}
+
+# Part 3, on the away-mode side. A ruling that has landed brings the lane it
+# gated back at the next tick, deep inside the long cadence - the event carries
+# the information the clock cannot.
+test_housekeeping_landed_ruling_rechecks_the_lane_it_gated() {
+  local dir state fakebin win pane key
+  dir=$(make_supercase ruling-recheck-away)
+  state="$dir/state"; fakebin="$dir/fakebin"
+  win="sess:fm-held-w11r"; pane="$dir/pane.txt"
+  printf 'paused: holding while the captain rules\n' > "$state/held-w11r.status"
+  printf 'idle prompt $\n' > "$pane"
+  : > "$dir/backlog.md"
+  install_fake_tasks_axi "$dir"
+  write_backlog_item "$dir" held-w11r captain none
+  key=$(printf '%s' "held-w11r" | tr ':/.' '___')
+  # Freshly marked: inside every cadence, so only the ruling can surface it.
+  date +%s > "$state/.subsuper-paused-$key"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$win" FM_FAKE_TMUX_CAPTURE="$pane" \
+    FM_STATE_OVERRIDE="$state" FM_BACKLOG_OVERRIDE="$dir/backlog.md" \
+    FM_TASKS_AXI_BIN="$fakebin/tasks-axi" FM_FAKE_BACKLOG_FIXTURES="$dir/backlog-fixtures" \
+    FM_PAUSE_RESURFACE_SECS=240 FM_PAUSE_CAPTAIN_RESURFACE_SECS=999999 housekeeping "$state"
+  [ ! -s "$state/.subsuper-escalations" ] \
+    || fail "a fresh captain-gated wait surfaced with no ruling: $(cat "$state/.subsuper-escalations")"
+
+  wait_recheck_request "$state" held-w11r || fail "could not record the recheck request"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$win" FM_FAKE_TMUX_CAPTURE="$pane" \
+    FM_STATE_OVERRIDE="$state" FM_BACKLOG_OVERRIDE="$dir/backlog.md" \
+    FM_TASKS_AXI_BIN="$fakebin/tasks-axi" FM_FAKE_BACKLOG_FIXTURES="$dir/backlog-fixtures" \
+    FM_PAUSE_RESURFACE_SECS=240 FM_PAUSE_CAPTAIN_RESURFACE_SECS=999999 housekeeping "$state"
+  grep -F "ruling landed" "$state/.subsuper-escalations" >/dev/null 2>&1 \
+    || fail "a landed ruling did not recheck the lane it gated: $(cat "$state/.subsuper-escalations")"
+  wait_recheck_pending "$state" held-w11r "$FM_PAUSE_CAPTAIN_RESURFACE_SECS_DEFAULT" \
+    && fail "a surfaced ruling recheck was not consumed"
+  pass "a landed ruling rechecks its gated lane at the next away-mode tick, inside the long cadence"
+}
+
 # A pause whose pane became busy again (the crew resumed) drops its marker without
 # escalating, exactly like a resumed wedge.
 test_housekeeping_paused_resumed_cleared() {
@@ -2271,6 +2367,8 @@ test_housekeeping_seeds_pause_marker_from_status
 test_housekeeping_persistent_stale_escalates
 test_housekeeping_resumed_stale_cleared
 test_housekeeping_paused_resurfaces_and_resets
+test_housekeeping_splits_captain_gated_from_bounded_waits
+test_housekeeping_landed_ruling_rechecks_the_lane_it_gated
 test_housekeeping_paused_resumed_cleared
 test_housekeeping_paused_unpaused_cleared
 test_housekeeping_stale_marker_transitions_to_pause

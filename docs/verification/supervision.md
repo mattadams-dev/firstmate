@@ -302,6 +302,59 @@ tests/fm-watcher-lock.test.sh
 tests/fm-watch-triage.test.sh
 ```
 
+## Declared-wait recheck cadence split
+
+Verified 2026-08-07 against this tree, on Linux, with tasks-axi 0.2.3 available.
+
+The recheck cadence is no longer uniform: a wait only a human ruling can end uses `FM_PAUSE_CAPTAIN_RESURFACE_SECS`, a wait expected to clear on its own keeps `FM_PAUSE_RESURFACE_SECS`, and a ruling routed through `bin/fm-decision-hold.sh` records a durable recheck request that brings the lanes it gated due at the next poll regardless of remaining cadence.
+Widening one half without the event trigger would be a regression rather than a fix, so all three are guarded, in both the always-on watcher and the away-mode daemon.
+That recheck request carries a bounded lifetime, guarded from both sides here as well, because a request nobody ever reads is otherwise still there for whatever crew next takes that task id.
+
+Each mutation was applied to a working copy, run, and reverted before the next.
+A failing case aborts its suite, so each case was invoked on its own for this matrix rather than read from a single suite run; that is what makes the "other cases" column an observation instead of an inference.
+
+| Mutation | Case killed | Other cadence cases |
+| --- | --- | --- |
+| `bin/fm-watch.sh`: use the captain-gated window for every declared wait | `test_bounded_wait_keeps_its_ordinary_cadence` | both still ok |
+| `bin/fm-watch.sh`: never select the captain-gated window | `test_captain_gated_wait_waits_out_the_long_cadence` | both still ok |
+| `bin/fm-watch.sh`: never read the pending recheck request | `test_a_landed_ruling_rechecks_the_lane_it_gated` | both still ok |
+| `bin/fm-supervise-daemon.sh`: drop the captain-gated window from housekeeping | `test_housekeeping_splits_captain_gated_from_bounded_waits` | ruling and bounded cases still ok |
+| `bin/fm-supervise-daemon.sh`: use the captain-gated window for every declared wait | `test_housekeeping_splits_captain_gated_from_bounded_waits`, and the pre-existing `test_housekeeping_paused_resurfaces_and_resets` | ruling case still ok |
+| `bin/fm-supervise-daemon.sh`: never read the pending recheck request | `test_housekeeping_landed_ruling_rechecks_the_lane_it_gated` | split and bounded cases still ok |
+| `bin/fm-classify-lib.sh`: let a recorded recheck request live forever | `test_an_expired_ruling_request_is_reaped_rather_than_faking_a_wake` | the other eight still ok, run across all three suites |
+| `bin/fm-watch.sh`: read the recheck request against the bounded window rather than the captain-gated one | `test_a_ruling_recorded_before_its_lane_parked_still_rechecks_it` | the other four watcher cases still ok |
+| `bin/fm-classify-lib.sh`: reap the request when the CALLER's lifetime cannot be read | `test_an_unreadable_lifetime_does_not_destroy_a_pending_recheck_request` | the other six request cases still ok, run across all three suites |
+| `bin/fm-classify-lib.sh`: leave a request whose own STAMP cannot be read in place | `test_a_recheck_request_with_an_unreadable_stamp_is_reaped` | the other six request cases still ok, run across all three suites |
+
+Every mutation kills exactly its own case except the daemon-side widen-both, which kills its own case and one more, and is reported that way because that is what it does.
+It fails `test_housekeeping_splits_captain_gated_from_bounded_waits` at that case's bounded half - its captain-gated half passes under the same mutation, so which property died is measured rather than inferred - and it also fails the pre-existing `test_housekeeping_paused_resurfaces_and_resets`.
+That second kill is not a gap in this work and cannot be tuned away: that case asserts the daemon's bounded cadence with a 5000s marker and no captain-cadence override, so the 21600s default puts any widen-both mutation under its threshold by construction.
+A diagonal was reachable only by pinning a short captain cadence inside that pre-existing case, which was measured and does make it pass under the mutation - that is, it would buy the diagonal by making an existing guard blind to the widening, so it was not done.
+Redundant coverage of the ruling's load-bearing half is the stronger record, and this document reports redundantly-guarded mutations as such elsewhere rather than forcing them into a one-to-one claim.
+
+Rows seven and eight are the recheck request's LIFETIME, and they are exact mirrors of each other.
+A request that never expires eventually fires against whatever crew next takes that task id, reporting a ruling that landed on nothing - the mutation prints it verbatim, `ruling landed after a 61s wait` against a lane no ruling ever gated.
+A request expired too eagerly instead drops a recheck that is genuinely owed, which is the world where the ruling arrived before its lane was ever dispatched.
+Those two worlds are indistinguishable from a marker and a clock, so the lifetime honors the second for as long as it tolerates the first, and errs toward dropping: a dropped request costs a lane its ordinary cadence under a backstop that is still finite, while a kept one fabricates an event.
+
+The last two rows are the two ways that judgement can fail to be readable at all, and they are mirrors as well, because they distrust different things.
+An unreadable LIFETIME is the caller being wrong - a home writing its captain cadence as `6h` rather than `21600` - which says nothing about the request, so the read declines to fire and leaves the request for a correctly configured read to judge.
+An unreadable STAMP is the record being wrong, and a request that cannot say when its ruling landed can never be judged by any caller, so that read reaps it.
+Each case drives its own world and neither mutation reached the other's, which is what says the two branches are genuinely separate rather than one branch written twice.
+
+The cases are separated by the classifier fixture and the two cadence knobs only, so what produced each verdict is not in doubt.
+The captain-gated case additionally asserts that the lane still comes due once its own cadence elapses, so a mutation that turned the long cadence into silence would be caught by the same case that proves the cadence is long.
+
+`test_wait_class_reads_the_backlog_once_per_window` guards the cost rather than the verdict: the recheck path runs on every poll for as long as a lane stays parked, and the backlog lookup is a subprocess, so it is throttled to one read per bounded window and the case counts the lookups through a fixture that logs them.
+
+Deterministic entry points for this contract:
+
+```sh
+tests/fm-watch-triage.test.sh
+tests/fm-daemon.test.sh
+tests/fm-decision-hold-lifecycle.test.sh
+```
+
 ## Away-mode composer read on a live claude-on-herdr pane
 
 Captured 2026-08-04 with Herdr 0.7.1 against two live Claude Code panes in the running session, using `fm_backend_herdr_capture_ansi <target> 20`.

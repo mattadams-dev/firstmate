@@ -311,3 +311,55 @@ dead_pid() {
   done
   printf '%s\n' "$p"
 }
+
+# Install a fake tasks-axi answering `show <id> --full --file <backlog>` from
+# per-id fixtures, so the wait classifier's backlog signal can be driven without
+# a real backlog tool. An id with no fixture is reported absent, exactly as an
+# item the backlog does not know would be. Every lookup is logged to
+# FM_FAKE_TASKS_AXI_LOG when set, so a test can assert how often it was consulted.
+install_fake_tasks_axi() {  # <dir>
+  local dir=$1
+  mkdir -p "$dir/backlog-fixtures"
+  cat > "$dir/fakebin/tasks-axi" <<'SH'
+#!/usr/bin/env bash
+set -u
+[ "${1:-}" = show ] || exit 2
+printf '%s\n' "${2:-}" >> "${FM_FAKE_TASKS_AXI_LOG:-/dev/null}"
+[ -f "$FM_FAKE_BACKLOG_FIXTURES/${2:-}" ] || exit 1
+cat "$FM_FAKE_BACKLOG_FIXTURES/${2:-}"
+SH
+  chmod +x "$dir/fakebin/tasks-axi"
+}
+
+# One backlog item in tasks-axi `show --full` shape, including the quoting real
+# tasks-axi applies to an absent value and to a multi-entry blocker list.
+write_backlog_item() {  # <dir> <id> <hold-kind> [blocked-by]
+  printf 'task:\n  id: %s\n  state: in_flight\n  hold_kind: %s\n  blocked_by: %s\n' \
+    "$2" "$3" "${4:-none}" > "$1/backlog-fixtures/$2"
+}
+
+# Record a ruling recheck request as though the ruling had landed <age> seconds
+# ago, so a case can drive the request's LIFETIME without waiting one out. Goes
+# through the production writer and then re-stamps the record it wrote, so the
+# marker's identity and shape stay owned by bin/fm-classify-lib.sh.
+age_wait_recheck_request() {  # <state-dir> <task-id> <age-secs>
+  bash -c '
+    # shellcheck disable=SC1090,SC1091
+    . "$1"
+    wait_recheck_request "$2" "$3" || exit 1
+    printf "%s" "$(( $(date +%s) - $4 ))" > "$(_wait_recheck_marker "$2" "$3")"
+  ' _ "$ROOT/bin/fm-classify-lib.sh" "$1" "$2" "$3"
+}
+
+# Corrupt a recorded request's stamp in place, so a case can drive the world
+# where the RECORD cannot be trusted rather than the one where the caller cannot.
+# Recorded through the production writer first, so the stamp is the only thing
+# that differs from a request a real ruling would have left.
+corrupt_wait_recheck_stamp() {  # <state-dir> <task-id>
+  bash -c '
+    # shellcheck disable=SC1090,SC1091
+    . "$1"
+    wait_recheck_request "$2" "$3" || exit 1
+    printf "%s" "whenever" > "$(_wait_recheck_marker "$2" "$3")"
+  ' _ "$ROOT/bin/fm-classify-lib.sh" "$1" "$2"
+}
