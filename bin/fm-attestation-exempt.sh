@@ -140,8 +140,12 @@ cmd_check() {
   parents_line=$(git -C "$REPO" rev-list --parents -n1 "$head" 2>/dev/null) ||
     decide unknown "reason=could not read the parents of $head"
   # rev-list --parents prints "<commit> <parent>...", so drop the commit itself.
+  # A parentless head prints the commit alone, with no space to strip, and the
+  # count must be the parents it has rather than the head standing in for one.
   local -a parents=()
-  read -r -a parents <<< "${parents_line#* }"
+  if [ "$parents_line" != "${parents_line#* }" ]; then
+    read -r -a parents <<< "${parents_line#* }"
+  fi
   if [ "${#parents[@]}" -ne 2 ]; then
     decide refused "class=sync-true-merge reason=head has ${#parents[@]} parent(s), a true merge has exactly 2"
   fi

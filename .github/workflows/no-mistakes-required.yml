@@ -48,10 +48,18 @@ jobs:
       # land it would be an admin bypass. The exemption below closes that from
       # properties of the head itself. Everything from here on runs only when the
       # marker is absent, so an attested PR still costs one grep and no checkout.
+      #
+      # Pinned to the head commit rather than the default github.ref, which on
+      # pull_request is refs/pull/N/merge: that ref does not exist for a head
+      # that conflicts with the base, and is computed asynchronously after
+      # `opened`, so the default would fail the checkout outright in both cases
+      # and the step would go red without the exemption ever being evaluated -
+      # sending the operator back to the admin bypass this change abolishes.
       - name: Check out the full history
         if: steps.marker.outputs.attested != 'true'
         uses: actions/checkout@v6
         with:
+          ref: ${{ github.event.pull_request.head.sha }}
           fetch-depth: 0
 
       - name: Evaluate the head against the attestation exemption
@@ -66,10 +74,15 @@ jobs:
           set -eu
 
           # Fetch the head as the forge holds it, and the current base tip rather
-          # than the base recorded when the PR opened.
+          # than the base recorded when the PR opened. A fetch that fails must
+          # not abort the step under set -e: the ref it would have written simply
+          # stays absent, the decider reports a commit it cannot find, and the
+          # gate says undetermined in its own words. Aborting here would fail the
+          # required check with raw git stderr and none of the three outcomes.
           git fetch --no-tags --quiet origin \
             "+refs/pull/${PR_NUMBER}/head:refs/fmgate/head" \
-            "+refs/heads/${BASE_REF}:refs/fmgate/base"
+            "+refs/heads/${BASE_REF}:refs/fmgate/base" ||
+            echo "The head or base could not be fetched, so the gate reports below on whichever of them is present."
 
           # The upstream this fork tracks is read from the forge, never from a
           # value the pull request could set. A fork whose parent cannot be read

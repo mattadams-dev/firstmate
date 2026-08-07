@@ -19,6 +19,11 @@
 # The unreadable-decider cases run a copy of the real script from a directory
 # where its sibling decider is missing or not executable, so the exit codes
 # under test (127, 126) are produced by the shell rather than simulated.
+#
+# One test here is not about outcomes at all: the attestation marker literal has
+# two owners, because the workflow greps for it before any checkout exists and
+# so cannot read the script. Nothing in the shell pins those copies equal, so
+# this suite does, from the marker the gate actually quoted back.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -118,7 +123,53 @@ test_non_qualifying_head_is_reported_refused() {
   pass "a head that was read and does not qualify is reported refused"
 }
 
+# --- the quoted marker is the marker the check actually matches -------------
+
+test_reported_marker_matches_the_workflow_check() {
+  local out reported workflow_marker
+  new_repo
+  # The marker literal has two owners on purpose: the workflow greps for it with
+  # no checkout, so it cannot read the script, and the script quotes it back to
+  # a contributor whose PR was refused. Nothing else pins them equal, and drift
+  # is silent - a stale copy tells the contributor to look for a marker the
+  # check no longer matches. This reads the marker out of the refusal the gate
+  # actually printed, so it pins the string a human is sent looking for.
+  out=$(run_gate "$GATE" feature/x sync/upstream-x) || true
+  reported=$(printf '%s\n' "$out" | sed -n 's/^    \(.*\)$/\1/p')
+  workflow_marker=$(sed -n "s/^[[:space:]]*marker='\(.*\)'[[:space:]]*$/\1/p" \
+    "$ROOT/.github/workflows/no-mistakes-required.yml")
+  [ -n "$workflow_marker" ] ||
+    fail "fixture: no marker literal found in .github/workflows/no-mistakes-required.yml"
+  [ "$(printf '%s\n' "$workflow_marker" | wc -l)" = 1 ] ||
+    fail "fixture: more than one marker literal in .github/workflows/no-mistakes-required.yml"
+  [ "$reported" = "$workflow_marker" ] ||
+    fail "the marker the refusal quotes must be the marker the workflow greps for"$'\n'"--- workflow ---"$'\n'"$workflow_marker"$'\n'"--- quoted by the gate ---"$'\n'"$reported"
+  pass "the marker quoted to a refused contributor is the one the check matches"
+}
+
 # --- a head the gate could not read at all is undetermined ------------------
+
+test_unfetched_head_ref_is_undetermined_not_refused() {
+  local out rc=0
+  new_repo
+  # What a failed `git fetch` of refs/pull/N/head leaves behind: the workflow
+  # carries on, and the ref it names was never written. The gate must report
+  # that in its own words rather than dying on git's, and must not turn a head
+  # it never read into a head that does not qualify.
+  out=$(run_gate "$GATE" sync/upstream-x refs/fmgate/head) || rc=$?
+  expect_code 2 "$rc" "a head ref that was never fetched leaves the outcome undetermined"
+  assert_contains "$out" "decision=unknown" "an absent head ref must decide nothing"
+  assert_contains "$out" "commit not present locally: refs/fmgate/head" \
+    "the reason must name the ref the gate could not resolve"
+  assert_contains "$out" "could not read the head" \
+    "an undetermined outcome must say the gate could not read the head"
+  assert_not_contains "$out" "does not qualify" \
+    "a head that was never fetched must never be reported as one that does not qualify"
+  assert_not_contains "$out" "::notice::Exempt" \
+    "a head that was never fetched must never pass the attestation"
+  pass "a head ref the workflow could not fetch reports undetermined in the gate's own words"
+}
+
 
 test_missing_decider_is_undetermined_not_refused() {
   local dir out rc=0
@@ -229,6 +280,8 @@ DECIDER
 
 test_qualifying_head_is_reported_exempt
 test_non_qualifying_head_is_reported_refused
+test_reported_marker_matches_the_workflow_check
+test_unfetched_head_ref_is_undetermined_not_refused
 test_decider_undetermined_verdict_is_reported_undetermined
 test_non_exempt_verdict_at_exit_0_is_not_reported_exempt
 test_missing_decider_is_undetermined_not_refused

@@ -5,7 +5,7 @@ Subject: `bin/fm-attestation-exempt.sh` and the fork's `PR must be raised via no
 Contract owner: [`docs/attestation-exemption.md`](../attestation-exemption.md).
 Regression suites: `tests/fm-attestation-exempt.test.sh` (the decider), `tests/fm-attestation-gate.test.sh` (the report layer).
 
-Date: 2026-08-06.
+Date: 2026-08-06, both mutation matrices re-measured 2026-08-07 after the workflow-glue fixes below.
 Versions: git 2.54.0, ShellCheck 0.11.0 (pinned).
 
 ## Why the exemption could not be "the auto-merge reproduces the head exactly"
@@ -79,7 +79,8 @@ Each mutant below disables one property in `bin/fm-attestation-exempt.sh`; every
 | ------ | ----------------- | ------------ |
 | baseline | none | none |
 | `sync/*) : ;;` -> `*) : ;;` | 1, branch scope | `non_sync_branch_that_is_a_true_merge_is_refused` |
-| `-ne 2` -> `-gt 99` | 2, exactly two parents | `sync_named_non_merge_head_is_refused` |
+| `-ne 2` -> `-gt 99` | 2, exactly two parents | `sync_named_non_merge_head_is_refused`, `root_commit_sync_head_is_refused_with_no_parents_counted` |
+| parent strip made unconditional | a parentless head is counted as having no parents | `root_commit_sync_head_is_refused_with_no_parents_counted` |
 | `contains "${parents[1]}" "$upstream"` -> `true` | 3, upstream-side parent | `sync_head_merging_something_other_than_upstream_is_refused` |
 | `contains "${parents[0]}" "$base"` -> `true` | 4, base-side parent | `sync_head_whose_other_parent_is_unlanded_is_refused` |
 | `if [ -n "${stray// /}" ]` -> `if false` | 5, true-merge tree verification | `sync_head_smuggling_into_an_unconflicted_path_is_refused` |
@@ -87,25 +88,34 @@ Each mutant below disables one property in `bin/fm-attestation-exempt.sh`; every
 | `sort -u "$work/conflicted"` -> empty allowed list | requires a conflict-free re-merge (mirror trap) | `conflicted_true_merge_sync_head_is_exempt` |
 | `*) exit 2` -> `*) exit 1` | undetermined as its own outcome | `unreadable_head_is_undetermined_not_refused` |
 
-No mutant breaks a test other than the one naming its property, so no test is passing for an incidental reason and no property is unpinned.
+No mutant breaks a test outside the property it disables, so no test is passing for an incidental reason and no property is unpinned.
+The parent-count rows are the one place two tests answer to one mutant, and they are pinning different things about the same condition: disabling condition 2 outright lets both a single-parent head and a parentless one through, while the parent strip governs only what the refusal *says* about a parentless head, and the guard row breaks alone.
 The two mirror-trap rows are the ones that matter most: an exemption that never fires would leave the manual bypass exactly where it was, so "the exemption still applies to a real sync" is a regression in its own right rather than a convenience.
 
 ## Guard-class mutation matrix, report layer
 
 Three outcomes are only worth deciding if they survive being reported.
-`bin/fm-attestation-gate.sh` is where they can be lost, so it is mutated on the same terms, with all eight tests of `tests/fm-attestation-gate.test.sh` run in isolation per mutant.
+`bin/fm-attestation-gate.sh` is where they can be lost, so it is mutated on the same terms, with all ten tests of `tests/fm-attestation-gate.test.sh` run in isolation per mutant.
 
 | Mutant | Property disabled | Tests broken |
 | ------ | ----------------- | ------------ |
 | baseline | none | none |
-| `*) rc=2 ;;` -> `*) rc=1 ;;` | an exit code outside 0 and 1 is undetermined | `decider_undetermined_verdict_is_reported_undetermined` |
+| `*) rc=2 ;;` -> `*) rc=1 ;;` | an exit code outside 0 and 1 is undetermined | `decider_undetermined_verdict_is_reported_undetermined`, `unfetched_head_ref_is_undetermined_not_refused` |
 | `1) rc=1 ;;` -> `1) rc=0 ;;` | a refusal is not an exemption | `non_qualifying_head_is_reported_refused` |
 | `0) rc=0 ;;` -> `0) rc=2 ;;` | the exemption is still granted (mirror trap) | `qualifying_head_is_reported_exempt` |
 | `'ATTESTATION_EXEMPT: decision=exempt '*) : ;;` -> `*) : ;;` | exempt requires the decider to have said so | `non_exempt_verdict_at_exit_0_is_not_reported_exempt` |
 | unparseable-decision arm keeps `rc` instead of setting `rc=2` | a decision the gate cannot read determines nothing, whatever exit code carried it | `silent_exit_1_decider_is_undetermined_not_refused` |
-| `if [ "$rc" -eq 1 ]` -> `if true` | the report names the outcome it observed | the six fixtures whose outcome is undetermined |
+| `if [ "$rc" -eq 1 ]` -> `if true` | the report names the outcome it observed | the seven fixtures whose outcome is undetermined |
+| the workflow's `marker='...'` literal edited | the quoted marker is the marker the check matches | `reported_marker_matches_the_workflow_check` |
+| the script's `MARKER='...'` literal edited | the same, from the other owner | `reported_marker_matches_the_workflow_check` |
 
-Every mutant but the last breaks exactly one test, and the last breaks exactly the fixtures whose reported wording it falsifies, so no property is passing on the strength of another's fixture.
+Every mutant breaks only tests whose property it falsifies, so no property is passing on the strength of another's fixture.
+The two undetermined fixtures that share the exit-code row are the two production shapes of the same signal - a head that was never fetched, and any other head the decider cannot resolve - and the wording row breaks exactly the fixtures whose reported outcome it misnames.
+
+The last two rows are the only pair of mutants in either matrix that live in different files, which is the point of the test they break.
+The marker literal has two owners by necessity: the workflow greps for it before any checkout exists, so it cannot read the script, while the script quotes it back to a refused contributor.
+Nothing in the shell pins the copies equal, so the suite does it, by reading the marker out of a refusal the gate actually printed and comparing it to the literal the workflow greps for.
+Either copy drifting alone turns the check red, which is the loud failure that a comment asking the two to agree would not have produced.
 
 Each row needed a fixture where the mutated arm is the only thing standing between the input and the wrong answer, which is why the four unreadable-decider fixtures do not appear against the exit-code rows.
 A decider that is missing, not executable, or silent fails two guards at once - it has no decision line either - so the decision-line guard alone still saves it and the exit-code mutants pass those tests.
@@ -134,3 +144,17 @@ ATTESTATION_EXEMPT: decision=refused class=sync-true-merge reason=head changes p
 The workflow step's own shell was exercised end to end against those refs in a separate clone, confirming the ref plumbing and that an unreadable upstream parent produces the undetermined message rather than the refusal message.
 The exit-code handling is no longer verified that way: it moved into `bin/fm-attestation-gate.sh` precisely so it could be driven by a suite, and the matrix above is what pins it.
 What remains inline in the workflow is one branch - exit 0 passes, anything else fails the step, and a code that is neither 0, 1 nor 2 also prints that the gate could not be run at all.
+
+## The two workflow steps that no suite can drive
+
+Two things happen before the gate script is reached, and neither is a shell a fixture can call: the checkout and the fetch.
+Both were routes around the three-outcome report rather than through it, and both are now shaped so that failing leaves the gate still able to speak.
+
+The checkout is pinned to `github.event.pull_request.head.sha` rather than the default `github.ref`.
+On `pull_request` that default is `refs/pull/N/merge`, a ref GitHub does not create for a head that conflicts with the base and computes asynchronously after `opened`.
+Either case failed the checkout outright, so the required check went red with a checkout error and the exemption was never evaluated - and an operator meeting a red sync is exactly the operator who reaches for the admin bypass this change exists to abolish.
+A conflicting head now reaches the gate and is reported rather than crashing the step.
+
+The fetch of the head and base is guarded the way the upstream fetch already was.
+Under `set -eu` an unfetchable head aborted the step before `bin/fm-attestation-gate.sh` ran at all, and the check went red carrying git's stderr and none of the three outcome annotations - the one path in this change that produced a red attestation with no statement of what was observed.
+The ref it would have written now simply stays absent, which is a shape a fixture *can* reach: `unfetched_head_ref_is_undetermined_not_refused` passes the gate the same `refs/fmgate/head` the workflow does, with nothing behind it, and pins that the outcome is undetermined, that the attestation stays in force, and that the wording is the reporter's rather than git's.

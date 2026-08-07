@@ -168,6 +168,26 @@ test_sync_named_non_merge_head_is_refused() {
   pass "an ordinary single-parent commit on a sync/*-named branch is refused"
 }
 
+test_root_commit_sync_head_is_refused_with_no_parents_counted() {
+  local out rc=0
+  new_repo
+  # A parentless head: `rev-list --parents` prints the commit alone, so the
+  # refusal has nothing to strip and must not count the head as its own parent.
+  # The verdict is refused either way; what is pinned here is the stated fact.
+  git -C "$REPO" checkout -q --orphan sync/upstream-x
+  git -C "$REPO" rm -rq --cached .
+  printf 'from nothing\n' > "$REPO/orphan.txt"
+  git -C "$REPO" add orphan.txt
+  git -C "$REPO" commit -qm 'a root commit wearing a sync name'
+  [ -z "$(git -C "$REPO" rev-list --parents -n1 sync/upstream-x | cut -sd' ' -f2-)" ] ||
+    fail "fixture: the orphan head was expected to have no parents and has some"
+  out=$(gate sync/upstream-x sync/upstream-x) || rc=$?
+  expect_code 1 "$rc" "a parentless head is read in full and refused"
+  assert_contains "$out" "head has 0 parent(s)" \
+    "a parentless head must be reported as having no parents"
+  pass "a parentless sync/* head is refused and its parents are counted as none"
+}
+
 test_sync_head_merging_something_other_than_upstream_is_refused() {
   local out rc=0
   new_repo
@@ -218,6 +238,7 @@ test_clean_true_merge_sync_head_is_exempt
 test_sync_head_smuggling_into_an_unconflicted_path_is_refused
 test_non_sync_branch_that_is_a_true_merge_is_refused
 test_sync_named_non_merge_head_is_refused
+test_root_commit_sync_head_is_refused_with_no_parents_counted
 test_sync_head_merging_something_other_than_upstream_is_refused
 test_sync_head_whose_other_parent_is_unlanded_is_refused
 test_unreadable_head_is_undetermined_not_refused
