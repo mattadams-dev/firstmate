@@ -59,7 +59,8 @@ Both leave the attestation in force, and the workflow says which one happened.
 Collapsing undetermined into either direction would report a fact the gate never observed.
 
 The workflow layer keeps all three rather than flattening them on the way out, which is why `bin/fm-attestation-gate.sh` exists as a script the suite can drive rather than as shell inlined in the workflow file.
-It maps exit 0 with an exempt decision line to exempt and exit 1 to refused, and it maps **every** other exit code to undetermined - the decider's own 64 usage error, the 126 and 127 a missing or non-executable decider produces, and whatever a later revision adds.
+It maps exit 0 with an exempt decision line to exempt and exit 1 with a decision line to refused, and it maps **everything** else to undetermined - the decider's own 64 usage error, the 126 and 127 a missing or non-executable decider produces, whatever a later revision adds, and any exit at all that arrives without a decision line to read.
+That last clause is not a formality: a decider that dies under its own `set -u` before deciding exits 1 and prints nothing, and 1 without a decision is not a refusal, because no head was ever read.
 That direction is deliberate in both senses: a head the gate could not read is never reported as a head that does not qualify, and it is never reported as exempt either.
 `tests/fm-attestation-gate.test.sh` pins each direction with its own fixture, because a mutant that collapses one way still passes the other way's test.
 

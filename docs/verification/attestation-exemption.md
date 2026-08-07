@@ -93,20 +93,23 @@ The two mirror-trap rows are the ones that matter most: an exemption that never 
 ## Guard-class mutation matrix, report layer
 
 Three outcomes are only worth deciding if they survive being reported.
-`bin/fm-attestation-gate.sh` is where they can be lost, so it is mutated on the same terms, with all five tests of `tests/fm-attestation-gate.test.sh` run in isolation per mutant.
+`bin/fm-attestation-gate.sh` is where they can be lost, so it is mutated on the same terms, with all eight tests of `tests/fm-attestation-gate.test.sh` run in isolation per mutant.
 
 | Mutant | Property disabled | Tests broken |
 | ------ | ----------------- | ------------ |
 | baseline | none | none |
-| `*) rc=2 ;;` -> `*) rc=1 ;;` | every other exit code is undetermined | `missing_decider_is_undetermined_not_refused`, `non_executable_decider_is_undetermined_not_refused` |
+| `*) rc=2 ;;` -> `*) rc=1 ;;` | an exit code outside 0 and 1 is undetermined | `decider_undetermined_verdict_is_reported_undetermined` |
 | `1) rc=1 ;;` -> `1) rc=0 ;;` | a refusal is not an exemption | `non_qualifying_head_is_reported_refused` |
 | `0) rc=0 ;;` -> `0) rc=2 ;;` | the exemption is still granted (mirror trap) | `qualifying_head_is_reported_exempt` |
-| `'ATTESTATION_EXEMPT: decision=exempt '*) : ;;` -> `*) : ;;` | exempt requires the decider to have said so | `silent_decider_is_not_reported_exempt` |
-| `if [ "$rc" -eq 1 ]` -> `if true` | the report names the outcome it observed | `missing_decider_is_undetermined_not_refused`, `non_executable_decider_is_undetermined_not_refused`, `silent_decider_is_not_reported_exempt` |
+| `'ATTESTATION_EXEMPT: decision=exempt '*) : ;;` -> `*) : ;;` | exempt requires the decider to have said so | `non_exempt_verdict_at_exit_0_is_not_reported_exempt` |
+| unparseable-decision arm keeps `rc` instead of setting `rc=2` | a decision the gate cannot read determines nothing, whatever exit code carried it | `silent_exit_1_decider_is_undetermined_not_refused` |
+| `if [ "$rc" -eq 1 ]` -> `if true` | the report names the outcome it observed | the six fixtures whose outcome is undetermined |
 
-The two multi-row mutants break several tests each because those tests pin one property through several exit codes - 127 for a decider that is not there, 126 for one that cannot be executed, and a clean 0 with nothing decided.
-No mutant reaches a test outside the property it disables.
-The rows are the two collapses the design forbids, taken one at a time: mapping an unreadable head to refused fails only the unreadable fixtures, and mapping a refusal to exempt fails only the refusal fixture, so neither direction is passing on the strength of the other's test.
+Every mutant but the last breaks exactly one test, and the last breaks exactly the fixtures whose reported wording it falsifies, so no property is passing on the strength of another's fixture.
+
+Each row needed a fixture where the mutated arm is the only thing standing between the input and the wrong answer, which is why the four unreadable-decider fixtures do not appear against the exit-code rows.
+A decider that is missing, not executable, or silent fails two guards at once - it has no decision line either - so the decision-line guard alone still saves it and the exit-code mutants pass those tests.
+The rows above are therefore anchored on the cases where exactly one signal is available: a well-formed `decision=unknown` at exit 2 for the exit-code mapping, a well-formed non-exempt line at exit 0 for the exempt-line check, and an empty decision at exit 1 - the code a real refusal also uses - for the unparseable-decision arm.
 
 ## The gate against the real specimen
 

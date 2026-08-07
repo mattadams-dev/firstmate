@@ -8,8 +8,9 @@
 # that collapses one way still passes the other way's test:
 #
 #   - a head the gate could not read at all must be reported undetermined, with
-#     the attestation still in force. A mutant that maps every code other than
-#     0 and 2 to refused breaks exactly this;
+#     the attestation still in force - whatever exit code carried the silence,
+#     including the 1 the decider uses for a refusal it never reached. A mutant
+#     that maps every code other than 0 and 2 to refused breaks exactly this;
 #   - a head that was read and does not qualify must still be reported refused.
 #     A mutant that maps those same codes to exempt breaks exactly this;
 #   - a qualifying head must still be reported exempt, because a mapping that
@@ -164,8 +165,73 @@ test_silent_decider_is_not_reported_exempt() {
   pass "a decider that exits 0 without a decision is undetermined, not exempt"
 }
 
+test_silent_exit_1_decider_is_undetermined_not_refused() {
+  local dir out rc=0
+  new_repo
+  dir=$(gate_dir gate-with-dying-decider)
+  # Exit 1 is the decider's refusal code, but this decider never got as far as
+  # refusing: it dies under its own set -u before deciding anything. Bash's own
+  # exit status for that is 1, so the code alone cannot tell the two apart.
+  cat > "$dir/fm-attestation-exempt.sh" <<'DECIDER'
+#!/usr/bin/env bash
+set -u
+printf '%s' "$never_set_by_anyone"
+DECIDER
+  chmod +x "$dir/fm-attestation-exempt.sh"
+  out=$(run_gate "$dir/fm-attestation-gate.sh" sync/upstream-x sync/upstream-x) || rc=$?
+  expect_code 2 "$rc" "exit 1 without a decision determined nothing"
+  assert_contains "$out" "could not read the head" \
+    "a decider that died before deciding must report an unreadable head"
+  assert_not_contains "$out" "does not qualify" \
+    "a refusal must never be asserted on top of a decision the gate could not parse"
+  assert_not_contains "$out" "::notice::Exempt" "silence must never be read as an exemption"
+  pass "a decider that exits 1 without a decision is undetermined, not a refusal"
+}
+
+test_decider_undetermined_verdict_is_reported_undetermined() {
+  local out rc=0
+  new_repo
+  # The decider's own undetermined outcome: a head it cannot read, decided in
+  # words and carried by exit 2. This is the ordinary production shape of
+  # undetermined - an upstream ref the workflow could not fetch reaches the gate
+  # exactly this way - and it is the case that distinguishes exit 2 from exit 1
+  # while both carry a well-formed decision line.
+  out=$(run_gate "$GATE" sync/upstream-x 0000000000000000000000000000000000000000) || rc=$?
+  expect_code 2 "$rc" "the decider's undetermined verdict must stay undetermined"
+  assert_contains "$out" "decision=unknown" "the decider's own unknown line must be reported"
+  assert_contains "$out" "could not read the head" \
+    "an undetermined outcome must say the gate could not read the head"
+  assert_not_contains "$out" "does not qualify" \
+    "undetermined must never be reported as a head that does not qualify"
+  pass "a decider verdict of undetermined is reported as undetermined, not as a refusal"
+}
+
+test_non_exempt_verdict_at_exit_0_is_not_reported_exempt() {
+  local dir out rc=0
+  new_repo
+  dir=$(gate_dir gate-with-disagreeing-decider)
+  # A well-formed decision line that does not say exempt, carried by the exit
+  # code that does. The two disagree, and only one of them is a decision.
+  cat > "$dir/fm-attestation-exempt.sh" <<'DECIDER'
+#!/usr/bin/env bash
+printf 'ATTESTATION_EXEMPT: decision=refused class=sync-true-merge reason=some reason\n'
+exit 0
+DECIDER
+  chmod +x "$dir/fm-attestation-exempt.sh"
+  out=$(run_gate "$dir/fm-attestation-gate.sh" sync/upstream-x sync/upstream-x) || rc=$?
+  expect_code 2 "$rc" "exit 0 without an exempt decision grants nothing"
+  assert_not_contains "$out" "::notice::Exempt" \
+    "an exit code alone must never be read as an exemption the decider did not state"
+  assert_contains "$out" "could not read the head" \
+    "a decision the gate cannot take at face value leaves the outcome undetermined"
+  pass "an exit 0 whose decision line does not say exempt is undetermined, not exempt"
+}
+
 test_qualifying_head_is_reported_exempt
 test_non_qualifying_head_is_reported_refused
+test_decider_undetermined_verdict_is_reported_undetermined
+test_non_exempt_verdict_at_exit_0_is_not_reported_exempt
 test_missing_decider_is_undetermined_not_refused
 test_non_executable_decider_is_undetermined_not_refused
 test_silent_decider_is_not_reported_exempt
+test_silent_exit_1_decider_is_undetermined_not_refused

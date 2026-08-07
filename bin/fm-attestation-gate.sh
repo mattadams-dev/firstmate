@@ -12,12 +12,13 @@
 # print "the head does not qualify" on the strength of exit code 127.
 #
 # The mapping here is therefore exhaustive in the other direction. Exit 0 with
-# an exempt decision line is exempt, exit 1 is refused, and EVERY other exit
-# code - the decider's own 64 usage error, 126 and 127 from a decider that is
-# missing or not executable, and any code a later revision adds - is
-# undetermined. Neither collapse is permitted: a head that could not be read
-# must never be reported as a head that does not qualify, and must never be
-# reported as exempt either.
+# an exempt decision line is exempt, exit 1 with a decision line is refused, and
+# EVERYTHING else is undetermined - the decider's own 64 usage error, 126 and
+# 127 from a decider that is missing or not executable, any code a later
+# revision adds, and any exit at all that arrives without a decision line to
+# read. Neither collapse is permitted: a head that could not be read must never
+# be reported as a head that does not qualify, and must never be reported as
+# exempt either.
 #
 # Usage:
 #   fm-attestation-gate.sh check --head-ref <name> --head <ref> --base <ref> \
@@ -124,9 +125,16 @@ cmd_check() {
         ;;
     esac
   fi
+  # A decision line the gate cannot parse means nothing was determined, whatever
+  # exit code carried it. A decider that dies before deciding - under its own
+  # set -u, say - exits 1 and prints nothing, and 1 without a decision is not a
+  # refusal: no head was ever read.
   case "$decision" in
     'ATTESTATION_EXEMPT: '*) : ;;
-    *) decision="ATTESTATION_EXEMPT: decision=unknown reason=the exemption decider produced no decision (exit $raw)" ;;
+    *)
+      rc=2
+      decision="ATTESTATION_EXEMPT: decision=unknown reason=the exemption decider produced no decision (exit $raw)"
+      ;;
   esac
 
   printf '%s\n' "$decision"
