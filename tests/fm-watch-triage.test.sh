@@ -282,30 +282,6 @@ test_status_is_paused_classifier() {
   pass "status_is_paused: only the leading paused verb matches, and paused is not captain-relevant"
 }
 
-# Install a fake tasks-axi answering `show <id> --full --file <backlog>` from
-# per-id fixtures, so the wait classifier's backlog signal can be driven without
-# a real backlog tool. An id with no fixture is reported absent, exactly as an
-# item the backlog does not know would be.
-install_fake_tasks_axi() {  # <dir>
-  local dir=$1
-  mkdir -p "$dir/backlog-fixtures"
-  cat > "$dir/fakebin/tasks-axi" <<'SH'
-#!/usr/bin/env bash
-set -u
-[ "${1:-}" = show ] || exit 2
-[ -f "$FM_FAKE_BACKLOG_FIXTURES/${2:-}" ] || exit 1
-cat "$FM_FAKE_BACKLOG_FIXTURES/${2:-}"
-SH
-  chmod +x "$dir/fakebin/tasks-axi"
-}
-
-# One backlog item in tasks-axi `show --full` shape, including the quoting real
-# tasks-axi applies to an absent value and to a multi-entry blocker list.
-write_backlog_item() {  # <dir> <id> <hold-kind> [blocked-by]
-  printf 'task:\n  id: %s\n  state: in_flight\n  hold_kind: %s\n  blocked_by: %s\n' \
-    "$2" "$3" "${4:-none}" > "$1/backlog-fixtures/$2"
-}
-
 # The captain's 2026-08-07 cadence ruling turns on ONE distinction: can this wait
 # end without a human? wait_class is its single owner, and it reads two signals
 # because neither is sufficient alone - the worker's own status verb is free but
