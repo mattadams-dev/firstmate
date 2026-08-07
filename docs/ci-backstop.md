@@ -40,7 +40,7 @@ Two further facts, recorded so the idea is not re-proposed on the assumption tha
 
 [`.github/workflows/ci.yml`](../.github/workflows/ci.yml) triggers on every push to `main`, so a merge run reports the 11 required contexts that `ci.yml` owns, not all 12.
 The 12th required context, `PR must be raised via no-mistakes`, comes from [`.github/workflows/no-mistakes-required.yml`](../.github/workflows/no-mistakes-required.yml), which triggers only on `pull_request` and so cannot report on a push at all.
-No conflict detection is lost to that gap: it reads the pull request body for a signature, which is not something a semantic conflict can fail.
+No conflict detection is lost to that gap: it reads the pull request body for a signature and, failing that, the head's own merge shape, and neither is something a semantic conflict can fail.
 `ci.yml`'s own 12th job, `Behavior timing aggregate`, is not a required context either, so it is not counted here.
 
 - **Latency is measured, not assumed.** The five most recent `main` push runs took 8m16s to 10m05s, mean about 9.4 minutes.
@@ -100,7 +100,8 @@ gh-axi api "repos/<owner>/<repo>/actions/workflows/ci.yml/runs?branch=main&event
 **2. Do not use `gh-axi pr revert <n>` here.**
 It exists, and on this repository it produces a pull request that cannot merge.
 A revert pull request it creates is authored by the token's user, and `PR must be raised via no-mistakes` is one of the 12 required contexts.
-That check passes only when the pull request body carries the no-mistakes signature, and it skips only `github-actions[bot]` and `dependabot[bot]` authors.
+That check passes only when the pull request body carries the no-mistakes signature or the head qualifies for the one graph-checked exemption that [`attestation-exemption.md`](attestation-exemption.md) owns, and it skips only `github-actions[bot]` and `dependabot[bot]` authors.
+A revert pull request is neither signed nor a fork sync, so neither route is open to it.
 Admin enforcement is on, so nobody can bypass it.
 The revert pull request would sit open and unmergeable.
 
