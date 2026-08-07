@@ -54,7 +54,10 @@ Collapsing undetermined into either direction would report a fact the gate never
 
 ## What is deliberately not exempt, and why
 
-The attended fast path - a small change authored directly, with no worker and no pipeline round - has **no exemption here**, and this is a finding rather than an omission.
+The attended fast path - a small change authored directly, with no worker and no pipeline round - has **no exemption here**.
+This is a captain's ruling, not an unmet requirement.
+The gate was scoped to cover that class as well; the captain then accepted the finding below, ruled that the gate ships sync-only, and **waived** the requirement to cover the attended fast-path class.
+The fast path continues to satisfy the gate the ordinary way, by being pushed through the pipeline.
 
 "Attended" is a property of the authoring session, not of the commit.
 Two byte-identical heads, one hand-authored under supervision and one generated unattended, are indistinguishable to any gate that reads the repository.
