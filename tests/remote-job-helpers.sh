@@ -23,17 +23,32 @@
 # as "rm: cannot remove ...: Directory not empty", printed after the real
 # message, so it reads as a second unrelated defect while burying the assertion
 # that actually failed; and whatever rm did win left a live supervisor spinning
-# in the runner. Two of the four suites leaked one on every passing run.
+# in the runner. Two of the first four suites leaked one on every passing run.
+#
+# tests/fm-remote-reply.test.sh is the fifth suite and joined later, after the
+# race failed a CI shard on a run whose own output ended in "ALL TESTS PASSED":
+# the removal error was the only diagnostic that run produced, and the suite
+# still reported exit=1. Locally that suite left exactly one live supervisor per
+# passing run, respawning a child every 0.1s against the tree rm was removing.
 
 # fm_remote_job_fixture_worker_pid <pid> <worker-path>: true only when <pid> is
 # BOTH live and running <worker-path>.
 #
 # A recorded pid is only a record: by teardown the process is often already gone
-# and its number reused, so the file alone is never authority to signal. Callers
-# pass their own mktemp-unique fixture worker path, so both facts checked here
-# are self-owned and nothing outside the calling suite can be selected - the
-# hazard tests/fm-remote-job.test.sh pins at "stale ownership is reclaimed
-# without signaling a reused pid".
+# and its number reused, so the file alone is never authority to signal. What a
+# caller passes is the absolute path of the worker executable its own configured
+# remote root launched, so both facts checked here are self-owned - the hazard
+# tests/fm-remote-job.test.sh pins at "stale ownership is reclaimed without
+# signaling a reused pid".
+#
+# For a suite whose remote root is a mktemp fixture, that path is unique to the
+# suite and nothing outside it can be selected. tests/fm-remote-reply.test.sh
+# configures this checkout itself as the remote root, so its worker path is this
+# checkout's own bin/fm-remote-job-worker.sh, which a worker outside the suite
+# could also be running. Selecting one would still take a pid read from this
+# suite's private state root having been reused by such a worker inside the
+# teardown window, and the alternative - signalling that recorded pid with no
+# liveness or identity check at all - is the strictly weaker one it replaced.
 #
 # The path must be an existing regular FILE, not merely non-empty. Trap bodies
 # tolerate their root variable being unset so no call site depends on definition
