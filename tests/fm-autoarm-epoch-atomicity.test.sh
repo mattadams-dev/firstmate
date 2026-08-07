@@ -276,63 +276,96 @@ strict claude-code "claude-code --help" \
   || fail "provenance strict refused a claude- prefixed basename"
 pass "provenance strict: ADMIT - real Claude shapes pass"
 
-strict node "node /home/u/.npm/lib/node_modules/@anthropic-ai/claude-code/cli.js --session-id x" \
-  || fail "provenance strict refused an interpreter-hosted Claude at the exact trusted package path"
-strict python "python /usr/lib/@anthropic-ai/claude-code/cli.py" \
-  || fail "provenance strict refused the python-hosted trusted package path"
-# ps flattens argv with spaces, so a script path CONTAINING whitespace is
-# indistinguishable from multiple arguments by splitting. Refusing those is
-# not conservative - it clears the session id, writes a pid-only lock, and
-# restores the ancestry basis this branch deletes. An install under a spaced
-# directory must admit.
-strict node "node /home/u/My Apps/node_modules/@anthropic-ai/claude-code/cli.js" \
-  || fail "provenance strict refused a legitimate install under a SPACED path - that refusal lands in the ancestry fallback"
-pass "provenance strict: ADMIT - script position, including paths containing spaces"
+if strict node "node /usr/lib/node_modules/@anthropic-ai/claude-code/cli.js"; then
+  fail "the rendered-string predicate still admits an interpreter shape - the interpreter path must be decided from real argv only"
+fi
+pass "provenance strict: the rendered-string predicate decides NATIVE shapes only"
 
-# POSITION is the axis the round-2 fixtures missed: they probed the right
-# shapes only in script position, so a trusted path in ARGUMENT position went
-# untested and the implementation scanned the whole argument string - identity
-# forgery by carrying a data path. Every refusal shape is now enumerated by
-# position AND by string.
-if strict node "node /opt/foreign/codex.js --fixture /tmp/@anthropic-ai/claude-code/data"; then
-  fail "FORGERY: trusted package path in ARGUMENT position admitted a foreign script"
-fi
-if strict python "python /opt/foreign/codex.py --data /tmp/@anthropic-ai/claude-code/x"; then
-  fail "FORGERY: trusted path in argument position admitted under the python branch"
-fi
-if strict node "node --experimental-x /opt/foreign/x.js /@anthropic-ai/claude-code/cli.js"; then
-  fail "FORGERY: trusted path in a later position admitted behind a flag"
-fi
-if strict node "node /opt/foreign/x.js /usr/lib/@anthropic-ai/claude-code/cli.js"; then
-  fail "FORGERY: a trusted path in a SECOND absolute argument admitted - the anchor must end at argv[1]"
-fi
-if strict node "node  /usr/lib/@anthropic-ai/claude-code/cli.js"; then
-  fail "an empty argv[1] (double separator) admitted - ps joins argv with single spaces, so this is argv[2], a foreign shape"
-fi
-pass "provenance strict: REFUSE - trusted path in ARGUMENT position never admits (node and python)"
+# --- interpreter-hosted: decided from REAL ARGV, never rendered text ---------
+# The redesign three review rounds paid for. `ps -o args=` joins argv with
+# spaces irreversibly, so "node /a b/cli.js" is both a spaced path and two
+# arguments; every defect this predicate produced came from trying to invert
+# that. These fixtures pass argv as SEPARATE ARGUMENTS, exactly as the kernel
+# holds it and as fm_harness_pid_is_claude now reads it from
+# /proc/<pid>/cmdline - so position and content are facts, not inferences.
+argv_hosted() {  # <argv...>
+  bash -c '. "$1"; shift; fm_harness_claude_argv_is_interpreter_hosted "$@"' _ "$LOCKLIB" "$@"
+}
 
-if strict node "node /opt/claude-tools/codex.js"; then
-  fail "provenance strict admitted a foreign script under a claude-substring path"
+argv_hosted node /usr/lib/node_modules/@anthropic-ai/claude-code/cli.js --session-id x \
+  || fail "argv predicate refused an interpreter-hosted Claude at the trusted package path"
+argv_hosted python /usr/lib/@anthropic-ai/claude-code/cli.py \
+  || fail "argv predicate refused the python-hosted trusted package path"
+# A spaced path needs no rule now - it is simply argv[1] containing spaces.
+# Refusing it was never conservative: it clears the session id, writes a
+# pid-only lock, and restores the ancestry basis this branch deletes.
+argv_hosted node "/home/u/My Apps/node_modules/@anthropic-ai/claude-code/cli.js" \
+  || fail "argv predicate refused a legitimate install under a SPACED path"
+argv_hosted node "/home/u/My  Apps/tabs	and spaces/@anthropic-ai/claude-code/cli.js" \
+  || fail "argv predicate refused a path with tabs and repeated spaces - argv carries them verbatim"
+pass "argv predicate: ADMIT - trusted package in argv[1], including paths with spaces and tabs"
+
+# Forgery axis: a trusted path anywhere OTHER than argv[1] is not the code
+# executing, and cannot be, however the string would have rendered.
+if argv_hosted node /opt/foreign/codex.js --fixture /tmp/@anthropic-ai/claude-code/data; then
+  fail "FORGERY: trusted path as a DATA argument admitted"
 fi
-if strict node "node /x/@anthropic-ai/claude-code-fake/cli.js"; then
-  fail "provenance strict admitted a near-miss package path - component exactness failed"
+if argv_hosted python /opt/foreign/codex.py --data /tmp/@anthropic-ai/claude-code/x; then
+  fail "FORGERY: trusted path as a data argument admitted under python"
 fi
-if strict node "node /x/claude-code/@anthropic-ai/cli.js"; then
-  fail "provenance strict admitted reversed path components"
+if argv_hosted node /opt/foreign/x.js /usr/lib/@anthropic-ai/claude-code/cli.js; then
+  fail "FORGERY: trusted path in argv[2] admitted"
 fi
-if strict node "node @anthropic-ai/claude-code/cli.js"; then
-  fail "provenance strict admitted a bare relative script path (no leading component boundary)"
+if argv_hosted node --enable-source-maps /usr/lib/@anthropic-ai/claude-code/cli.js; then
+  fail "flags-before-script admitted - argv[1] is a flag, not the trusted script"
 fi
-if strict node "node --loader x.mjs /usr/lib/@anthropic-ai/claude-code/cli.js"; then
-  fail "provenance strict admitted a flags-before-script shape - unsupported shapes must refuse"
+if argv_hosted node /x/@anthropic-ai/claude-code-fake/cli.js; then
+  fail "near-miss package path admitted - component exactness failed"
 fi
-if strict node "node"; then
-  fail "provenance strict admitted a bare interpreter with no script argument"
+if argv_hosted node /x/claude-code/@anthropic-ai/cli.js; then
+  fail "reversed path components admitted"
 fi
-if strict codex "codex --model x"; then
-  fail "provenance strict admitted codex"
+if argv_hosted node; then
+  fail "a bare interpreter with no script argument admitted"
 fi
-pass "provenance strict: REFUSE - near-miss, reversed, relative, flag-shifted, and argument-less shapes"
+if argv_hosted codex --model x /usr/lib/@anthropic-ai/claude-code/cli.js; then
+  fail "a non-interpreter argv[0] admitted"
+fi
+if argv_hosted "" /usr/lib/@anthropic-ai/claude-code/cli.js; then
+  fail "an empty argv[0] admitted"
+fi
+pass "argv predicate: REFUSE - data-position, argv[2], flag-shifted, near-miss, reversed, empty, and non-interpreter shapes"
+
+# --- live pid, end to end: the reader and the predicate together -------------
+# Proves fm_harness_pid_argv recovers real kernel argv (including a spaced
+# path) and that an absent cmdline refuses rather than guessing.
+if [ -r /proc/$$/cmdline ]; then
+  live_dir="$TMP_ROOT/live argv/@anthropic-ai/claude-code"
+  mkdir -p "$live_dir"
+  cat > "$live_dir/cli.js" <<'LIVE'
+#!/usr/bin/env bash
+sleep 30
+LIVE
+  chmod +x "$live_dir/cli.js"
+  # A real process whose argv[0] is node-shaped and argv[1] is a SPACED path
+  # into the trusted package - the exact shape the rendered string could not
+  # distinguish from two arguments.
+  ln -sf /bin/bash "$TMP_ROOT/node" 2>/dev/null || cp /bin/bash "$TMP_ROOT/node"
+  "$TMP_ROOT/node" "$live_dir/cli.js" &
+  live_pid=$!
+  sleep 0.3
+  argv_out=$(bash -c '. "$1"; fm_harness_pid_argv "$2"' _ "$LOCKLIB" "$live_pid") \
+    || fail "fm_harness_pid_argv could not read a live pid's cmdline"
+  [ "$(printf '%s\n' "$argv_out" | sed -n 2p)" = "$live_dir/cli.js" ] \
+    || fail "kernel argv[1] not recovered verbatim (spaced path lost): $(printf '%s' "$argv_out" | tr '\n' '|')"
+  kill "$live_pid" 2>/dev/null || true
+  wait "$live_pid" 2>/dev/null || true
+  bash -c '. "$1"; fm_harness_pid_argv "$2"' _ "$LOCKLIB" "$live_pid" >/dev/null 2>&1 \
+    && fail "an exited pid yielded argv - absence must refuse, never guess"
+  pass "argv reader: live pid's spaced argv[1] recovered verbatim; an exited pid refuses"
+else
+  pass "argv reader: SKIPPED - /proc/<pid>/cmdline unavailable (the platform contract's refuse-to-prove side)"
+fi
 
 # The shared matcher must be UNTOUCHED by round 3: the loose substring still
 # sets the flag, which is what keeps the ancestry walk's reach unchanged. A

@@ -178,8 +178,29 @@ EOF
 # testable without a live process, and it is called ONLY from
 # fm_harness_pid_is_claude - the ancestry walk and every other consumer of the
 # shared matcher are untouched, which is what keeps this strictly narrower.
+#
+# THE INPUT IS ARGV, NOT A RENDERED STRING, and that is the redesign three
+# review rounds paid for. `ps -o args=` joins argv with single spaces, an
+# IRREVERSIBLE transformation: "node /a b/cli.js" is both a spaced path and
+# two arguments, and no matching rule can tell them apart. Every defect this
+# predicate produced came from trying to invert that - a whole-string match
+# admitted a foreign harness carrying the trusted path as data (identity
+# forgery), and the split that fixed it refused every legitimate install
+# under a spaced path (which is NOT conservative: it clears the session id
+# and restores the ancestry basis this file exists to replace). Reading
+# /proc/<pid>/cmdline gives NUL-separated argv exactly as the kernel holds
+# it, so position and content are facts rather than inferences, and both
+# defect families become unreachable rather than tuned away.
+#
+# PLATFORM CONTRACT (captain's ruling, option A): provenance is asserted ONLY
+# from unambiguous evidence. Where /proc/<pid>/cmdline is unavailable (macOS,
+# BSD), the interpreter-hosted shape is NOT admitted at all - no rendered
+# heuristic, no best-effort guess. The native shape (argv[0] naming claude)
+# still admits there through the comm/argv0 tests below, which is the
+# ordinary install; the cost is a macOS interpreter-hosted install degrading
+# to the pid-only lock, a shape never observed on any platform.
 fm_harness_claude_provenance_strict() {  # <comm> <args>
-  local comm=$1 args=$2 base argv0 name rest prefix
+  local comm=$1 args=$2 base argv0 name
   base=${comm##*/}
   case "$base" in
     claude|claude[-.0-9]*) return 0 ;;
@@ -195,58 +216,56 @@ fm_harness_claude_provenance_strict() {  # <comm> <args>
   if name=$(fm_harness_path_name "$argv0"); then
     [ "$name" = claude ] && return 0
   fi
-  # Bare-interpreter admit, POSITIONAL and component-exact (attestation r2's
-  # specification; r3 caught this scanning the whole argument string).
-  #
-  # The shared matcher's rule 3 models a node/python-hosted Claude as a real
-  # supported shape, so provenance must be able to admit the one TRUSTED
-  # package identity: the exact path components /@anthropic-ai/claude-code/
-  # in the INTERPRETER'S SCRIPT ARGUMENT - argv[1], and nothing else.
-  #
-  # Position is the whole guarantee. Matching anywhere in $args let a foreign
-  # harness forge a Claude session id by carrying that path as a data or
-  # fixture argument (`node /opt/foreign/codex.js --fixture
-  # /tmp/@anthropic-ai/claude-code/data` admitted), which is identity forgery
-  # in the predicate whose job is identity. The script argument is the only
-  # position that names the code actually EXECUTING.
-  case "$comm" in
-    *node*|*python*)
-      # argv[1] positionally - but ps flattens argv with spaces, so a script
-      # path CONTAINING whitespace cannot be recovered by splitting. A naive
-      # split refuses those, and that refusal is NOT conservative: it clears
-      # the session id, writes a pid-only lock, and drops the next turn onto
-      # the ancestry basis this branch exists to delete. So position is
-      # enforced by ANCHORING instead of splitting: the trusted components
-      # must begin at the first character after argv[0]'s separator, which no
-      # later argument can satisfy however the path is spaced.
-      rest=${args#* }
-      [ "$rest" = "$args" ] && return 1        # no argument at all
-      case "$rest" in
-        /*"/@anthropic-ai/claude-code/"*) ;;   # absolute script path, argv[1]
-        *) return 1 ;;
-      esac
-      # The components must fall inside argv[1], not in some later argument
-      # that merely follows an absolute-looking one: everything up to the
-      # match must itself be free of the argument separator patterns that
-      # would end argv[1]. A path may contain single spaces; a flag boundary
-      # (" -") or a second absolute path (" /") ends the argument.
-      prefix=${rest%%"/@anthropic-ai/claude-code/"*}
-      case "$prefix" in
-        *" -"*|*" /"*) return 1 ;;
-      esac
-      return 0
-      ;;
+  return 1
+}
+
+# True when argv (passed as separate arguments, exactly as the kernel holds
+# it) is a bare interpreter running the TRUSTED Claude Code package: argv[0]
+# is node/python and argv[1] carries the exact path components
+# /@anthropic-ai/claude-code/. A pure function of real argv - no rendering,
+# no anchoring, no separator heuristics - so a script path containing spaces
+# is just argv[1] with spaces in it, and a trusted path in argv[2] or later
+# is simply not argv[1].
+fm_harness_claude_argv_is_interpreter_hosted() {  # <argv...>
+  local a0=${1:-} a1=${2:-} base
+  [ -n "$a0" ] && [ -n "$a1" ] || return 1
+  base=${a0##*/}
+  case "$base" in
+    node|node[-.0-9]*|python|python[-.0-9]*) ;;
+    *) return 1 ;;
+  esac
+  case "$a1" in
+    *"/@anthropic-ai/claude-code/"*) return 0 ;;
   esac
   return 1
 }
 
+# Read pid $1's argv as NUL-separated fields, or return 1 where the kernel
+# does not expose it (non-Linux, or the pid is gone - both honest refusals).
+fm_harness_pid_argv() {  # <pid>
+  local f="/proc/$1/cmdline"
+  [ -r "$f" ] || return 1
+  tr '\0' '\n' < "$f" 2>/dev/null || return 1
+}
+
 fm_harness_pid_is_claude() {  # <pid>
-  local pid=$1 comm args
+  local pid=$1 comm args argv_lines
   comm=$(ps -o comm= -p "$pid" 2>/dev/null) || return 1
   args=$(ps -o args= -p "$pid" 2>/dev/null)
   fm_harness_process_matches "$comm" "$args" || return 1
   [ "$FM_HARNESS_IS_CLAUDE" -eq 1 ] || return 1
-  fm_harness_claude_provenance_strict "$comm" "$args"
+  fm_harness_claude_provenance_strict "$comm" "$args" && return 0
+  # Interpreter-hosted shape: decided from real argv only. Absent cmdline
+  # (non-Linux, or an exited pid) refuses - provenance is never asserted from
+  # ambiguous evidence.
+  argv_lines=$(fm_harness_pid_argv "$pid") || return 1
+  local IFS=$'\n'
+  # shellcheck disable=SC2086
+  set -f
+  # shellcheck disable=SC2206
+  local argv=($argv_lines)
+  set +f
+  fm_harness_claude_argv_is_interpreter_hosted "${argv[@]}"
 }
 
 # True if $1 is a live process that looks like a verified harness.
