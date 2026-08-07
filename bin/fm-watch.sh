@@ -556,7 +556,7 @@ handle_paused_stale() {  # <window> <task> <hash>
     if [ "$ruled" -eq 1 ]; then
       reason="stale: $win (ruling landed after a ${age}s wait - recheck this lane now, what was gating it has been decided)"
     else
-      class=$(wait_class "$(last_status_line "$statusf")" "$WATCH_BACKLOG" "$task")
+      class=$(wait_class "$(last_status_line "$statusf")" "$WATCH_BACKLOG" "$task" "$STATE" "$PAUSE_RESURFACE_SECS")
       window_secs=$PAUSE_RESURFACE_SECS
       [ "$class" = captain ] && window_secs=$PAUSE_CAPTAIN_RESURFACE_SECS
       if [ "$age" -lt "$window_secs" ] || [ "$rf_age" -lt "$window_secs" ]; then
@@ -632,6 +632,9 @@ clear_pause_state() {  # <window>
   key=${key//\//_}
   key=${key//./_}
   rm -f "$STATE/.paused-$key" "$STATE/.paused-rechecked-$key" "$STATE/.paused-resurfaced-$key"
+  # The wait classification is only ever consulted for a lane that is currently
+  # declaring a wait, so drop it with the rest of that lane's pause state.
+  wait_class_cache_clear "$STATE" "$(window_to_task "$win" "$STATE")"
 }
 
 clear_pause_tracking() {  # <window>

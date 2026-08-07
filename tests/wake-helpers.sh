@@ -315,7 +315,8 @@ dead_pid() {
 # Install a fake tasks-axi answering `show <id> --full --file <backlog>` from
 # per-id fixtures, so the wait classifier's backlog signal can be driven without
 # a real backlog tool. An id with no fixture is reported absent, exactly as an
-# item the backlog does not know would be.
+# item the backlog does not know would be. Every lookup is logged to
+# FM_FAKE_TASKS_AXI_LOG when set, so a test can assert how often it was consulted.
 install_fake_tasks_axi() {  # <dir>
   local dir=$1
   mkdir -p "$dir/backlog-fixtures"
@@ -323,6 +324,7 @@ install_fake_tasks_axi() {  # <dir>
 #!/usr/bin/env bash
 set -u
 [ "${1:-}" = show ] || exit 2
+printf '%s\n' "${2:-}" >> "${FM_FAKE_TASKS_AXI_LOG:-/dev/null}"
 [ -f "$FM_FAKE_BACKLOG_FIXTURES/${2:-}" ] || exit 1
 cat "$FM_FAKE_BACKLOG_FIXTURES/${2:-}"
 SH

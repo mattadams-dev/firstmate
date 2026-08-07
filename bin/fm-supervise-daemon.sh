@@ -1306,7 +1306,7 @@ housekeeping() {  # <state>
     wait_recheck_pending "$state" "$task" && ruled=1
     if [ "$ruled" -eq 0 ]; then
       [ "$age" -ge "$pause_secs" ] || continue
-      class=$(wait_class "$last" "$backlog" "$task")
+      class=$(wait_class "$last" "$backlog" "$task" "$state" "$pause_secs")
       if [ "$class" = captain ] && [ "$age" -lt "$pause_captain_secs" ]; then
         continue
       fi

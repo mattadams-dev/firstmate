@@ -298,46 +298,81 @@ test_wait_class_splits_captain_gated_from_bounded() {
 
   # The verb alone can answer captain, with no backlog read at all: the
   # captain-held transfer verb is written only after the hold was verified.
-  [ "$(wait_class 'captain-held [key=route]: tracked by review-decision-route' "$backlog" absent-item)" = captain ] \
+  [ "$(wait_class 'captain-held [key=route]: tracked by review-decision-route' "$backlog" absent-item "$dir/state" 0)" = captain ] \
     || fail "a verified captain-held transfer was not classed captain-gated"
   # Not a declared wait at all: no cadence question to answer.
-  [ "$(wait_class 'done: shipped' "$backlog" park-bounded)" = none ] || fail "a terminal line was classed as a wait"
-  [ "$(wait_class 'working: step 2' "$backlog" park-bounded)" = none ] || fail "a working line was classed as a wait"
+  [ "$(wait_class 'done: shipped' "$backlog" park-bounded "$dir/state" 0)" = none ] || fail "a terminal line was classed as a wait"
+  [ "$(wait_class 'working: step 2' "$backlog" park-bounded "$dir/state" 0)" = none ] || fail "a working line was classed as a wait"
 
   # A declared pause with nothing in the backlog gating it: bounded, and it keeps
   # the ordinary cadence because it is expected to clear on its own.
   write_backlog_item "$dir" park-bounded '"-"' none
-  [ "$(wait_class 'paused: holding for the upstream release' "$backlog" park-bounded)" = bounded ] \
+  [ "$(wait_class 'paused: holding for the upstream release' "$backlog" park-bounded "$dir/state" 0)" = bounded ] \
     || fail "an ordinary declared pause was not classed bounded"
 
   # The SAME pause verb, separated only by the backlog: firstmate durably holds
   # this item for the captain, which the verb cannot see and the record can.
   write_backlog_item "$dir" park-held captain none
-  [ "$(wait_class 'paused: holding for the captain' "$backlog" park-held)" = captain ] \
+  [ "$(wait_class 'paused: holding for the captain' "$backlog" park-held "$dir/state" 0)" = captain ] \
     || fail "a pause over a captain-held backlog item was not classed captain-gated"
 
   # And the routed lane: blocked by a captain hold some other decision created,
   # which is exactly the shape bin/fm-decision-hold.sh builds.
   write_backlog_item "$dir" review-decision-route captain none
   write_backlog_item "$dir" park-routed '"-"' '"review-decision-route,park-bounded"'
-  [ "$(wait_class 'paused: behind an open decision' "$backlog" park-routed)" = captain ] \
+  [ "$(wait_class 'paused: behind an open decision' "$backlog" park-routed "$dir/state" 0)" = captain ] \
     || fail "a lane blocked by a captain hold was not classed captain-gated"
   # ... but a lane blocked only by ordinary work is still bounded, so the blocker
   # edge itself is not what decides it.
   write_backlog_item "$dir" park-ordinary '"-"' '"park-bounded"'
-  [ "$(wait_class 'paused: behind other work' "$backlog" park-ordinary)" = bounded ] \
+  [ "$(wait_class 'paused: behind other work' "$backlog" park-ordinary "$dir/state" 0)" = bounded ] \
     || fail "an ordinary blocker edge was mistaken for a captain gate"
 
   # Unreadable evidence is NOT evidence of a gate. An item the backlog does not
   # know, and a backlog file that is not there at all, both answer bounded, so a
   # signal that failed to read can never be what quiets a lane.
-  [ "$(wait_class 'paused: holding' "$backlog" absent-item)" = bounded ] \
+  [ "$(wait_class 'paused: holding' "$backlog" absent-item "$dir/state" 0)" = bounded ] \
     || fail "an unknown backlog item was treated as captain-gated"
-  [ "$(wait_class 'paused: holding' "$dir/no-such-backlog.md" park-held)" = bounded ] \
+  [ "$(wait_class 'paused: holding' "$dir/no-such-backlog.md" park-held "$dir/state" 0)" = bounded ] \
     || fail "a missing backlog file was treated as captain-gated"
 
   unset FM_TASKS_AXI_BIN FM_FAKE_BACKLOG_FIXTURES
   pass "wait_class: the status verb and the durable backlog hold each answer captain-gated, and unreadable evidence answers bounded"
+}
+
+# The recheck path runs on every poll for as long as a lane stays parked - hours,
+# for a captain-gated one - so the backlog lookup is throttled to the bounded
+# recheck window. Unthrottled it would spend a process per poll per lane to
+# re-answer a question that changes at most once, on a path whose own contract
+# says it must stay cheap.
+test_wait_class_reads_the_backlog_once_per_window() {
+  local dir backlog reads
+  dir=$(make_case wait-class-throttle); backlog="$dir/backlog.md"
+  : > "$backlog"
+  install_fake_tasks_axi "$dir"
+  write_backlog_item "$dir" park-held captain none
+  export FM_TASKS_AXI_BIN="$dir/fakebin/tasks-axi"
+  export FM_FAKE_BACKLOG_FIXTURES="$dir/backlog-fixtures"
+  export FM_FAKE_TASKS_AXI_LOG="$dir/lookups.log"
+  : > "$FM_FAKE_TASKS_AXI_LOG"
+
+  # Three polls inside one window: one lookup, and the same verdict each time.
+  [ "$(wait_class 'paused: holding' "$backlog" park-held "$dir/state" 3600)" = captain ] || fail "first classification was wrong"
+  [ "$(wait_class 'paused: holding' "$backlog" park-held "$dir/state" 3600)" = captain ] || fail "throttled classification changed its answer"
+  [ "$(wait_class 'paused: holding' "$backlog" park-held "$dir/state" 3600)" = captain ] || fail "throttled classification changed its answer"
+  reads=$(wc -l < "$FM_FAKE_TASKS_AXI_LOG" | tr -d '[:space:]')
+  [ "$reads" -eq 1 ] || fail "the backlog was read $reads times across three polls in one window, not once"
+
+  # A new window re-reads, so a released hold is picked up rather than cached
+  # forever - this is a throttle, not a memo.
+  write_backlog_item "$dir" park-held '"-"' none
+  [ "$(wait_class 'paused: holding' "$backlog" park-held "$dir/state" 0)" = bounded ] \
+    || fail "a released hold was not picked up once the window elapsed"
+  reads=$(wc -l < "$FM_FAKE_TASKS_AXI_LOG" | tr -d '[:space:]')
+  [ "$reads" -eq 2 ] || fail "the next window did not re-read the backlog ($reads reads)"
+
+  unset FM_TASKS_AXI_BIN FM_FAKE_BACKLOG_FIXTURES FM_FAKE_TASKS_AXI_LOG
+  pass "wait_class reads the backlog once per recheck window and re-reads on the next one"
 }
 
 # crew_absorb_class: the single fm-crew-state.sh read that returns BOTH absorb
@@ -2475,6 +2510,7 @@ test_busy_pane_default_turn_age_bound_is_3600s
 test_nonterminal_stale_not_working_surfaced
 test_nonterminal_stale_paused_absorbed_then_resurfaced
 test_wait_class_splits_captain_gated_from_bounded
+test_wait_class_reads_the_backlog_once_per_window
 test_bounded_wait_keeps_its_ordinary_cadence
 test_captain_gated_wait_waits_out_the_long_cadence
 test_a_landed_ruling_rechecks_the_lane_it_gated

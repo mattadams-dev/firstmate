@@ -224,16 +224,57 @@ backlog_wait_is_captain_gated() {  # <backlog-file> <task-id>
   return 1
 }
 
+# The same answer, re-read at most once per <ttl> seconds. The recheck path runs
+# on EVERY poll for as long as a lane stays parked, so an unthrottled lookup
+# would spend a process per poll per lane for hours to re-answer a question that
+# changes at most once. Callers pass the bounded recheck cadence as the ttl, which
+# buys exactly one backlog read per lane per bounded window.
+#
+# The freshness that matters is not what this trades away. An arriving ruling
+# never consults this answer at all - it is a durable request read on every poll
+# - so a stale answer can only delay the fall back to the ordinary cadence for a
+# hold released OUTSIDE the ruling path, and only until the next window.
+# The record carries its own timestamp rather than leaning on file mtime, so
+# neither consumer needs a portable stat helper for it.
+_wait_class_cache_path() {  # <state-dir> <task-id>
+  printf '%s/.wait-class-%s' "$1" "$(printf '%s' "$2" | tr '/:' '__')"
+}
+
+wait_class_cache_clear() {  # <state-dir> <task-id>
+  rm -f "$(_wait_class_cache_path "$1" "$2")"
+}
+
+_backlog_captain_gate_throttled() {  # <state-dir> <task-id> <backlog-file> <ttl>
+  local state=$1 task=$2 backlog=$3 ttl=$4 cache record stamp answer now
+  cache=$(_wait_class_cache_path "$state" "$task")
+  now=$(date +%s)
+  record=$(cat "$cache" 2>/dev/null || true)
+  stamp=${record%%$'\t'*}
+  answer=${record#*$'\t'}
+  case "$stamp" in
+    ''|*[!0-9]*) ;;
+    *)
+      if [ "$(( now - stamp ))" -lt "$ttl" ]; then
+        [ "$answer" = captain ]
+        return
+      fi
+      ;;
+  esac
+  if backlog_wait_is_captain_gated "$backlog" "$task"; then answer=captain; else answer=bounded; fi
+  printf '%s\t%s' "$now" "$answer" > "$cache" 2>/dev/null || true
+  [ "$answer" = captain ]
+}
+
 # Classify a declared wait: `captain` (only a human ruling can end it),
 # `bounded` (expected to clear on its own), or `none` (not a declared wait).
 # The backlog is consulted ONLY when the verb alone does not already answer
-# captain, so the classifier costs one process at most and only for a lane that
-# has already reached its bounded recheck.
-wait_class() {  # <status-line> <backlog-file> <task-id>
-  local line=$1 backlog=${2:-} task=${3:-}
+# captain, and then only through the throttle above.
+wait_class() {  # <status-line> <backlog-file> <task-id> <state-dir> <ttl>
+  local line=$1 backlog=${2:-} task=${3:-} state=${4:-} ttl=${5:-0}
   if status_is_captain_held "$line"; then printf 'captain'; return 0; fi
   if ! status_is_paused "$line"; then printf 'none'; return 0; fi
-  if [ -n "$task" ] && backlog_wait_is_captain_gated "$backlog" "$task"; then
+  if [ -n "$task" ] && [ -n "$state" ] && [ -d "$state" ] \
+    && _backlog_captain_gate_throttled "$state" "$task" "$backlog" "$ttl"; then
     printf 'captain'
   else
     printf 'bounded'
