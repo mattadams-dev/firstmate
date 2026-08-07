@@ -46,11 +46,17 @@ EPOCH="$STATE/.claude-autoarm-epoch"
 . "$FM_TEST_WRITER_SRC"
 ok=0
 i=0
+last_rc=0
 while [ "$i" -lt "$WRITES" ]; do
   i=$((i + 1))
-  write_epoch "$OUTCOME" && ok=$((ok + 1))
+  if write_epoch "$OUTCOME"; then
+    ok=$((ok + 1))
+    last_rc=0
+  else
+    last_rc=$?
+  fi
 done
-printf '%s\n' "$ok" > "$RESULT"
+printf '%s %s\n' "$ok" "$last_rc" > "$RESULT"
 RUNNER_EOF
 chmod +x "$RUNNER"
 
@@ -63,6 +69,7 @@ epoch_outcome() {  # <state-dir>
 
 race() {  # <state-dir> <writers> <writes-each> <outcome> -> total successes
   local state=$1 writers=$2 writes=$3 outcome=$4 w total=0 rfile pids='' p
+  rm -f "$state/.last-rcs"
   for w in $(seq 1 "$writers"); do
     FM_TEST_ROOT="$ROOT" FM_TEST_WRITER_SRC="$WRITER_SRC" \
       "$RUNNER" "$state" "$writes" "$outcome" "$state/.rc.$w" &
@@ -77,10 +84,16 @@ race() {  # <state-dir> <writers> <writes-each> <outcome> -> total successes
   done
   for w in $(seq 1 "$writers"); do
     rfile="$state/.rc.$w"
-    total=$((total + $(cat "$rfile" 2>/dev/null || echo 0)))
+    read -r ok_n rc_n < "$rfile" 2>/dev/null || { ok_n=0; rc_n=; }
+    total=$((total + ok_n))
+    printf '%s\n' "$rc_n" >> "$state/.last-rcs"
     rm -f "$rfile"
   done
   printf '%s\n' "$total"
+}
+last_rcs() {  # <state-dir> -> the per-writer final return codes, then clears
+  cat "$1/.last-rcs" 2>/dev/null
+  rm -f "$1/.last-rcs"
 }
 
 # --- HOLD: the shipped writer loses no update under a real race ---------------
@@ -98,7 +111,7 @@ seq_now=$(epoch_seq "$S1")
 [ "$seq_now" = "$total" ] \
   || fail "shipped writer lost updates under storm: seq $seq_now != $total successful writes"
 [ "$total" -ge 100 ] \
-  || fail "storm liveness collapsed: only $total of 144 writes succeeded under contention"
+  || fail "storm liveness floor: only $total of 144 writes succeeded. On a loaded box this is scheduler starvation, NOT lost updates - lost updates are the seq-mismatch assertion above. Rerun quiet before reading it as a writer defect"
 pass "epoch writer: storm of 144 writes/24 writers - $total recorded, zero lost, refusals honest"
 
 S1B="$TMP_ROOT/s1b"; mkdir -p "$S1B"
@@ -150,7 +163,13 @@ refused_ok=$(race "$S3" 12 1 refused)
   || fail "refusal bias broken: $refused_ok racing refusals recorded over a fresh arming claim"
 [ "$(epoch_outcome "$S3")" = arming ] \
   || fail "a racing refusal superseded a fresh arming claim: outcome $(epoch_outcome "$S3")"
-pass "epoch writer: 12 racing refusals all subordinate to a fresh live claim"
+# The reviewer's finding: subordinated and unknown are DIFFERENT worlds and
+# must carry different codes - 1 says step aside quietly, 2 says announce.
+for rc in $(last_rcs "$S3"); do
+  [ "$rc" = 1 ] \
+    || fail "a subordinated refusal returned $rc, not 1 - the caller cannot tell deliberate quiet from unknown"
+done
+pass "epoch writer: 12 racing refusals all subordinate with the distinct code 1"
 
 # --- HOLD: a STALE claim is superseded by a refusal normally ------------------
 touch -d '40 seconds ago' "$S3/.claude-autoarm-epoch" 2>/dev/null \
@@ -174,7 +193,27 @@ kill "$HOLDER" 2>/dev/null || true
 [ "$bounded" -eq 0 ] || fail "writer claimed success behind a live wedged holder"
 [ "$elapsed" -le 5 ] || fail "writer wedged ${elapsed}s behind a held lock; bound is ~1s"
 [ ! -e "$S4/.claude-autoarm-epoch" ] || fail "writer wrote despite never holding the lock"
-pass "epoch writer: live wedged holder bounds the write to ${elapsed}s, reported unrecorded"
+wedged_rc=$(last_rcs "$S4")
+[ "$wedged_rc" = 2 ] \
+  || fail "a lock-bounded write returned $wedged_rc, not 2 - unknown must be distinguishable from subordinated"
+pass "epoch writer: live wedged holder bounds the write to ${elapsed}s with the distinct code 2"
+
+# --- HOLD: exactly one writer of the epoch exists in the tree -----------------
+# The atomic-composition guarantee is a lock DISCIPLINE: it holds only while
+# every writer takes the lock. Today write_epoch is the sole writer; this
+# assertion makes a second writer break a test instead of quietly voiding the
+# guarantee (the reviewer's note: a comment binds only whoever remembers it).
+writer_files=$(grep -rlE 'claude-autoarm-epoch' "$ROOT/bin" | sort)
+for f in $writer_files; do
+  case "${f##*/}" in
+    fm-claude-stop-autoarm.sh|fm-turnend-guard.sh) : ;;
+    *) fail "new file touches the epoch path: ${f##*/} - it must go through write_epoch's lock or extend this allowlist deliberately" ;;
+  esac
+done
+guard_writes=$(grep -nE '(^|[^<])>+ *"?\$?\{?EPOCH|mv [^#]*claude-autoarm-epoch' "$ROOT/bin/fm-turnend-guard.sh" | grep -v 'write-lock' | grep -cv '^\s*#' || true)
+[ "${guard_writes:-0}" -eq 0 ] \
+  || fail "fm-turnend-guard.sh gained a write-shaped line touching the epoch; all writes go through write_epoch under its lock"
+pass "epoch writer: single-writer invariant asserted - a second writer now breaks a test"
 
 # --- provenance-strict: REFUSE and ADMIT, pure-function cases -----------------
 strict() {  # <comm> <args>

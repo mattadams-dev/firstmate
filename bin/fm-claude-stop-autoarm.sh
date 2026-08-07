@@ -97,15 +97,23 @@ EPOCH_WRITE_LOCK="$STATE/.claude-autoarm-epoch.write-lock"
 EPOCH_FRESH=${FM_CLAUDE_AUTOARM_EPOCH_FRESH:-15}
 case "$EPOCH_FRESH" in ''|*[!0-9]*|0) EPOCH_FRESH=15 ;; esac
 
-write_epoch() {  # <outcome>  -> 0 recorded, 1 not recorded (subordinated or lock-bounded)
+# Return codes name THREE distinct worlds, because the caller must act
+# differently in each (a reading that cannot distinguish them is the defect
+# class this round exists to close):
+#   0  recorded - the write landed.
+#   1  subordinated - a FRESH non-refused claim stands, so this refusal
+#      deliberately steps aside. The owner's recovery is live; quiet is correct.
+#   2  unknown - the writer could not read or write the record at all (bounded
+#      out behind a held lock, or the write failed). NOTHING is known about
+#      supervision; the caller must announce, never stay quiet.
+write_epoch() {  # <outcome>  -> 0 recorded, 1 subordinated, 2 unknown
   local outcome=$1 seq tmp cur rc tries=0
   while ! fm_lock_try_acquire "$EPOCH_WRITE_LOCK"; do
     tries=$((tries + 1))
     # Writers hold this lock for microseconds. A holder that outlives this
     # bound is dead or wedged, and a Stop hook must never wedge behind it.
-    # Returning 1 reports the truth - not recorded - instead of disguising it.
     if [ "$tries" -ge 25 ]; then
-      return 1
+      return 2
     fi
     sleep 0.04 2>/dev/null || sleep 1
   done
@@ -132,7 +140,7 @@ write_epoch() {  # <outcome>  -> 0 recorded, 1 not recorded (subordinated or loc
   fi
   seq=$((seq + 1))
   tmp="$EPOCH.tmp.$$"
-  rc=1
+  rc=2
   printf 'epoch=%s owner_pid=%s outcome=%s updated_at=%s\n' \
     "$seq" "${BASHPID:-$$}" "$outcome" "$(date +%s)" > "$tmp" 2>/dev/null \
     && mv -f "$tmp" "$EPOCH" 2>/dev/null && rc=0
@@ -204,13 +212,25 @@ need_supervision || exit 0
 # would tell the turn-end guard that recovery is under way, which is the one
 # thing a refusal must never claim.
 if [ -n "$REFUSAL" ]; then
-  # The notice follows the record: a subordinated refusal (write_epoch returns
-  # 1 because a fresh non-refused claim stands) means the owner's recovery is
-  # live, and telling the operator the home is unsupervised would be false.
-  if write_epoch refused && [ ! -e "$FAILURE_NOTICE" ]; then
+  # Three worlds, three behaviors (the reviewer's finding: one reading for
+  # "stepping aside deliberately" and "gave up knowing nothing" was the same
+  # two-worlds conflation this round exists to close, one layer out):
+  #   recorded (0)     - announce once; the guard's escape keys on this notice.
+  #   subordinated (1) - a FRESH live claim stands; the owner's recovery is
+  #                      live, and an unsupervised banner would be false. Quiet.
+  #   unknown (2)      - the refusal could NOT be recorded. Nothing proves
+  #                      supervision exists, so staying quiet here is the
+  #                      silent-refusal defect again. Announce, and say the
+  #                      record itself is missing.
+  write_epoch refused
+  EPOCH_RC=$?
+  if [ "$EPOCH_RC" -ne 1 ] && [ ! -e "$FAILURE_NOTICE" ]; then
     {
       printf 'firstmate watcher auto-arm REFUSED - %s.\n' "$REFUSAL"
       printf 'Supervision is needed here but this session may not arm it, so the home is unsupervised until the lock owner returns or its session lock is reacquired. This refusal is deliberate: firstmate never arms, rewakes, or ends a session on behalf of a session it cannot prove it is.\n'
+      if [ "$EPOCH_RC" -eq 2 ]; then
+        printf 'ADDITIONALLY: this refusal could NOT be recorded (the epoch writer gave up behind a held write lock or a failed write), so the epoch record does not reflect it and supervision state is UNKNOWN.\n'
+      fi
     } >&2
     : > "$FAILURE_NOTICE" 2>/dev/null || true
   fi

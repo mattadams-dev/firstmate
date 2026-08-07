@@ -384,6 +384,39 @@ test_identity_refusal_is_recorded() {
   pass "refusal: an identity refusal is recorded as an outcome instead of exiting 0 in silence"
 }
 
+test_unrecordable_refusal_still_announces() {
+  # The reviewer's round-3 finding: "stepping aside deliberately" and "gave up
+  # knowing nothing" carried one reading, and the caller silenced the operator
+  # warning in both. Here the refusal genuinely cannot be recorded - the epoch
+  # write lock is held by a live process - and the announcement must still
+  # happen, naming the missing record, because the guard's escape keys on the
+  # notice and NOTHING in this world proves supervision exists.
+  local dir out status other epoch_holder fakebin
+  dir=$(install_autoarm_home "$TMP_ROOT/refusal-unrecordable")
+  bash -c 'sleep 30; :' &
+  other=$!
+  fakebin=$(fm_fakebin "$dir")
+  write_fake_ps "$fakebin" "$other"
+  printf '%s\nsession=owner-aaa\n' "$other" > "$dir/state/.lock"
+  bash -c 'sleep 30; :' &
+  epoch_holder=$!
+  mkdir -p "$dir/state/.claude-autoarm-epoch.write-lock"
+  printf '%s\n' "$epoch_holder" > "$dir/state/.claude-autoarm-epoch.write-lock/pid"
+  out=$(PATH="$fakebin:$PATH" run_autoarm "$dir" intruder-bbb); status=$?
+  kill "$other" "$epoch_holder" 2>/dev/null || true
+  wait "$other" 2>/dev/null || true
+  wait "$epoch_holder" 2>/dev/null || true
+  expect_code 0 "$status" "an unrecordable refusal must not force a continuation"
+  [ ! -e "$dir/state/arm-ran" ] || fail "the hook armed supervision for a session it does not own"
+  grep -q 'outcome=refused' "$dir/state/.claude-autoarm-epoch" 2>/dev/null \
+    && fail "the epoch recorded a refusal despite a held write lock - the wedge fixture did not wedge"
+  assert_contains "$out" 'REFUSED' "the unrecordable refusal must still name itself"
+  assert_contains "$out" 'could NOT be recorded' "the announcement must say the record itself is missing"
+  [ -e "$dir/state/.claude-autoarm-failure-notified" ] \
+    || fail "an unrecordable refusal raised no operator notice - the silent-refusal defect one layer out"
+  pass "refusal: unrecordable (held write lock) still announces, naming the missing record"
+}
+
 test_refusal_record_waits_for_the_need_gate() {
   local dir out status other fakebin
   dir=$(install_autoarm_home "$TMP_ROOT/refusal-idle")
@@ -506,3 +539,4 @@ test_identity_refusal_is_recorded
 test_refusal_record_waits_for_the_need_gate
 test_recorded_refusal_reaches_the_bounded_escape
 test_silent_refusal_freezes_the_escape
+test_unrecordable_refusal_still_announces
