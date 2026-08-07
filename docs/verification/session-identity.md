@@ -144,3 +144,29 @@ R4 is worth keeping in mind when editing these fixtures.
 It survived the first version of `test_lock_is_reacquired_by_its_own_session`, because that fixture recorded an ordinary live shell as the prior holder and the harness-liveness predicate rejects a shell - so the live-holder branch the mutant changes was never reached.
 The specimen only reproduces when the recorded holder is alive AND reads as a real harness, which is what it was in the field.
 A fixture that exercises the wrong branch reports a coverage it does not have.
+
+## The two interpreter tests are deliberately asymmetric
+
+`fm_harness_process_matches` (the shared matcher) recognizes `*node*|*python*`
+running a harness-named script, and has since before this contract existed.
+`fm_harness_claude_argv_is_interpreter_hosted` (provenance) accepts **node
+only**. That asymmetry is intentional and should not be "fixed" into symmetry.
+
+The two answer opposite questions. The shared matcher feeds the ANCESTRY WALK,
+a discovery mechanism where over-inclusion is safe - a non-harness ancestor
+merely ends the walk - and where narrowing would change walk reach, which
+`tests/fm-autoarm-epoch-atomicity.test.sh` explicitly asserts must not happen.
+Provenance ASSERTS IDENTITY: it decides whether an injected
+`CLAUDE_CODE_SESSION_ID` may be recorded as this session's own, so its rule is
+the platform contract's rule - assert only from unambiguous, observed evidence.
+
+Claude Code is a Node application and the trusted path
+(`/@anthropic-ai/claude-code/`) is a Node package layout, so no real install
+can satisfy a python-hosted provenance test. Admitting it would pin an
+unobserved shape with a passing fixture - harder to remove later than it was
+to leave. The suite therefore asserts that a python-hosted argv REFUSES; if
+such a shape is ever observed in the field, restoring it costs one branch and
+one fixture, plus the observation that justifies it.
+
+Recorded 2026-08-07 on the captain's ruling, after attestation round 4
+identified the python admit as an unobserved shape newly pinned by a fixture.

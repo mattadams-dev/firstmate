@@ -294,8 +294,14 @@ argv_hosted() {  # <argv...>
 
 argv_hosted node /usr/lib/node_modules/@anthropic-ai/claude-code/cli.js --session-id x \
   || fail "argv predicate refused an interpreter-hosted Claude at the trusted package path"
-argv_hosted python /usr/lib/@anthropic-ai/claude-code/cli.py \
-  || fail "argv predicate refused the python-hosted trusted package path"
+# NODE ONLY (captain's ruling): a python-hosted Claude has never been
+# observed, Claude Code is a Node application, and the trusted path is a Node
+# package layout - so admitting it would pin an unobserved shape with a
+# passing fixture. This assertion is the ratchet running the other way: the
+# shape refuses, and restoring it later requires an observation.
+if argv_hosted python /usr/lib/@anthropic-ai/claude-code/cli.py; then
+  fail "argv predicate admitted a PYTHON-hosted shape - provenance asserts only from observed evidence, and this shape has never been observed"
+fi
 # A spaced path needs no rule now - it is simply argv[1] containing spaces.
 # Refusing it was never conservative: it clears the session id, writes a
 # pid-only lock, and restores the ancestry basis this branch deletes.
@@ -311,7 +317,7 @@ if argv_hosted node /opt/foreign/codex.js --fixture /tmp/@anthropic-ai/claude-co
   fail "FORGERY: trusted path as a DATA argument admitted"
 fi
 if argv_hosted python /opt/foreign/codex.py --data /tmp/@anthropic-ai/claude-code/x; then
-  fail "FORGERY: trusted path as a data argument admitted under python"
+  fail "FORGERY: a python argv admitted at all - both the interpreter and the position are wrong here"
 fi
 if argv_hosted node /opt/foreign/x.js /usr/lib/@anthropic-ai/claude-code/cli.js; then
   fail "FORGERY: trusted path in argv[2] admitted"
@@ -354,15 +360,54 @@ LIVE
   "$TMP_ROOT/node" "$live_dir/cli.js" &
   live_pid=$!
   sleep 0.3
-  argv_out=$(bash -c '. "$1"; fm_harness_pid_argv "$2"' _ "$LOCKLIB" "$live_pid") \
+  # The reader fills an ARRAY and prints nothing (that is the point of the
+  # round-4 fix), so read argv[1] out of the array inside the same shell.
+  argv_out=$(bash -c '. "$1"; fm_harness_pid_argv "$2" || exit 1; printf "%s" "${FM_HARNESS_ARGV[1]}"' _ "$LOCKLIB" "$live_pid") \
     || fail "fm_harness_pid_argv could not read a live pid's cmdline"
-  [ "$(printf '%s\n' "$argv_out" | sed -n 2p)" = "$live_dir/cli.js" ] \
-    || fail "kernel argv[1] not recovered verbatim (spaced path lost): $(printf '%s' "$argv_out" | tr '\n' '|')"
+  [ "$argv_out" = "$live_dir/cli.js" ] \
+    || fail "kernel argv[1] not recovered verbatim (spaced path lost): [$argv_out]"
   kill "$live_pid" 2>/dev/null || true
   wait "$live_pid" 2>/dev/null || true
   bash -c '. "$1"; fm_harness_pid_argv "$2"' _ "$LOCKLIB" "$live_pid" >/dev/null 2>&1 \
     && fail "an exited pid yielded argv - absence must refuse, never guess"
   pass "argv reader: live pid's spaced argv[1] recovered verbatim; an exited pid refuses"
+
+  # THE TRANSPORT IS PART OF THE GUARANTEE (attestation round 4). An earlier
+  # reader rendered the NUL fields to newline-delimited text and split on
+  # that, so a process with a NEWLINE inside argv[0] was re-split into two
+  # fields and forged Claude identity. NUL is the only separator that cannot
+  # appear inside an argument; anything else reintroduces the ambiguity /proc
+  # was read to avoid. This drives the reader's own loop over crafted
+  # cmdline bytes, the same way it reads the kernel's.
+  read_cmdline_file() {  # <file> -> prints field count, then admits/refuses
+    bash -c '
+      . "$1"
+      FM_HARNESS_ARGV=()
+      while IFS= read -r -d "" f; do FM_HARNESS_ARGV+=("$f"); done < "$2"
+      printf "%s\n" "${#FM_HARNESS_ARGV[@]}"
+      fm_harness_claude_argv_is_interpreter_hosted "${FM_HARNESS_ARGV[@]}" \
+        && printf "ADMIT\n" || printf "refuse\n"
+    ' _ "$LOCKLIB" "$1"
+  }
+  forge="$TMP_ROOT/forge-cmdline"
+  printf 'node\n/tmp/@anthropic-ai/claude-code/cli.js\0' > "$forge"
+  forge_out=$(read_cmdline_file "$forge")
+  [ "$(printf '%s' "$forge_out" | sed -n 1p)" = 1 ] \
+    || fail "the newline-in-argv0 forgery was split into $(printf '%s' "$forge_out" | sed -n 1p) fields - the transport re-rendered argv"
+  [ "$(printf '%s' "$forge_out" | sed -n 2p)" = refuse ] \
+    || fail "FORGERY: a single argv[0] containing a newline claimed Claude identity"
+  real="$TMP_ROOT/real-cmdline"
+  printf 'node\0/tmp/@anthropic-ai/claude-code/cli.js\0' > "$real"
+  real_out=$(read_cmdline_file "$real")
+  [ "$(printf '%s' "$real_out" | sed -n 1p)" = 2 ] && [ "$(printf '%s' "$real_out" | sed -n 2p)" = ADMIT ] \
+    || fail "the genuine two-field argv no longer admits: $real_out"
+  pass "argv transport: a newline inside argv[0] stays ONE field and refuses; genuine NUL-separated argv admits"
+
+  # The helper must not mutate its caller's shell state (round 4, low).
+  glob_state=$(bash -c '. "$1"; set -f; fm_harness_pid_argv $$ >/dev/null 2>&1; case $- in *f*) printf preserved ;; *) printf clobbered ;; esac' _ "$LOCKLIB")
+  [ "$glob_state" = preserved ] \
+    || fail "fm_harness_pid_argv switched off the caller's noglob - a helper must not mutate caller shell state"
+  pass "argv reader: the caller's noglob setting survives the read"
 else
   pass "argv reader: SKIPPED - /proc/<pid>/cmdline unavailable (the platform contract's refuse-to-prove side)"
 fi

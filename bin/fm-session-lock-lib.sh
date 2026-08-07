@@ -220,18 +220,30 @@ fm_harness_claude_provenance_strict() {  # <comm> <args>
 }
 
 # True when argv (passed as separate arguments, exactly as the kernel holds
-# it) is a bare interpreter running the TRUSTED Claude Code package: argv[0]
-# is node/python and argv[1] carries the exact path components
+# it) is a bare NODE interpreter running the TRUSTED Claude Code package:
+# argv[0] is node and argv[1] carries the exact path components
 # /@anthropic-ai/claude-code/. A pure function of real argv - no rendering,
 # no anchoring, no separator heuristics - so a script path containing spaces
 # is just argv[1] with spaces in it, and a trusted path in argv[2] or later
 # is simply not argv[1].
+#
+# NODE ONLY, deliberately (captain's ruling). The shared matcher above has
+# modeled *node*|*python* since before this contract existed, and breadth is
+# right THERE: it governs the ancestry walk, where over-inclusion is safe and
+# narrowing would change walk reach. Provenance is the opposite instrument -
+# it asserts identity - so it takes the same rule the platform contract took:
+# assert only from evidence. Claude Code is a Node application and the
+# trusted path is a Node package layout, so no real install can satisfy a
+# python-hosted test; admitting it would pin an unobserved shape with a
+# passing fixture, which is harder to remove later than it was to leave.
+# If such a shape is ever observed, one branch and one fixture restore it -
+# with the observation that justifies it.
 fm_harness_claude_argv_is_interpreter_hosted() {  # <argv...>
   local a0=${1:-} a1=${2:-} base
   [ -n "$a0" ] && [ -n "$a1" ] || return 1
   base=${a0##*/}
   case "$base" in
-    node|node[-.0-9]*|python|python[-.0-9]*) ;;
+    node|node[-.0-9]*) ;;
     *) return 1 ;;
   esac
   case "$a1" in
@@ -240,32 +252,43 @@ fm_harness_claude_argv_is_interpreter_hosted() {  # <argv...>
   return 1
 }
 
-# Read pid $1's argv as NUL-separated fields, or return 1 where the kernel
-# does not expose it (non-Linux, or the pid is gone - both honest refusals).
-fm_harness_pid_argv() {  # <pid>
+# Read pid $1's argv from the kernel into the ARRAY named FM_HARNESS_ARGV,
+# fields separated on NUL and never rendered into text. Returns 1 where the
+# kernel does not expose it (non-Linux, or the pid is gone - both honest
+# refusals).
+#
+# THE TRANSPORT IS PART OF THE GUARANTEE. An earlier version read the NUL
+# fields correctly and then rendered them to newline-delimited text and split
+# on that - which restores exactly the ambiguity /proc was read to avoid: a
+# process with a NEWLINE inside argv[0] was re-split into two fields and
+# forged Claude identity. Any conversion through a delimiter that can appear
+# inside an argument reintroduces the defect; only NUL cannot, because the
+# kernel uses it as the separator. Read into the array directly, always.
+fm_harness_pid_argv() {  # <pid>  -> fills FM_HARNESS_ARGV
   local f="/proc/$1/cmdline"
+  FM_HARNESS_ARGV=()
   [ -r "$f" ] || return 1
-  tr '\0' '\n' < "$f" 2>/dev/null || return 1
+  local field
+  while IFS= read -r -d '' field; do
+    FM_HARNESS_ARGV+=("$field")
+  done < "$f" 2>/dev/null
+  [ "${#FM_HARNESS_ARGV[@]}" -gt 0 ] || return 1
+  return 0
 }
 
 fm_harness_pid_is_claude() {  # <pid>
-  local pid=$1 comm args argv_lines
+  local pid=$1 comm args
   comm=$(ps -o comm= -p "$pid" 2>/dev/null) || return 1
   args=$(ps -o args= -p "$pid" 2>/dev/null)
   fm_harness_process_matches "$comm" "$args" || return 1
   [ "$FM_HARNESS_IS_CLAUDE" -eq 1 ] || return 1
   fm_harness_claude_provenance_strict "$comm" "$args" && return 0
-  # Interpreter-hosted shape: decided from real argv only. Absent cmdline
-  # (non-Linux, or an exited pid) refuses - provenance is never asserted from
-  # ambiguous evidence.
-  argv_lines=$(fm_harness_pid_argv "$pid") || return 1
-  local IFS=$'\n'
-  # shellcheck disable=SC2086
-  set -f
-  # shellcheck disable=SC2206
-  local argv=($argv_lines)
-  set +f
-  fm_harness_claude_argv_is_interpreter_hosted "${argv[@]}"
+  # Interpreter-hosted shape: decided from real argv only, passed straight
+  # from the kernel's NUL-separated fields to the predicate with no rendering
+  # step in between. Absent cmdline (non-Linux, or an exited pid) refuses -
+  # provenance is never asserted from ambiguous evidence.
+  fm_harness_pid_argv "$pid" || return 1
+  fm_harness_claude_argv_is_interpreter_hosted "${FM_HARNESS_ARGV[@]}"
 }
 
 # True if $1 is a live process that looks like a verified harness.
