@@ -1164,11 +1164,13 @@ h2 .note { text-transform:none; letter-spacing:0; font-weight:400; color:var(--t
 .proj { font-size:.72rem; color:var(--tn-muted); flex:none; }
 .age { margin-left:auto; font-size:.75rem; color:var(--tn-muted); flex:none; }
 .ask.aging .age { color:var(--tn-orange); }
-/* ONE LINE, CLAMPED (Law 5). A title is a summary; the detail that decides the
-   ruling is in the context dropdown, and the whole record is in the ledger. */
+/* FULL WRAP (Law 5, amended by the captain 2026-08-06). The title is the
+   information the captain rules on; clipping it optimized scan density at
+   the cost of the one thing the card exists to convey. Wraps completely -
+   the ledger remains the full record, but nothing on the card truncates. */
 .asktitle {
   margin:.15rem 0 .5rem; font-size:.95rem; line-height:1.4;
-  display:-webkit-box; -webkit-line-clamp:1; -webkit-box-orient:vertical; overflow:hidden;
+  overflow-wrap:anywhere;
 }
 .answers { display:flex; flex-wrap:wrap; gap:.4rem; align-items:center; }
 .ansbtn {
@@ -1228,7 +1230,7 @@ details.ctxd .ctxbody {
   border-radius:.5rem; padding:.5rem .9rem; font-size:.85rem; margin:0 0 .4rem;
 }
 .corow .ref { color:var(--tn-purple); }
-.corow .t { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.corow .t { white-space:normal; overflow-wrap:anywhere; }
 .corow .who { margin-left:auto; flex:none; font-size:.75rem; color:var(--tn-muted); }
 
 /* --- lanes -------------------------------------------------------------- */
