@@ -342,16 +342,21 @@ wait_recheck_request() {  # <state-dir> <task-id>
 
 # 0 when a recheck request is pending AND still inside <lifetime> seconds of the
 # ruling that recorded it. An expired request is REAPED as it is read, so a
-# marker no consumer ever reached cannot outlive its meaning. A request whose
-# stamp cannot be read, or a caller that names no readable lifetime, reads as
-# expired for the reason above: dropping one costs a lane its ordinary cadence,
-# keeping one reports a ruling that did not arrive.
+# marker no consumer ever reached cannot outlive its meaning.
+#
+# The two unreadable cases below answer the same "do not fire" and are still not
+# the same world, so they must not be collapsed into one. An unreadable LIFETIME
+# is the CALLER being wrong - a knob written as 6h rather than 21600 - and says
+# nothing about the request, so the request is left for a correctly configured
+# read to judge rather than destroyed by a misconfiguration. An unreadable STAMP
+# is the RECORD being wrong: a request that cannot say when its ruling landed can
+# never be judged by any caller, so it is reaped where it lies.
 wait_recheck_pending() {  # <state-dir> <task-id> <lifetime-secs>
   local marker lifetime=${3:-} stamp
   marker=$(_wait_recheck_marker "$1" "$2")
   [ -e "$marker" ] || return 1
   stamp=$(cat "$marker" 2>/dev/null || true)
-  case "$lifetime" in ''|*[!0-9]*) rm -f "$marker"; return 1 ;; esac
+  case "$lifetime" in ''|*[!0-9]*) return 1 ;; esac
   case "$stamp" in ''|*[!0-9]*) rm -f "$marker"; return 1 ;; esac
   [ "$(( $(date +%s) - stamp ))" -lt "$lifetime" ] && return 0
   rm -f "$marker"

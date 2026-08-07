@@ -350,3 +350,16 @@ age_wait_recheck_request() {  # <state-dir> <task-id> <age-secs>
     printf "%s" "$(( $(date +%s) - $4 ))" > "$(_wait_recheck_marker "$2" "$3")"
   ' _ "$ROOT/bin/fm-classify-lib.sh" "$1" "$2" "$3"
 }
+
+# Corrupt a recorded request's stamp in place, so a case can drive the world
+# where the RECORD cannot be trusted rather than the one where the caller cannot.
+# Recorded through the production writer first, so the stamp is the only thing
+# that differs from a request a real ruling would have left.
+corrupt_wait_recheck_stamp() {  # <state-dir> <task-id>
+  bash -c '
+    # shellcheck disable=SC1090,SC1091
+    . "$1"
+    wait_recheck_request "$2" "$3" || exit 1
+    printf "%s" "whenever" > "$(_wait_recheck_marker "$2" "$3")"
+  ' _ "$ROOT/bin/fm-classify-lib.sh" "$1" "$2"
+}

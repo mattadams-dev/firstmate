@@ -375,6 +375,43 @@ test_wait_class_reads_the_backlog_once_per_window() {
   pass "wait_class reads the backlog once per recheck window and re-reads on the next one"
 }
 
+# The request's lifetime has two unreadable worlds, and they are not the same
+# world. This is the CALLER being wrong: a home that writes its captain cadence
+# as 6h rather than 21600s. That says nothing about the request, so the answer is
+# still "do not fire" - a misconfigured timer must never fabricate a ruling - but
+# the request itself has to survive for a correctly configured read to judge.
+test_an_unreadable_lifetime_does_not_destroy_a_pending_recheck_request() {
+  local dir
+  dir=$(make_case recheck-unreadable-lifetime)
+  wait_recheck_request "$dir/state" park1 || fail "could not record the recheck request"
+
+  wait_recheck_pending "$dir/state" park1 6h \
+    && fail "an unreadable lifetime reported a pending ruling"
+  wait_recheck_pending "$dir/state" park1 21600s \
+    && fail "a suffixed lifetime reported a pending ruling"
+  # The request outlives the misconfiguration that could not judge it, so fixing
+  # the knob is all it takes to get the recheck back.
+  wait_recheck_pending "$dir/state" park1 21600 \
+    || fail "a readable lifetime found no request after an unreadable one had read it"
+  pass "an unreadable lifetime declines to fire without destroying the request it could not judge"
+}
+
+# The mirror world: the RECORD is what cannot be read. A request that cannot say
+# when its ruling landed can never be judged by any caller, however well
+# configured, so it is reaped where it lies rather than left to be re-read
+# forever by every poll of every lane that takes this id.
+test_a_recheck_request_with_an_unreadable_stamp_is_reaped() {
+  local dir
+  dir=$(make_case recheck-unreadable-stamp)
+  corrupt_wait_recheck_stamp "$dir/state" park1 || fail "could not record the corrupt request"
+
+  wait_recheck_pending "$dir/state" park1 21600 \
+    && fail "a request with an unreadable stamp reported a pending ruling"
+  [ ! -e "$(_wait_recheck_marker "$dir/state" park1)" ] \
+    || fail "a request with an unreadable stamp outlived the read that found it unjudgeable"
+  pass "a recheck request whose stamp cannot be read is reaped by the read that found it"
+}
+
 # crew_absorb_class: the single fm-crew-state.sh read that returns BOTH absorb
 # reasons - working (active run/busy pane), paused (declared external wait), or none
 # (surface it) - so the watcher's stale path gets both for one bounded call.
@@ -2567,6 +2604,8 @@ test_nonterminal_stale_not_working_surfaced
 test_nonterminal_stale_paused_absorbed_then_resurfaced
 test_wait_class_splits_captain_gated_from_bounded
 test_wait_class_reads_the_backlog_once_per_window
+test_an_unreadable_lifetime_does_not_destroy_a_pending_recheck_request
+test_a_recheck_request_with_an_unreadable_stamp_is_reaped
 test_bounded_wait_keeps_its_ordinary_cadence
 test_captain_gated_wait_waits_out_the_long_cadence
 test_a_landed_ruling_rechecks_the_lane_it_gated
