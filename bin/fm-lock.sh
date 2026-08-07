@@ -98,8 +98,20 @@ if [ -e "$LOCK" ] || [ -L "$LOCK" ]; then
     exit 1
   fi
   old=$(fm_session_lock_pid "$STATE") || {
-    echo "error: session lock is unreadable; operate read-only until resolved" >&2
-    exit 1
+    # An existing record whose FIRST line does not parse as a pid is not any
+    # valid version's record - line 1's meaning is declared permanent - so
+    # this is torn-write or crash residue, and refusing it forever wedges the
+    # genuine owner on garbage (the attestation's finding). One freshness
+    # guard mirrors the mid-acquire idiom: a malformed record younger than a
+    # couple of seconds could be a concurrent write still in flight, so only
+    # a SETTLED malformed record is reclaimed. The claim lock is already held
+    # here, so no valid writer can be racing this reclaim.
+    if [ "$(fm_path_age "$LOCK")" -lt 2 ]; then
+      echo "error: session lock is unreadable and fresh (a write may be in flight); operate read-only until resolved" >&2
+      exit 1
+    fi
+    echo "note: reclaiming a settled malformed session lock (torn-write or crash residue)" >&2
+    old=
   }
   old_session=$(fm_session_lock_session "$STATE") || old_session=
   if [ -n "$my_session" ] && [ -n "$old_session" ]; then
@@ -122,7 +134,14 @@ if [ -n "$my_session" ]; then
 else
   record=$(printf '%s' "$me")
 fi
-if ! { printf '%s\n' "$record" > "$LOCK"; } 2>/dev/null; then
+# Atomic write (tmp + rename): the direct truncate-then-write left a window
+# where a concurrent reader saw an empty or partial record - and the
+# attestation showed the classification downstream treating exactly that
+# state as terminal. A rename either presents the old record or the new one,
+# never a torn one.
+locktmp="$LOCK.tmp.$$"
+if ! { printf '%s\n' "$record" > "$locktmp" && mv -f "$locktmp" "$LOCK"; } 2>/dev/null; then
+  rm -f "$locktmp" 2>/dev/null || true
   echo "error: cannot write session lock; operate read-only until resolved" >&2
   exit 1
 fi

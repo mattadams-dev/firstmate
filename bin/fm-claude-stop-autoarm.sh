@@ -224,7 +224,21 @@ if ! fm_session_lock_owned_by_self "$STATE"; then
   LOCK_PID=$(fm_session_lock_pid "$STATE") || LOCK_PID=
   LOCK_SESSION=$(fm_session_lock_session "$STATE") || LOCK_SESSION=
   if [ -z "$LOCK_PID" ]; then
-    REFUSAL="this home's session lock is missing or malformed, so no session can be proven to own it"
+    if [ -e "$STATE/.lock" ] || [ -L "$STATE/.lock" ]; then
+      # An EXISTING record that does not parse is torn-write or crash
+      # residue - a RECOVERABLE state, not a terminal refusal (the
+      # attestation's finding: the previous path healed this, and the lock's
+      # own pre-atomic write could manufacture it). Recovery stays guarded:
+      # fm-lock.sh refuses fresh malformed records (write may be in flight)
+      # and live foreign holders, and ownership is re-verified before
+      # anything arms.
+      RECOVER_SESSION_LOCK=1
+    else
+      # An ABSENT lock means no session ever claimed this home. A Stop hook
+      # must never SEIZE an unclaimed home; the recorded refusal (exit 0) is
+      # the inert-correct answer, and the suite guards it.
+      REFUSAL="this home has no session lock, so no session can be proven to own it"
+    fi
   elif fm_harness_pid_alive "$LOCK_PID"; then
     if [ -n "$LOCK_SESSION" ]; then
       REFUSAL="this home's session lock is held by session $LOCK_SESSION (live harness pid $LOCK_PID) and this session is not it"

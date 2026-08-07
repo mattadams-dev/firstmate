@@ -135,6 +135,19 @@ if [ "$CLAUDE_MODE" -eq 0 ] && [ "$STOP_HOOK_ACTIVE" = "true" ]; then
   exit 0
 fi
 
+# This session's id, from the payload FIRST - the same precedence the autoarm
+# uses, for the same reason: the payload is authoritative for hooks, while the
+# injected environment may simply be absent. The attestation showed what the
+# environment-only read costs: an unset variable made the genuine owner's
+# ownership unprovable, so a foreign refusal could not be classified as
+# foreign and spent the owner's once-per-episode notice.
+PAYLOAD_SESSION=$(printf '%s' "$PAYLOAD" | jq -r '
+  if (type == "object") and ((.session_id | type) == "string") then .session_id else empty end
+' 2>/dev/null) || PAYLOAD_SESSION=
+if fm_session_id_valid "${PAYLOAD_SESSION:-}"; then
+  export FM_SESSION_ID="$PAYLOAD_SESSION"
+fi
+
 # --- scope precisely to a PRIMARY checkout ----------------------------------
 # A genuinely-marked secondmate home runs its OWN primary firstmate session, so
 # force-INCLUDE it as a guarded primary whether treehouse leased it as a linked

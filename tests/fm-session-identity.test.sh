@@ -417,6 +417,36 @@ test_unrecordable_refusal_still_announces() {
   pass "refusal: unrecordable (held write lock) still announces, naming the missing record"
 }
 
+test_malformed_lock_heals_by_recovery() {
+  # The attestation's finding: an empty or torn lock record - a state the
+  # lock's own pre-atomic write could manufacture - was classified as a
+  # terminal refusal, where the previous path healed it. Malformed now routes
+  # to guarded recovery: fm-lock reacquires (its live-foreign-holder refusal
+  # intact), ownership is re-verified, and the genuine owner proceeds to arm.
+  local dir out fakebin
+  dir=$(install_autoarm_home "$TMP_ROOT/malformed-heals")
+  fakebin=$(fm_fakebin "$dir")
+  write_fake_ps "$fakebin" 424242
+  : > "$dir/state/.lock"
+  # SETTLED garbage, not fresh: a malformed record younger than the freshness
+  # guard reads as a write possibly in flight and is correctly left alone.
+  touch -d '10 seconds ago' "$dir/state/.lock"
+  out=$(PATH="$fakebin:$PATH" run_autoarm "$dir" healer-ccc) || true
+  case "$out" in
+    *'missing or malformed'*)
+      fail "an empty lock was still classified as a terminal refusal: $out" ;;
+  esac
+  grep -q 'outcome=refused' "$dir/state/.claude-autoarm-epoch" 2>/dev/null \
+    && fail "the heal path recorded a refusal instead of recovering: $(cat "$dir/state/.claude-autoarm-epoch" 2>/dev/null)"
+  [ "$(sed -n '1p' "$dir/state/.lock")" = 777 ] \
+    || fail "recovery did not rewrite the lock with the resolved harness pid: $(cat "$dir/state/.lock" 2>/dev/null || echo '<unreadable>')"
+  [ "$(sed -n '2p' "$dir/state/.lock")" = "session=healer-ccc" ] \
+    || fail "recovery did not record the healing session: $(cat "$dir/state/.lock")"
+  [ -e "$dir/state/arm-ran" ] \
+    || fail "the genuine owner healed the lock but supervision never armed"
+  pass "refusal: an empty lock record heals through guarded recovery and the owner arms"
+}
+
 test_refusal_record_waits_for_the_need_gate() {
   local dir out status other fakebin
   dir=$(install_autoarm_home "$TMP_ROOT/refusal-idle")
@@ -495,9 +525,13 @@ test_foreign_refusal_does_not_flip_ownership() {
   printf 'epoch=7 owner_pid=1 outcome=refused updated_at=%s by=intruder-bbb saw_owner=999999\n' \
     "$(date +%s)" > "$dir/state/.claude-autoarm-epoch"
   : > "$dir/state/.claude-autoarm-failure-notified"
+  # env -u on both identity variables: the payload alone must establish this
+  # session's identity (the attestation's finding - the environment-only read
+  # made the owner unprovable exactly when a variable went missing).
   for turn in 1 2 3 4 5; do
     out=$(printf '{"session_id":"owner-aaa","stop_hook_active":false}' \
-      | CLAUDECODE=1 FM_HOME="$home" FM_SESSION_ID=owner-aaa \
+      | env -u FM_SESSION_ID -u CLAUDE_CODE_SESSION_ID \
+        CLAUDECODE=1 FM_HOME="$home" \
         bash "$dir/bin/fm-turnend-guard.sh" --claude 2>&1); status=$?
     [ "$status" -eq 2 ] \
       || fail "turn $turn: a FOREIGN refusal moved the owner's guard off ordinary blocking (status $status): $out"
@@ -570,6 +604,7 @@ test_lock_ignores_an_inherited_session_id_on_another_harness
 test_safe_kill_still_refuses_the_lock_holder
 test_identity_refusal_is_recorded
 test_refusal_record_waits_for_the_need_gate
+test_malformed_lock_heals_by_recovery
 test_foreign_refusal_does_not_flip_ownership
 test_recorded_refusal_reaches_the_bounded_escape
 test_silent_refusal_freezes_the_escape
