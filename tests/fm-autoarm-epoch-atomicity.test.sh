@@ -276,13 +276,20 @@ strict claude-code "claude-code --help" \
   || fail "provenance strict refused a claude- prefixed basename"
 pass "provenance strict: ADMIT - real Claude shapes pass"
 
+strict node "node /home/u/.npm/lib/node_modules/@anthropic-ai/claude-code/cli.js --session-id x" \
+  || fail "provenance strict refused an interpreter-hosted Claude at the exact trusted package path"
+pass "provenance strict: ADMIT - interpreter-hosted Claude at /@anthropic-ai/claude-code/ passes"
+
 if strict node "node /opt/claude-tools/codex.js"; then
   fail "provenance strict admitted a foreign script under a claude-substring path"
+fi
+if strict node "node /x/@anthropic-ai/claude-code-fake/cli.js"; then
+  fail "provenance strict admitted a near-miss package path - component exactness failed"
 fi
 if strict codex "codex --model x"; then
   fail "provenance strict admitted codex"
 fi
-pass "provenance strict: REFUSE - substring-satisfying foreign shapes refused"
+pass "provenance strict: REFUSE - substring and near-miss package shapes refused"
 
 # The shared matcher must be UNTOUCHED by round 3: the loose substring still
 # sets the flag, which is what keeps the ancestry walk's reach unchanged. A

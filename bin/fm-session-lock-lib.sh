@@ -195,6 +195,21 @@ fm_harness_claude_provenance_strict() {  # <comm> <args>
   if name=$(fm_harness_path_name "$argv0"); then
     [ "$name" = claude ] && return 0
   fi
+  # Bare-interpreter admit, component-exact (attestation r2): the shared
+  # matcher's rule 3 models a node/python-hosted Claude as a real, supported
+  # shape, so provenance must be able to admit the one TRUSTED package
+  # identity - the exact path components /@anthropic-ai/claude-code/ in the
+  # interpreter's script argument. This encodes where the trusted code LIVES
+  # (npm-registry-fixed), not a guess about how the process names itself;
+  # substring shapes (/opt/claude-tools/, @anthropic-ai/claude-code-fake/)
+  # still refuse on component exactness.
+  case "$comm" in
+    *node*|*python*)
+      case "$args" in
+        *"/@anthropic-ai/claude-code/"*) return 0 ;;
+      esac
+      ;;
+  esac
   return 1
 }
 

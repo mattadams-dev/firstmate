@@ -447,6 +447,57 @@ test_malformed_lock_heals_by_recovery() {
   pass "refusal: an empty lock record heals through guarded recovery and the owner arms"
 }
 
+test_reclaim_note_names_displaced_session() {
+  # Attestation r2: when line 1 is torn but line 2 still names a session, the
+  # reclaim note must carry that name - it is the only remaining evidence of
+  # whose record was displaced. Recovery behavior itself stays unchanged.
+  local dir out fakebin
+  dir=$(install_autoarm_home "$TMP_ROOT/reclaim-names")
+  fakebin=$(fm_fakebin "$dir")
+  write_fake_ps "$fakebin" 424242
+  printf 'garbage-not-a-pid\nsession=displaced-ddd\n' > "$dir/state/.lock"
+  touch -d '10 seconds ago' "$dir/state/.lock"
+  out=$(cd "$dir" && PATH="$fakebin:$PATH" FM_SESSION_ID=healer-ccc FM_HOME="$dir" \
+    bash bin/fm-lock.sh 2>&1) || fail "guarded reclaim of a settled torn lock failed: $out"
+  assert_contains "$out" 'displaced-ddd' \
+    "the reclaim note must name the displaced session the record still carries"
+  [ "$(sed -n '1p' "$dir/state/.lock")" = 777 ] \
+    || fail "reclaim did not rewrite the lock: $(cat "$dir/state/.lock")"
+  [ "$(sed -n '2p' "$dir/state/.lock")" = "session=healer-ccc" ] \
+    || fail "reclaim did not record the healing session: $(cat "$dir/state/.lock")"
+  pass "reclaim: the note names the displaced session; recovery unchanged"
+}
+
+test_budget_session_key_single_extraction() {
+  # Attestation r2: the guard parsed session_id twice with different
+  # expressions that could silently disagree. One validated extraction now
+  # feeds both ownership and the budget key, with the tightening explicit:
+  # absent, EMPTY, and non-string ids all become the non-identity key
+  # "unknown" rather than an identity-bearing value.
+  local dir home payload expect out
+  for case_row in \
+    'valid:{"session_id":"sess-key-aaa","stop_hook_active":false}:sess-key-aaa' \
+    'missing:{"stop_hook_active":false}:unknown' \
+    'empty:{"session_id":"","stop_hook_active":false}:unknown' \
+    'nonstring:{"session_id":123,"stop_hook_active":false}:unknown'; do
+    name=${case_row%%:*}
+    rest=${case_row#*:}
+    payload=${rest%:*}
+    expect=${rest##*:}
+    dir=$(install_guard_home "$TMP_ROOT/budget-key-$name")
+    home=$(cd "$dir" && pwd)
+    printf 'epoch=1 owner_pid=1 outcome=refused updated_at=%s\n' "$(date +%s)" \
+      > "$dir/state/.claude-autoarm-epoch"
+    : > "$dir/state/.claude-autoarm-failure-notified"
+    printf '%s' "$payload" \
+      | env -u FM_SESSION_ID -u CLAUDE_CODE_SESSION_ID CLAUDECODE=1 FM_HOME="$home" \
+        bash "$dir/bin/fm-turnend-guard.sh" --claude >/dev/null 2>&1 || true
+    [ "$(sed -n '1s/^session=//p' "$dir/state/.turnend-claude-blocks" 2>/dev/null)" = "$expect" ] \
+      || fail "budget key for the $name payload: expected '$expect', got '$(sed -n 1p "$dir/state/.turnend-claude-blocks" 2>/dev/null)'"
+  done
+  pass "guard: one validated extraction feeds the budget key - valid passes through, absent/empty/non-string all read unknown"
+}
+
 test_refusal_record_waits_for_the_need_gate() {
   local dir out status other fakebin
   dir=$(install_autoarm_home "$TMP_ROOT/refusal-idle")
@@ -605,6 +656,8 @@ test_safe_kill_still_refuses_the_lock_holder
 test_identity_refusal_is_recorded
 test_refusal_record_waits_for_the_need_gate
 test_malformed_lock_heals_by_recovery
+test_reclaim_note_names_displaced_session
+test_budget_session_key_single_extraction
 test_foreign_refusal_does_not_flip_ownership
 test_recorded_refusal_reaches_the_bounded_escape
 test_silent_refusal_freezes_the_escape

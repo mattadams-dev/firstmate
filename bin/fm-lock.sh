@@ -110,7 +110,16 @@ if [ -e "$LOCK" ] || [ -L "$LOCK" ]; then
       echo "error: session lock is unreadable and fresh (a write may be in flight); operate read-only until resolved" >&2
       exit 1
     fi
-    echo "note: reclaiming a settled malformed session lock (torn-write or crash residue)" >&2
+    # Keep the evidence with the decision (the saw_owner= pattern): line 2 can
+    # still name whose record is being displaced even when line 1 is torn,
+    # and discarding it makes a real named owner indistinguishable from
+    # anonymous garbage in the operator log.
+    displaced=$(fm_session_lock_session "$STATE" 2>/dev/null) || displaced=
+    if [ -n "$displaced" ]; then
+      echo "note: reclaiming a settled malformed session lock (torn first line; the record still names session=$displaced)" >&2
+    else
+      echo "note: reclaiming a settled malformed session lock (torn-write or crash residue, no readable session)" >&2
+    fi
     old=
   }
   old_session=$(fm_session_lock_session "$STATE") || old_session=

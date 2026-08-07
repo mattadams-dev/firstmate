@@ -171,7 +171,19 @@ BUDGET_LOCK="$STATE/.turnend-claude-blocks.lock"
 OWNER_LOCK="$STATE/.claude-autoarm.lock"
 FAILURE_NOTICE="$STATE/.claude-autoarm-failure-notified"
 FAILURE_ALARM="$STATE/.claude-autoarm-failure-alarmed"
-SESSION_ID=$(printf '%s' "$PAYLOAD" | jq -r '.session_id // "unknown"' 2>/dev/null || printf 'unknown')
+# ONE extraction feeds both consumers (attestation r2, duplicate-parse
+# finding): the ownership identity above and this budget key read the SAME
+# validated value, so the two can never silently disagree, and the second jq
+# fork leaves the Stop hot path. Deliberate, covered semantic tightening per
+# the worker's qualification: absent, EMPTY, malformed, or non-string session
+# ids all become the non-identity key "unknown" - an invalid value must not
+# become an identity-bearing budget key. (The replaced parse kept empty as
+# empty and stringified non-strings.)
+if fm_session_id_valid "${PAYLOAD_SESSION:-}"; then
+  SESSION_ID="$PAYLOAD_SESSION"
+else
+  SESSION_ID=unknown
+fi
 budget_reset() {
   [ "$CLAUDE_MODE" -eq 1 ] || return 0
   fm_lock_try_acquire "$BUDGET_LOCK" || return 0
