@@ -179,7 +179,7 @@ EOF
 # fm_harness_pid_is_claude - the ancestry walk and every other consumer of the
 # shared matcher are untouched, which is what keeps this strictly narrower.
 fm_harness_claude_provenance_strict() {  # <comm> <args>
-  local comm=$1 args=$2 base argv0 name script
+  local comm=$1 args=$2 base argv0 name rest prefix
   base=${comm##*/}
   case "$base" in
     claude|claude[-.0-9]*) return 0 ;;
@@ -211,16 +211,30 @@ fm_harness_claude_provenance_strict() {  # <comm> <args>
   # position that names the code actually EXECUTING.
   case "$comm" in
     *node*|*python*)
-      # argv[1] exactly: strip argv[0], then take the first remaining field.
-      # Flags before the script (node --flag script.js) are not the supported
-      # shape and stay refused - the conservative direction for a predicate
-      # that decides identity.
-      script=${args#* }
-      [ "$script" = "$args" ] && return 1
-      script=${script%% *}
-      case "$script" in
-        *"/@anthropic-ai/claude-code/"*) return 0 ;;
+      # argv[1] positionally - but ps flattens argv with spaces, so a script
+      # path CONTAINING whitespace cannot be recovered by splitting. A naive
+      # split refuses those, and that refusal is NOT conservative: it clears
+      # the session id, writes a pid-only lock, and drops the next turn onto
+      # the ancestry basis this branch exists to delete. So position is
+      # enforced by ANCHORING instead of splitting: the trusted components
+      # must begin at the first character after argv[0]'s separator, which no
+      # later argument can satisfy however the path is spaced.
+      rest=${args#* }
+      [ "$rest" = "$args" ] && return 1        # no argument at all
+      case "$rest" in
+        /*"/@anthropic-ai/claude-code/"*) ;;   # absolute script path, argv[1]
+        *) return 1 ;;
       esac
+      # The components must fall inside argv[1], not in some later argument
+      # that merely follows an absolute-looking one: everything up to the
+      # match must itself be free of the argument separator patterns that
+      # would end argv[1]. A path may contain single spaces; a flag boundary
+      # (" -") or a second absolute path (" /") ends the argument.
+      prefix=${rest%%"/@anthropic-ai/claude-code/"*}
+      case "$prefix" in
+        *" -"*|*" /"*) return 1 ;;
+      esac
+      return 0
       ;;
   esac
   return 1

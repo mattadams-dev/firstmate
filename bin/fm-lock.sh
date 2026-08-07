@@ -97,6 +97,13 @@ if [ -e "$LOCK" ] || [ -L "$LOCK" ]; then
     echo "error: session lock is not a regular file; operate read-only until resolved" >&2
     exit 1
   fi
+  # ONE read of the record's session line, before either consumer. Both the
+  # reclaim note and the ownership comparison below use this value: two reads
+  # of one frozen record could not diverge (the claim lock is held, so no
+  # valid writer can race), but two call sites drift under future edits, and
+  # collapsing a duplicate parse while adding one is the shape this round's
+  # own guard fix was about.
+  old_session=$(fm_session_lock_session "$STATE") || old_session=
   old=$(fm_session_lock_pid "$STATE") || {
     # An existing record whose FIRST line does not parse as a pid is not any
     # valid version's record - line 1's meaning is declared permanent - so
@@ -113,16 +120,14 @@ if [ -e "$LOCK" ] || [ -L "$LOCK" ]; then
     # Keep the evidence with the decision (the saw_owner= pattern): line 2 can
     # still name whose record is being displaced even when line 1 is torn,
     # and discarding it makes a real named owner indistinguishable from
-    # anonymous garbage in the operator log.
-    displaced=$(fm_session_lock_session "$STATE" 2>/dev/null) || displaced=
-    if [ -n "$displaced" ]; then
-      echo "note: reclaiming a settled malformed session lock (torn first line; the record still names session=$displaced)" >&2
+    # anonymous garbage in the operator log. Uses the single read above.
+    if [ -n "$old_session" ]; then
+      echo "note: reclaiming a settled malformed session lock (torn first line; the record still names session=$old_session)" >&2
     else
       echo "note: reclaiming a settled malformed session lock (torn-write or crash residue, no readable session)" >&2
     fi
     old=
   }
-  old_session=$(fm_session_lock_session "$STATE") || old_session=
   if [ -n "$my_session" ] && [ -n "$old_session" ]; then
     # Both sides carry a session id, so the session id decides. A live holder
     # naming another session still refuses; our own session reclaims its lock

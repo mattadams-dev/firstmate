@@ -280,7 +280,14 @@ strict node "node /home/u/.npm/lib/node_modules/@anthropic-ai/claude-code/cli.js
   || fail "provenance strict refused an interpreter-hosted Claude at the exact trusted package path"
 strict python "python /usr/lib/@anthropic-ai/claude-code/cli.py" \
   || fail "provenance strict refused the python-hosted trusted package path"
-pass "provenance strict: ADMIT - interpreter-hosted Claude at /@anthropic-ai/claude-code/ in SCRIPT position"
+# ps flattens argv with spaces, so a script path CONTAINING whitespace is
+# indistinguishable from multiple arguments by splitting. Refusing those is
+# not conservative - it clears the session id, writes a pid-only lock, and
+# restores the ancestry basis this branch deletes. An install under a spaced
+# directory must admit.
+strict node "node /home/u/My Apps/node_modules/@anthropic-ai/claude-code/cli.js" \
+  || fail "provenance strict refused a legitimate install under a SPACED path - that refusal lands in the ancestry fallback"
+pass "provenance strict: ADMIT - script position, including paths containing spaces"
 
 # POSITION is the axis the round-2 fixtures missed: they probed the right
 # shapes only in script position, so a trusted path in ARGUMENT position went
@@ -295,6 +302,12 @@ if strict python "python /opt/foreign/codex.py --data /tmp/@anthropic-ai/claude-
 fi
 if strict node "node --experimental-x /opt/foreign/x.js /@anthropic-ai/claude-code/cli.js"; then
   fail "FORGERY: trusted path in a later position admitted behind a flag"
+fi
+if strict node "node /opt/foreign/x.js /usr/lib/@anthropic-ai/claude-code/cli.js"; then
+  fail "FORGERY: a trusted path in a SECOND absolute argument admitted - the anchor must end at argv[1]"
+fi
+if strict node "node  /usr/lib/@anthropic-ai/claude-code/cli.js"; then
+  fail "an empty argv[1] (double separator) admitted - ps joins argv with single spaces, so this is argv[2], a foreign shape"
 fi
 pass "provenance strict: REFUSE - trusted path in ARGUMENT position never admits (node and python)"
 
