@@ -3,7 +3,7 @@
 Audience: maintainer-verification.
 Subject: `bin/fm-attestation-exempt.sh` and the fork's `PR must be raised via no-mistakes` check.
 Contract owner: [`docs/attestation-exemption.md`](../attestation-exemption.md).
-Regression suite: `tests/fm-attestation-exempt.test.sh`.
+Regression suites: `tests/fm-attestation-exempt.test.sh` (the decider), `tests/fm-attestation-gate.test.sh` (the report layer).
 
 Date: 2026-08-06.
 Versions: git 2.54.0, ShellCheck 0.11.0 (pinned).
@@ -50,7 +50,8 @@ $ git diff --name-only 761e9bff165a1de91887d99699dbfd364534ec79 46254c9^{tree} |
 Six differing paths against six conflicted paths, with an empty symmetric difference.
 This is the property the gate verifies: a sync head introduced no content of its own outside the regions git itself could not resolve.
 It is a fact about the commit graph and the trees, forgeable only by actually performing the merge.
-It also bounds the residual unattested surface to the set of files where the fork and upstream have both diverged - a set that can only have grown through the gate itself.
+It also bounds the residual unattested surface to the set of files where upstream and the head's chosen base-side ancestor have both diverged, since condition 4 accepts any ancestor of the base branch rather than its tip.
+Both sides of that divergence are content that already landed, so what the gate leaves unconstrained is how the conflicts between them were resolved.
 
 ## Why the conflicted paths are not further constrained to "no novel lines"
 
@@ -89,6 +90,24 @@ Each mutant below disables one property in `bin/fm-attestation-exempt.sh`; every
 No mutant breaks a test other than the one naming its property, so no test is passing for an incidental reason and no property is unpinned.
 The two mirror-trap rows are the ones that matter most: an exemption that never fires would leave the manual bypass exactly where it was, so "the exemption still applies to a real sync" is a regression in its own right rather than a convenience.
 
+## Guard-class mutation matrix, report layer
+
+Three outcomes are only worth deciding if they survive being reported.
+`bin/fm-attestation-gate.sh` is where they can be lost, so it is mutated on the same terms, with all five tests of `tests/fm-attestation-gate.test.sh` run in isolation per mutant.
+
+| Mutant | Property disabled | Tests broken |
+| ------ | ----------------- | ------------ |
+| baseline | none | none |
+| `*) rc=2 ;;` -> `*) rc=1 ;;` | every other exit code is undetermined | `missing_decider_is_undetermined_not_refused`, `non_executable_decider_is_undetermined_not_refused` |
+| `1) rc=1 ;;` -> `1) rc=0 ;;` | a refusal is not an exemption | `non_qualifying_head_is_reported_refused` |
+| `0) rc=0 ;;` -> `0) rc=2 ;;` | the exemption is still granted (mirror trap) | `qualifying_head_is_reported_exempt` |
+| `'ATTESTATION_EXEMPT: decision=exempt '*) : ;;` -> `*) : ;;` | exempt requires the decider to have said so | `silent_decider_is_not_reported_exempt` |
+| `if [ "$rc" -eq 1 ]` -> `if true` | the report names the outcome it observed | `missing_decider_is_undetermined_not_refused`, `non_executable_decider_is_undetermined_not_refused`, `silent_decider_is_not_reported_exempt` |
+
+The two multi-row mutants break several tests each because those tests pin one property through several exit codes - 127 for a decider that is not there, 126 for one that cannot be executed, and a clean 0 with nothing decided.
+No mutant reaches a test outside the property it disables.
+The rows are the two collapses the design forbids, taken one at a time: mapping an unreadable head to refused fails only the unreadable fixtures, and mapping a refusal to exempt fails only the refusal fixture, so neither direction is passing on the strength of the other's test.
+
 ## The gate against the real specimen
 
 The script reaches the same verdicts on the fork's actual history as on the fixtures.
@@ -109,4 +128,6 @@ A head forged from that same merge - identical parents and message, with `bin/fm
 ATTESTATION_EXEMPT: decision=refused class=sync-true-merge reason=head changes paths the re-merge resolved cleanly: bin/fm-watch-arm.sh
 ```
 
-The workflow step's own shell was exercised end to end against those refs in a separate clone, confirming the ref plumbing, the exit-code handling, and that an unreadable upstream parent produces the undetermined message rather than the refusal message.
+The workflow step's own shell was exercised end to end against those refs in a separate clone, confirming the ref plumbing and that an unreadable upstream parent produces the undetermined message rather than the refusal message.
+The exit-code handling is no longer verified that way: it moved into `bin/fm-attestation-gate.sh` precisely so it could be driven by a suite, and the matrix above is what pins it.
+What remains inline in the workflow is one branch - exit 0 passes, anything else fails the step, and a code that is neither 0, 1 nor 2 also prints that the gate could not be run at all.

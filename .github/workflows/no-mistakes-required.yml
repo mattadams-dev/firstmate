@@ -64,7 +64,6 @@ jobs:
           BASE_REF: ${{ github.event.pull_request.base.ref }}
         run: |
           set -eu
-          marker='Updates from [git push no-mistakes](https://github.com/kunchenguid/no-mistakes)'
 
           # Fetch the head as the forge holds it, and the current base tip rather
           # than the base recorded when the PR opened.
@@ -74,58 +73,33 @@ jobs:
 
           # The upstream this fork tracks is read from the forge, never from a
           # value the pull request could set. A fork whose parent cannot be read
-          # yields no exemption rather than a guessed one.
+          # yields no exemption rather than a guessed one: refs/fmgate/upstream
+          # simply stays absent, and the gate reports undetermined below.
           upstream_repo=$(gh api "repos/${GITHUB_REPOSITORY}" --jq '.parent.clone_url // empty' || true)
           upstream_branch=$(gh api "repos/${GITHUB_REPOSITORY}" --jq '.parent.default_branch // empty' || true)
           if [ -n "$upstream_repo" ] && [ -n "$upstream_branch" ]; then
             git fetch --no-tags --quiet "$upstream_repo" \
-              "+refs/heads/${upstream_branch}:refs/fmgate/upstream" || upstream_repo=''
+              "+refs/heads/${upstream_branch}:refs/fmgate/upstream" || true
+          else
+            echo "This repository has no readable upstream parent, so the upstream side of the exemption cannot be resolved."
           fi
 
-          decision=''
-          if [ -n "$upstream_repo" ]; then
-            set +e
-            decision=$(bin/fm-attestation-exempt.sh check \
-              --head-ref "$HEAD_REF" \
-              --head refs/fmgate/head \
-              --base refs/fmgate/base \
-              --upstream refs/fmgate/upstream)
-            rc=$?
-            set -e
-          else
-            decision='ATTESTATION_EXEMPT: decision=unknown reason=this repository has no readable upstream parent'
-            rc=2
-          fi
-          echo "$decision"
+          # bin/fm-attestation-gate.sh owns the three-outcome report and the
+          # wording of each: 0 exempt, 1 refused, 2 undetermined. Any other code
+          # means the gate itself could not be run, which is undetermined too and
+          # is never reported as a refusal the gate did not observe.
+          rc=0
+          bin/fm-attestation-gate.sh check \
+            --head-ref "$HEAD_REF" \
+            --head refs/fmgate/head \
+            --base refs/fmgate/base \
+            --upstream refs/fmgate/upstream \
+            --pr-author "$PR_AUTHOR" || rc=$?
 
           if [ "$rc" -eq 0 ]; then
-            echo "::notice::Exempt from the no-mistakes attestation: ${decision#ATTESTATION_EXEMPT: }"
             exit 0
           fi
-
-          # rc 1 is a read head that does not qualify; rc 2 is a head that could
-          # not be read at all. Both leave the attestation in force, and the
-          # message says which one happened rather than collapsing them.
-          {
-            if [ "$rc" -eq 2 ]; then
-              echo "::error::This PR was not raised through no-mistakes, and the exemption could not be evaluated."
-            else
-              echo "::error::This PR was not raised through no-mistakes, and its head does not qualify for the exemption."
-            fi
-            echo
-            echo "$decision"
-            echo
-            echo "Contributions to this repository must be submitted via 'git push no-mistakes'."
-            echo "That pipeline runs the required review/test/lint/CI steps and writes a"
-            echo "deterministic '## Pipeline' section into the PR body containing:"
-            echo
-            echo "    $marker"
-            echo
-            echo "The one exemption is a fork sync: a sync/* head that is a verified true"
-            echo "merge of the upstream default branch. It is decided from the commit graph"
-            echo "by bin/fm-attestation-exempt.sh, never from anything typed into the PR."
-            echo "See docs/attestation-exemption.md and CONTRIBUTING.md."
-            echo
-            echo "PR author: ${PR_AUTHOR}"
-          } >&2
+          if [ "$rc" -ne 1 ] && [ "$rc" -ne 2 ]; then
+            echo "::error::This PR was not raised through no-mistakes, and the exemption gate could not be run at all (exit ${rc}), so nothing about this head was determined. See docs/attestation-exemption.md and CONTRIBUTING.md." >&2
+          fi
           exit 1

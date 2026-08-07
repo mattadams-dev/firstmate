@@ -2,6 +2,7 @@
 
 Audience: maintainer-architecture.
 Mechanism owner: `bin/fm-attestation-exempt.sh` (header and `--help`).
+Report owner: `bin/fm-attestation-gate.sh` (header and `--help`).
 Gate owner: [`.github/workflows/no-mistakes-required.yml`](../.github/workflows/no-mistakes-required.yml).
 Measurements: [`docs/verification/attestation-exemption.md`](verification/attestation-exemption.md).
 Contributor-facing entry point: [`CONTRIBUTING.md`](../CONTRIBUTING.md).
@@ -43,7 +44,12 @@ Condition 2 is what stops a sync branch from carrying hand-authored commits on t
 Conflict resolutions are content that exists in neither parent.
 The exemption does not constrain them, because a stricter rule was measured against the fork's only real sync and would have made the exemption never fire - and an exemption that never fires leaves the manual bypass exactly where it was.
 The gate reports the conflicted paths as `resolved_paths=<n>` instead, so the residual unattested surface is a number a reviewer can see.
-That surface is bounded on its own: it is exactly the set of files where the fork and upstream have both diverged, and fork-side divergence can only have arrived through this same gate.
+
+That surface is bounded, but by a looser bound than "current `main` against upstream", and the looser one is what the code actually enforces.
+Condition 4 accepts any commit already contained in the base branch's history, not the base tip, so the conflicted set is the divergence between upstream and whichever landed base-side ancestor the head chose to merge from.
+A head that merges from an older ancestor can therefore make that set larger than a merge from the current tip would.
+Requiring the base tip exactly is the mirror trap and was rejected on that ground: `main` advancing while a sync pull request is open would then refuse a legitimate sync, and an exemption that refuses real syncs leaves the manual bypass where it was.
+What holds either way is that both sides of the divergence are content that already landed - fork-side through this same gate, upstream-side in upstream - and that what goes unconstrained is only how the conflicts between them were resolved.
 
 ## Outcomes are three, not two
 
@@ -51,6 +57,24 @@ The script exits 0 exempt, 1 refused, 2 undetermined.
 Refused means the head was read and does not qualify; undetermined means it could not be read at all - no upstream parent, an absent commit, a merge git could not replay.
 Both leave the attestation in force, and the workflow says which one happened.
 Collapsing undetermined into either direction would report a fact the gate never observed.
+
+The workflow layer keeps all three rather than flattening them on the way out, which is why `bin/fm-attestation-gate.sh` exists as a script the suite can drive rather than as shell inlined in the workflow file.
+It maps exit 0 with an exempt decision line to exempt and exit 1 to refused, and it maps **every** other exit code to undetermined - the decider's own 64 usage error, the 126 and 127 a missing or non-executable decider produces, and whatever a later revision adds.
+That direction is deliberate in both senses: a head the gate could not read is never reported as a head that does not qualify, and it is never reported as exempt either.
+`tests/fm-attestation-gate.test.sh` pins each direction with its own fixture, because a mutant that collapses one way still passes the other way's test.
+
+## Recovering a stale sync branch
+
+If `main` advances while a sync pull request is open, do not bring the branch current in place.
+GitHub's "Update branch" button rewrites the head as a merge of the old sync head and the new `main`.
+That head still has two parents, but the old sync head is contained in neither upstream's history nor the base branch's, so conditions 3 and 4 have no assignment that works and the head is refused.
+"Update with rebase" and a manual rebase are worse still: they drop the merge shape entirely, and condition 2 refuses a head that is no longer a merge.
+The exemption is a reading of the head's shape, so any operation that changes that shape takes the exemption away with it.
+
+The recovery is to re-create the sync branch rather than to update it.
+Branch again from the current base tip, merge the upstream default branch into it a second time, resolve the conflicts again, and push that as the sync branch's new head.
+The result is once more a two-parent merge of a landed base commit and a commit upstream already contains, so the exemption reads it exactly as it read the first one.
+Re-creating the branch is the whole recovery, and it is the only one: a red sync means the branch needs re-creating, not that the check needs anything done to it.
 
 ## What is deliberately not exempt, and why
 

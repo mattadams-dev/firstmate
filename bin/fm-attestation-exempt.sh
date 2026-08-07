@@ -48,8 +48,13 @@
 #
 # (5) is the load-bearing one. It proves the sync introduced no content of its
 # own outside the regions git could not merge, so the residual unattested
-# surface is exactly the set of files where the fork and upstream have both
-# diverged - a set that can only have grown through this same gate. (1) is not
+# surface is the set of files where upstream and the head's chosen base-side
+# ancestor have both diverged. (4) accepts any ancestor of the base branch
+# rather than its tip - deliberately, since requiring the tip would refuse a
+# legitimate sync whenever the base advances while its pull request is open - so
+# an older ancestor can widen that set. Both sides of the divergence are still
+# content that already landed; only the resolutions between them are
+# unconstrained. docs/attestation-exemption.md states the bound in full. (1) is not
 # security, it is scope: a branch name is trivially forgeable and is never
 # trusted on its own, but it keeps the exemption from reaching heads that were
 # never meant to claim it. (2) is what stops a sync branch from carrying extra
