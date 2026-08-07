@@ -221,6 +221,10 @@
       "audience": "maintainer-architecture"
     },
     {
+      "path": "docs/attestation-exemption.md",
+      "audience": "maintainer-architecture"
+    },
+    {
       "path": "docs/bridge.md",
       "audience": "operator-current"
     },
@@ -346,6 +350,10 @@
     },
     {
       "path": "docs/verification/agents-md-diet.md",
+      "audience": "maintainer-verification"
+    },
+    {
+      "path": "docs/verification/attestation-exemption.md",
       "audience": "maintainer-verification"
     },
     {

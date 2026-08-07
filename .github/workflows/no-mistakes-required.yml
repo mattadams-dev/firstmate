@@ -1,5 +1,5 @@
 name: Require no-mistakes
-run-name: "PR #${{ github.event.pull_request.number }} body compliance - ${{ github.event.action }} - event ${{ github.run_number }} (run ${{ github.run_id }})"
+run-name: "PR #${{ github.event.pull_request.number }} attestation - ${{ github.event.action }} - event ${{ github.run_number }} (run ${{ github.run_id }})"
 
 on:
   pull_request:
@@ -27,28 +27,92 @@ jobs:
       github.event.pull_request.user.login != 'dependabot[bot]'
     steps:
       - name: Verify no-mistakes signature in PR body
+        id: marker
         env:
           PR_BODY: ${{ github.event.pull_request.body }}
-          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
           set -eu
           marker='Updates from [git push no-mistakes](https://github.com/kunchenguid/no-mistakes)'
           if printf '%s' "${PR_BODY:-}" | grep -qF -- "$marker"; then
             echo "Found no-mistakes signature in PR #${PR_NUMBER} body."
+            echo 'attested=true' >> "$GITHUB_OUTPUT"
+          else
+            echo "No no-mistakes signature in PR #${PR_NUMBER} body; evaluating the exemption."
+            echo 'attested=false' >> "$GITHUB_OUTPUT"
+          fi
+
+      # A fork sync can never carry the marker above: a true merge of upstream is
+      # not a no-mistakes-authored change, so this check is red by construction
+      # for the one procedure that keeps the fork current, and the only route to
+      # land it would be an admin bypass. The exemption below closes that from
+      # properties of the head itself. Everything from here on runs only when the
+      # marker is absent, so an attested PR still costs one grep and no checkout.
+      #
+      # Pinned to the head commit rather than the default github.ref, which on
+      # pull_request is refs/pull/N/merge: that ref does not exist for a head
+      # that conflicts with the base, and is computed asynchronously after
+      # `opened`, so the default would fail the checkout outright in both cases
+      # and the step would go red without the exemption ever being evaluated -
+      # sending the operator back to the admin bypass this change abolishes.
+      - name: Check out the full history
+        if: steps.marker.outputs.attested != 'true'
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+
+      - name: Evaluate the head against the attestation exemption
+        if: steps.marker.outputs.attested != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+        run: |
+          set -eu
+
+          # Fetch the head as the forge holds it, and the current base tip rather
+          # than the base recorded when the PR opened. A fetch that fails must
+          # not abort the step under set -e: the ref it would have written simply
+          # stays absent, the decider reports a commit it cannot find, and the
+          # gate says undetermined in its own words. Aborting here would fail the
+          # required check with raw git stderr and none of the three outcomes.
+          git fetch --no-tags --quiet origin \
+            "+refs/pull/${PR_NUMBER}/head:refs/fmgate/head" \
+            "+refs/heads/${BASE_REF}:refs/fmgate/base" ||
+            echo "The head or base could not be fetched, so the gate reports below on whichever of them is present."
+
+          # The upstream this fork tracks is read from the forge, never from a
+          # value the pull request could set. A fork whose parent cannot be read
+          # yields no exemption rather than a guessed one: refs/fmgate/upstream
+          # simply stays absent, and the gate reports undetermined below.
+          upstream_repo=$(gh api "repos/${GITHUB_REPOSITORY}" --jq '.parent.clone_url // empty' || true)
+          upstream_branch=$(gh api "repos/${GITHUB_REPOSITORY}" --jq '.parent.default_branch // empty' || true)
+          if [ -n "$upstream_repo" ] && [ -n "$upstream_branch" ]; then
+            git fetch --no-tags --quiet "$upstream_repo" \
+              "+refs/heads/${upstream_branch}:refs/fmgate/upstream" || true
+          else
+            echo "This repository has no readable upstream parent, so the upstream side of the exemption cannot be resolved."
+          fi
+
+          # bin/fm-attestation-gate.sh owns the three-outcome report and the
+          # wording of each: 0 exempt, 1 refused, 2 undetermined. Any other code
+          # means the gate itself could not be run, which is undetermined too and
+          # is never reported as a refusal the gate did not observe.
+          rc=0
+          bin/fm-attestation-gate.sh check \
+            --head-ref "$HEAD_REF" \
+            --head refs/fmgate/head \
+            --base refs/fmgate/base \
+            --upstream refs/fmgate/upstream \
+            --pr-author "$PR_AUTHOR" || rc=$?
+
+          if [ "$rc" -eq 0 ]; then
             exit 0
           fi
-          {
-            echo "::error::This PR was not raised through no-mistakes."
-            echo
-            echo "Contributions to this repository must be submitted via 'git push no-mistakes'."
-            echo "That pipeline runs the required review/test/lint/CI steps and writes a"
-            echo "deterministic '## Pipeline' section into the PR body containing:"
-            echo
-            echo "    $marker"
-            echo
-            echo "See CONTRIBUTING.md for setup and the full workflow."
-            echo
-            echo "PR author: ${PR_AUTHOR}"
-          } >&2
+          if [ "$rc" -ne 1 ] && [ "$rc" -ne 2 ]; then
+            echo "::error::This PR was not raised through no-mistakes, and the exemption gate could not be run at all (exit ${rc}), so nothing about this head was determined. See docs/attestation-exemption.md and CONTRIBUTING.md." >&2
+          fi
           exit 1
