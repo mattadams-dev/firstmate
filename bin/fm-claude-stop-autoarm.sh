@@ -149,6 +149,33 @@ write_epoch() {  # <outcome>  -> 0 recorded, 1 subordinated, 2 unknown
   return $rc
 }
 
+# Announce a refusal once per episode, honestly per world: rc 1 (subordinated)
+# stays quiet because the owner's recovery is provably live; rc 0 and rc 2
+# both announce, and rc 2 adds that the record itself is missing. EVERY
+# refusal call site routes through this - the reviewer's sweep found the
+# original fix handling only the site that surfaced the defect.
+announce_refusal() {  # <epoch-rc> <reason>
+  local rc=$1 reason=$2
+  [ "$rc" -eq 1 ] && return 0
+  [ -e "$FAILURE_NOTICE" ] && return 0
+  {
+    printf 'firstmate watcher auto-arm REFUSED - %s.\n' "$reason"
+    printf 'Supervision is needed here but this session may not arm it, so the home is unsupervised until the lock owner returns or its session lock is reacquired. This refusal is deliberate: firstmate never arms, rewakes, or ends a session on behalf of a session it cannot prove it is.\n'
+    if [ "$rc" -eq 2 ]; then
+      printf 'ADDITIONALLY: this refusal could NOT be recorded (the epoch writer gave up behind a held write lock or a failed write), so the epoch record does not reflect it and supervision state is UNKNOWN.\n'
+    fi
+  } >&2
+  : > "$FAILURE_NOTICE" 2>/dev/null || true
+}
+
+# Non-refusal outcomes deliberately IGNORE the writer's return code: they are
+# progress markers, and an unrecorded one degrades to a staler epoch, which the
+# guard answers with another bounded re-block - the safe direction. The episode
+# bounds live in files written on their own paths (FAILURE_ALARM,
+# FAILURE_NOTICE), never in these outcomes. The one escape-load-bearing write
+# is outcome=failed near the end, and its site discloses inline when its
+# record is lost.
+
 # Consume the Stop payload once. The decisions below are state-based apart from
 # the session id, which the payload is the authoritative source of; it is read
 # whole so a slow writer can never wedge on a full pipe.
@@ -223,17 +250,7 @@ if [ -n "$REFUSAL" ]; then
   #                      silent-refusal defect again. Announce, and say the
   #                      record itself is missing.
   write_epoch refused
-  EPOCH_RC=$?
-  if [ "$EPOCH_RC" -ne 1 ] && [ ! -e "$FAILURE_NOTICE" ]; then
-    {
-      printf 'firstmate watcher auto-arm REFUSED - %s.\n' "$REFUSAL"
-      printf 'Supervision is needed here but this session may not arm it, so the home is unsupervised until the lock owner returns or its session lock is reacquired. This refusal is deliberate: firstmate never arms, rewakes, or ends a session on behalf of a session it cannot prove it is.\n'
-      if [ "$EPOCH_RC" -eq 2 ]; then
-        printf 'ADDITIONALLY: this refusal could NOT be recorded (the epoch writer gave up behind a held write lock or a failed write), so the epoch record does not reflect it and supervision state is UNKNOWN.\n'
-      fi
-    } >&2
-    : > "$FAILURE_NOTICE" 2>/dev/null || true
-  fi
+  announce_refusal $? "$REFUSAL"
   exit 0
 fi
 
@@ -242,12 +259,17 @@ fi
 # remain the single acquisition owner, then re-verify current-session identity
 # before touching any auto-arm state.
 if [ "$RECOVER_SESSION_LOCK" -eq 1 ]; then
+  # Sibling refusal sites (the reviewer's sweep): same three-world handling as
+  # the identity refusal above, same helper - a recovery-failure refusal that
+  # cannot be recorded must still announce, or the escape starves silently.
   if ! "$SCRIPT_DIR/fm-lock.sh" >/dev/null 2>&1; then
     write_epoch refused
+    announce_refusal $? "this home's session lock was stale and could not be reacquired"
     exit 0
   fi
   if ! fm_session_lock_owned_by_self "$STATE"; then
     write_epoch refused
+    announce_refusal $? "the reacquired session lock is not owned by this session"
     exit 0
   fi
 fi
@@ -358,11 +380,18 @@ fi
 # still exits 2 so Claude must continue into another Stop-owned retry without
 # creating a repeated operator notice or manual-arm loop.
 if [ ! -e "$FAILURE_NOTICE" ]; then
+  # outcome=failed is the one escape-load-bearing non-refusal write: budget
+  # accounting keys on a fresh failed epoch. If the record is lost, say so -
+  # the operator reading this banner is the only consumer who can act on it.
   write_epoch failed
+  FAILED_RC=$?
   {
     printf 'firstmate watcher auto-arm FAILED - the Stop-owned automatic supervision mechanism is broken after %s bounded attempts, and no live watcher with a fresh beacon was verified.\n' "$attempt"
     [ -n "$OUT" ] && grep -E '^(watcher:|signal:|stale:|check:|heartbeat)' "$OUT" 2>/dev/null | head -8
     printf 'Do not launch a manual background arm from this notice; investigate the automatic Stop hook and watcher startup before ending blind.\n'
+    if [ "$FAILED_RC" -eq 2 ]; then
+      printf 'ADDITIONALLY: the failure record itself could not be written (epoch writer bounded behind a held write lock), so the bounded escape may not recognize this episode - investigate the epoch write lock first.\n'
+    fi
   } >&2
   : > "$FAILURE_NOTICE" 2>/dev/null || true
   [ -z "$OUT" ] || rm -f "$OUT" 2>/dev/null || true
