@@ -1,5 +1,5 @@
 name: Require no-mistakes
-run-name: "PR #${{ github.event.pull_request.number }} body compliance - ${{ github.event.action }} - event ${{ github.run_number }} (run ${{ github.run_id }})"
+run-name: "PR #${{ github.event.pull_request.number }} attestation - ${{ github.event.action }} - event ${{ github.run_number }} (run ${{ github.run_id }})"
 
 on:
   pull_request:
@@ -27,19 +27,93 @@ jobs:
       github.event.pull_request.user.login != 'dependabot[bot]'
     steps:
       - name: Verify no-mistakes signature in PR body
+        id: marker
         env:
           PR_BODY: ${{ github.event.pull_request.body }}
-          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
           set -eu
           marker='Updates from [git push no-mistakes](https://github.com/kunchenguid/no-mistakes)'
           if printf '%s' "${PR_BODY:-}" | grep -qF -- "$marker"; then
             echo "Found no-mistakes signature in PR #${PR_NUMBER} body."
+            echo 'attested=true' >> "$GITHUB_OUTPUT"
+          else
+            echo "No no-mistakes signature in PR #${PR_NUMBER} body; evaluating the exemption."
+            echo 'attested=false' >> "$GITHUB_OUTPUT"
+          fi
+
+      # A fork sync can never carry the marker above: a true merge of upstream is
+      # not a no-mistakes-authored change, so this check is red by construction
+      # for the one procedure that keeps the fork current, and the only route to
+      # land it would be an admin bypass. The exemption below closes that from
+      # properties of the head itself. Everything from here on runs only when the
+      # marker is absent, so an attested PR still costs one grep and no checkout.
+      - name: Check out the full history
+        if: steps.marker.outputs.attested != 'true'
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Evaluate the head against the attestation exemption
+        if: steps.marker.outputs.attested != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+        run: |
+          set -eu
+          marker='Updates from [git push no-mistakes](https://github.com/kunchenguid/no-mistakes)'
+
+          # Fetch the head as the forge holds it, and the current base tip rather
+          # than the base recorded when the PR opened.
+          git fetch --no-tags --quiet origin \
+            "+refs/pull/${PR_NUMBER}/head:refs/fmgate/head" \
+            "+refs/heads/${BASE_REF}:refs/fmgate/base"
+
+          # The upstream this fork tracks is read from the forge, never from a
+          # value the pull request could set. A fork whose parent cannot be read
+          # yields no exemption rather than a guessed one.
+          upstream_repo=$(gh api "repos/${GITHUB_REPOSITORY}" --jq '.parent.clone_url // empty' || true)
+          upstream_branch=$(gh api "repos/${GITHUB_REPOSITORY}" --jq '.parent.default_branch // empty' || true)
+          if [ -n "$upstream_repo" ] && [ -n "$upstream_branch" ]; then
+            git fetch --no-tags --quiet "$upstream_repo" \
+              "+refs/heads/${upstream_branch}:refs/fmgate/upstream" || upstream_repo=''
+          fi
+
+          decision=''
+          if [ -n "$upstream_repo" ]; then
+            set +e
+            decision=$(bin/fm-attestation-exempt.sh check \
+              --head-ref "$HEAD_REF" \
+              --head refs/fmgate/head \
+              --base refs/fmgate/base \
+              --upstream refs/fmgate/upstream)
+            rc=$?
+            set -e
+          else
+            decision='ATTESTATION_EXEMPT: decision=unknown reason=this repository has no readable upstream parent'
+            rc=2
+          fi
+          echo "$decision"
+
+          if [ "$rc" -eq 0 ]; then
+            echo "::notice::Exempt from the no-mistakes attestation: ${decision#ATTESTATION_EXEMPT: }"
             exit 0
           fi
+
+          # rc 1 is a read head that does not qualify; rc 2 is a head that could
+          # not be read at all. Both leave the attestation in force, and the
+          # message says which one happened rather than collapsing them.
           {
-            echo "::error::This PR was not raised through no-mistakes."
+            if [ "$rc" -eq 2 ]; then
+              echo "::error::This PR was not raised through no-mistakes, and the exemption could not be evaluated."
+            else
+              echo "::error::This PR was not raised through no-mistakes, and its head does not qualify for the exemption."
+            fi
+            echo
+            echo "$decision"
             echo
             echo "Contributions to this repository must be submitted via 'git push no-mistakes'."
             echo "That pipeline runs the required review/test/lint/CI steps and writes a"
@@ -47,7 +121,10 @@ jobs:
             echo
             echo "    $marker"
             echo
-            echo "See CONTRIBUTING.md for setup and the full workflow."
+            echo "The one exemption is a fork sync: a sync/* head that is a verified true"
+            echo "merge of the upstream default branch. It is decided from the commit graph"
+            echo "by bin/fm-attestation-exempt.sh, never from anything typed into the PR."
+            echo "See docs/attestation-exemption.md and CONTRIBUTING.md."
             echo
             echo "PR author: ${PR_AUTHOR}"
           } >&2

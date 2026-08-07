@@ -82,3 +82,52 @@ that two delivery-record mechanisms now live side by side. Both are legitimate
 conflict resolution, and neither is expressible as a copy of one side. The gate
 therefore reports the conflicted paths as the residual surface rather than
 pretending to constrain their contents.
+
+## Guard-class mutation matrix
+
+Every verified property is pinned by exactly one test, and the exemption's own
+firing is pinned as hard as its refusals. Each mutant below disables one
+property in `bin/fm-attestation-exempt.sh`; every test is then run in isolation,
+because a suite that stops at its first failure cannot show what a mutant did
+*not* break.
+
+| Mutant | Property disabled | Tests broken |
+| ------ | ----------------- | ------------ |
+| baseline | none | none |
+| `sync/*) : ;;` -> `*) : ;;` | (1) branch scope | `non_sync_branch_that_is_a_true_merge_is_refused` |
+| `-ne 2` -> `-gt 99` | (2) exactly two parents | `sync_named_non_merge_head_is_refused` |
+| `contains "${parents[1]}" "$upstream"` -> `true` | (3) upstream-side parent | `sync_head_merging_something_other_than_upstream_is_refused` |
+| `contains "${parents[0]}" "$base"` -> `true` | (4) base-side parent | `sync_head_whose_other_parent_is_unlanded_is_refused` |
+| `if [ -n "${stray// /}" ]` -> `if false` | (5) true-merge tree verification | `sync_head_smuggling_into_an_unconflicted_path_is_refused` |
+| `decide exempt` -> `decide refused` | the exemption itself (mirror trap) | `conflicted_true_merge_sync_head_is_exempt`, `clean_true_merge_sync_head_is_exempt` |
+| `sort -u "$work/conflicted"` -> `: >` allowed | requires a conflict-free re-merge (mirror trap) | `conflicted_true_merge_sync_head_is_exempt` |
+| `*) exit 2` -> `*) exit 1` | undetermined as its own outcome | `unreadable_head_is_undetermined_not_refused` |
+
+No mutant breaks a test other than the one naming its property, so no test is
+passing for an incidental reason and no property is unpinned. The two mirror-trap
+rows are the ones that matter most: an exemption that never fires would leave the
+manual bypass exactly where it was, so "the exemption still applies to a real
+sync" is a regression in its own right, not a convenience.
+
+## The gate against the real specimen
+
+The script reaches the same verdicts on the fork's actual history as on the
+fixtures.
+
+```
+$ bin/fm-attestation-exempt.sh check --head-ref sync/upstream-2026-08-04 \
+    --head 46254c9 --base 9735563 --upstream 4a9979a
+ATTESTATION_EXEMPT: decision=exempt class=sync-true-merge base_parent=9735563... upstream_parent=4a9979a... resolved_paths=6
+
+$ bin/fm-attestation-exempt.sh check --head-ref feature/x \
+    --head 46254c9 --base 9735563 --upstream 4a9979a
+ATTESTATION_EXEMPT: decision=refused class=sync-true-merge reason=head branch 'feature/x' is not sync/*
+```
+
+And on a head forged from that same merge - identical parents and message, with
+`bin/fm-watch-arm.sh` (a path the re-merge resolved cleanly) swapped for other
+content:
+
+```
+ATTESTATION_EXEMPT: decision=refused class=sync-true-merge reason=head changes paths the re-merge resolved cleanly: bin/fm-watch-arm.sh
+```

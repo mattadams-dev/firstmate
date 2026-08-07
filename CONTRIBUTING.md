@@ -13,6 +13,10 @@ A GitHub Actions check (`Require no-mistakes`) runs on PRs targeting `main` and 
 It evaluates every PR opening and body edit independently, so a later edit cannot replace an earlier pending compliance check.
 GitHub Actions and Dependabot are exempt so their automation keeps working, but regular contributor PRs without the signature will not be reviewed or merged.
 
+One further exemption exists, and it is decided from the commit graph rather than from anything typed into the PR: a `sync/*` head that is a verified true merge of the upstream default branch.
+A fork sync can never carry the no-mistakes signature, so without this the check would be red by construction and every sync would need a required check disarmed by hand.
+[`docs/attestation-exemption.md`](docs/attestation-exemption.md) owns the contract, the exact conditions, and what is deliberately not exempt.
+
 ## Workflow
 
 1. Fork the repo, then clone the parent repo or set your local `origin` back to the parent (`git@github.com:kunchenguid/firstmate.git`).
