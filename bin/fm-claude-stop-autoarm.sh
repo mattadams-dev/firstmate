@@ -94,8 +94,6 @@ esac
 # could clobber a fresher live claim. ANY future writer of $EPOCH must hold
 # this lock across its read and its rename, or the guarantee is void.
 EPOCH_WRITE_LOCK="$STATE/.claude-autoarm-epoch.write-lock"
-EPOCH_FRESH=${FM_CLAUDE_AUTOARM_EPOCH_FRESH:-15}
-case "$EPOCH_FRESH" in ''|*[!0-9]*|0) EPOCH_FRESH=15 ;; esac
 
 # Return codes name THREE distinct worlds, because the caller must act
 # differently in each (a reading that cannot distinguish them is the defect
@@ -107,7 +105,7 @@ case "$EPOCH_FRESH" in ''|*[!0-9]*|0) EPOCH_FRESH=15 ;; esac
 #      out behind a held lock, or the write failed). NOTHING is known about
 #      supervision; the caller must announce, never stay quiet.
 write_epoch() {  # <outcome>  -> 0 recorded, 1 subordinated, 2 unknown
-  local outcome=$1 seq tmp cur rc tries=0
+  local outcome=$1 seq tmp cur rc tries=0 owner_pid= by=
   while ! fm_lock_try_acquire "$EPOCH_WRITE_LOCK"; do
     tries=$((tries + 1))
     # Writers hold this lock for microseconds. A holder that outlives this
@@ -123,15 +121,20 @@ write_epoch() {  # <outcome>  -> 0 recorded, 1 subordinated, 2 unknown
     ''|*[!0-9]*) seq=0 ;;
   esac
   if [ "$outcome" = refused ]; then
-    # Refusal bias, subordinate half (review-4): a refusal never supersedes a
-    # FRESH non-refused claim - a live owner's recovery outranks a bystander's
-    # refusal. A stale claim (its owner dead or silent past EPOCH_FRESH) is
-    # superseded normally, so a refusal against a dead home still records.
+    # Refusal bias, subordinate half - decided on OBSERVED EVIDENCE, never a
+    # clock. The attestation review killed the timing window: a live owner's
+    # record is legitimately silent for a whole turn, so record age cannot
+    # separate a live owner from a dead one. Re-observe the lock's owner NOW,
+    # under the write lock: subordinate exactly while that owner remains
+    # observed alive; record freely once it is observed dead or the lock is
+    # gone. The observation is also recorded (saw_owner=) so the decision's
+    # evidence travels with its outcome.
+    owner_pid=$(fm_session_lock_pid "$STATE" 2>/dev/null) || owner_pid=
     cur=$(sed -n 's/^.*outcome=\([a-z][a-z-]*\) .*$/\1/p' "$EPOCH" 2>/dev/null || true)
     case "$cur" in
       ''|refused) : ;;
       *)
-        if [ "$(fm_path_age "$EPOCH")" -lt "$EPOCH_FRESH" ]; then
+        if [ -n "$owner_pid" ] && fm_harness_pid_alive "$owner_pid"; then
           fm_lock_release "$EPOCH_WRITE_LOCK"
           return 1
         fi
@@ -141,9 +144,19 @@ write_epoch() {  # <outcome>  -> 0 recorded, 1 subordinated, 2 unknown
   seq=$((seq + 1))
   tmp="$EPOCH.tmp.$$"
   rc=2
-  printf 'epoch=%s owner_pid=%s outcome=%s updated_at=%s\n' \
-    "$seq" "${BASHPID:-$$}" "$outcome" "$(date +%s)" > "$tmp" 2>/dev/null \
-    && mv -f "$tmp" "$EPOCH" 2>/dev/null && rc=0
+  if [ "$outcome" = refused ]; then
+    # A refusal is its author's claim about ITS OWN non-ownership - never
+    # evidence about any reader's. by= names the author so no other session
+    # can inherit this refusal as its own (the guard discards foreign ones).
+    by=$(fm_session_id_self 2>/dev/null) || by=unresolved
+    printf 'epoch=%s owner_pid=%s outcome=%s updated_at=%s by=%s saw_owner=%s\n' \
+      "$seq" "${BASHPID:-$$}" "$outcome" "$(date +%s)" "$by" "${owner_pid:-none}" > "$tmp" 2>/dev/null \
+      && mv -f "$tmp" "$EPOCH" 2>/dev/null && rc=0
+  else
+    printf 'epoch=%s owner_pid=%s outcome=%s updated_at=%s\n' \
+      "$seq" "${BASHPID:-$$}" "$outcome" "$(date +%s)" > "$tmp" 2>/dev/null \
+      && mv -f "$tmp" "$EPOCH" 2>/dev/null && rc=0
+  fi
   rm -f "$tmp" 2>/dev/null || true
   fm_lock_release "$EPOCH_WRITE_LOCK"
   return $rc

@@ -43,6 +43,7 @@ set -u
 STATE=$1 WRITES=$2 OUTCOME=$3 RESULT=$4
 EPOCH="$STATE/.claude-autoarm-epoch"
 . "$FM_TEST_ROOT/bin/fm-wake-lib.sh"
+. "$FM_TEST_ROOT/bin/fm-session-lock-lib.sh"
 . "$FM_TEST_WRITER_SRC"
 ok=0
 i=0
@@ -103,8 +104,11 @@ last_rcs() {  # <state-dir> -> the per-writer final return codes, then clears
 #   envelope     - within the production envelope (a handful of concurrent hook
 #                  firings) every write succeeds outright.
 # Under a deliberate 24-writer storm - far past the envelope - the 1s
-# acquisition bound may honestly refuse some writes (rc 1, unrecorded). That is
-# designed behavior, not loss: a refused write reported refusal.
+# acquisition bound may honestly give up on some writes (rc 2, unknown /
+# unrecorded). That is designed behavior, not loss: a bounded-out write
+# reported exactly that. (The attestation reviewer caught this comment naming
+# rc 1 - the subordination code - contradicting the three-way distinction the
+# suite exists to prove.)
 S1="$TMP_ROOT/s1"; mkdir -p "$S1"
 total=$(race "$S1" 24 6 arming)
 seq_now=$(epoch_seq "$S1")
@@ -154,31 +158,72 @@ mutant_seq=$(epoch_seq "$S2")
   || fail "fixture has no teeth: the unlocked mutant lost no updates (seq $mutant_seq of $mutant_total) - raise the contention"
 pass "epoch fixture detects the defect: unlocked mutant lost $((mutant_total - mutant_seq)) of $mutant_total updates"
 
-# --- HOLD: a racing refusal never supersedes a fresh non-refused claim --------
+# --- subordination on OBSERVED EVIDENCE, never a clock ------------------------
+# The redesigned invariant, both mutation directions:
+#   S3a  live owner on the lock + an AGED record  -> refusals subordinate.
+#        A clock-based mutant records here (the record looks stale).
+#   S3b  owner observed dead + a FRESH record     -> a refusal records.
+#        A clock-based mutant subordinates here (the record looks fresh).
+# A fake ps reports the designated holder pid as a live claude harness so
+# fm_harness_pid_alive sees what a real lock owner would look like.
+fakebin=$(fm_fakebin "$TMP_ROOT")
+cat > "$fakebin/ps" <<FAKEPS
+#!/usr/bin/env bash
+target=\$(cat "$TMP_ROOT/fake-ps-target" 2>/dev/null)
+mode=""; pid=""
+prev=""
+for a in "\$@"; do
+  case "\$prev" in
+    -o) mode=\$a ;;
+    -p) pid=\$a ;;
+  esac
+  prev=\$a
+done
+if [ -n "\$target" ] && [ "\$pid" = "\$target" ]; then
+  case "\$mode" in
+    comm*) echo claude; exit 0 ;;
+    args*) echo "claude --resume"; exit 0 ;;
+  esac
+fi
+exec /bin/ps "\$@"
+FAKEPS
+chmod +x "$fakebin/ps"
+
 S3="$TMP_ROOT/s3"; mkdir -p "$S3"
-one=$(race "$S3" 1 1 arming)
+bash -c 'sleep 45; :' &
+OWNER_HOLDER=$!
+printf '%s\n' "$OWNER_HOLDER" > "$TMP_ROOT/fake-ps-target"
+printf '%s\nsession=owner-live\n' "$OWNER_HOLDER" > "$S3/.lock"
+
+one=$(PATH="$fakebin:$PATH" race "$S3" 1 1 arming)
 [ "$one" -eq 1 ] || fail "seed arming write did not record"
-refused_ok=$(race "$S3" 12 1 refused)
+touch -d '40 seconds ago' "$S3/.claude-autoarm-epoch" 2>/dev/null \
+  || fail "cannot age the epoch for the anti-clock case"
+refused_ok=$(PATH="$fakebin:$PATH" FM_SESSION_ID=bystander-bbb race "$S3" 12 1 refused)
 [ "$refused_ok" -eq 0 ] \
-  || fail "refusal bias broken: $refused_ok racing refusals recorded over a fresh arming claim"
+  || fail "evidence rule broken: $refused_ok refusals recorded over a LIVE owner (aged record - a clock mutant would do this)"
 [ "$(epoch_outcome "$S3")" = arming ] \
-  || fail "a racing refusal superseded a fresh arming claim: outcome $(epoch_outcome "$S3")"
-# The reviewer's finding: subordinated and unknown are DIFFERENT worlds and
-# must carry different codes - 1 says step aside quietly, 2 says announce.
+  || fail "a refusal superseded a live owner's claim: outcome $(epoch_outcome "$S3")"
 for rc in $(last_rcs "$S3"); do
   [ "$rc" = 1 ] \
     || fail "a subordinated refusal returned $rc, not 1 - the caller cannot tell deliberate quiet from unknown"
 done
-pass "epoch writer: 12 racing refusals all subordinate with the distinct code 1"
+pass "epoch writer: live owner + 40s-old record - 12 refusals subordinate (rc 1); the clock is dead"
 
-# --- HOLD: a STALE claim is superseded by a refusal normally ------------------
-touch -d '40 seconds ago' "$S3/.claude-autoarm-epoch" 2>/dev/null \
-  || fail "cannot age the epoch for the stale case"
-stale_ok=$(race "$S3" 1 1 refused)
-[ "$stale_ok" -eq 1 ] || fail "refusal against a stale claim did not record"
+kill "$OWNER_HOLDER" 2>/dev/null || true
+wait "$OWNER_HOLDER" 2>/dev/null || true
+fresh=$(PATH="$fakebin:$PATH" race "$S3" 1 1 arming)
+[ "$fresh" -eq 1 ] || fail "re-seed arming write did not record"
+dead_ok=$(PATH="$fakebin:$PATH" FM_SESSION_ID=bystander-bbb race "$S3" 1 1 refused)
+[ "$dead_ok" -eq 1 ] \
+  || fail "refusal against a DEAD owner did not record despite a fresh record - a clock mutant would subordinate here"
 [ "$(epoch_outcome "$S3")" = refused ] \
-  || fail "stale-claim supersede failed: outcome $(epoch_outcome "$S3")"
-pass "epoch writer: a refusal against a stale claim records normally"
+  || fail "dead-owner supersede failed: outcome $(epoch_outcome "$S3")"
+grep -q 'by=bystander-bbb' "$S3/.claude-autoarm-epoch" \
+  || fail "the refusal record does not name its author: $(cat "$S3/.claude-autoarm-epoch")"
+grep -q "saw_owner=$OWNER_HOLDER" "$S3/.claude-autoarm-epoch" \
+  || fail "the refusal record does not carry its observed-owner evidence: $(cat "$S3/.claude-autoarm-epoch")"
+pass "epoch writer: dead owner + fresh record - refusal records with author and evidence (by=, saw_owner=)"
 
 # --- HOLD: a wedged lock holder bounds the writer, never wedges the hook ------
 S4="$TMP_ROOT/s4"; mkdir -p "$S4"

@@ -454,7 +454,8 @@ install_guard_home() {  # <dir>
   git -C "$dir" commit -q --allow-empty -m init
   : > "$dir/AGENTS.md"
   for f in fm-turnend-guard.sh fm-supervision-instructions.sh fm-harness.sh \
-    fm-operational-input.sh fm-primary-scope-lib.sh fm-supervision-lib.sh fm-wake-lib.sh; do
+    fm-operational-input.sh fm-primary-scope-lib.sh fm-supervision-lib.sh \
+    fm-wake-lib.sh fm-session-lock-lib.sh; do
     cp "$ROOT/bin/$f" "$dir/bin/$f"
   done
   chmod +x "$dir/bin/fm-turnend-guard.sh" "$dir/bin/fm-supervision-instructions.sh" \
@@ -477,6 +478,38 @@ write_refused_epoch() {  # <dir> <seq>
   printf 'epoch=%s owner_pid=1 outcome=refused updated_at=%s\n' "$2" "$(date +%s)" \
     > "$1/state/.claude-autoarm-epoch"
   : > "$1/state/.claude-autoarm-failure-notified"
+}
+
+test_foreign_refusal_does_not_flip_ownership() {
+  # The attestation defect, guard side: a stale bystander refusal read with no
+  # authorship check told the genuine lock owner it did not own the lock, and
+  # could spend the owner's once-per-episode escape budget. Here the epoch
+  # carries a FOREIGN refusal (by=intruder-bbb) while THIS session verifiably
+  # owns the home lock - across five turns the guard must keep blocking
+  # ordinarily (no escape from someone else's episode), name the bystander,
+  # and never tell the owner it does not own the home.
+  local dir out status turn home
+  dir=$(install_guard_home "$TMP_ROOT/foreign-refusal")
+  home=$(cd "$dir" && pwd)
+  printf '%s\nsession=owner-aaa\n' "$$" > "$dir/state/.lock"
+  printf 'epoch=7 owner_pid=1 outcome=refused updated_at=%s by=intruder-bbb saw_owner=999999\n' \
+    "$(date +%s)" > "$dir/state/.claude-autoarm-epoch"
+  : > "$dir/state/.claude-autoarm-failure-notified"
+  for turn in 1 2 3 4 5; do
+    out=$(printf '{"session_id":"owner-aaa","stop_hook_active":false}' \
+      | CLAUDECODE=1 FM_HOME="$home" FM_SESSION_ID=owner-aaa \
+        bash "$dir/bin/fm-turnend-guard.sh" --claude 2>&1); status=$?
+    [ "$status" -eq 2 ] \
+      || fail "turn $turn: a FOREIGN refusal moved the owner's guard off ordinary blocking (status $status): $out"
+    case "$out" in
+      *'does not own the home session lock'*)
+        fail "turn $turn: a bystander's refusal told the genuine owner it does not own the lock" ;;
+    esac
+  done
+  assert_contains "$out" 'intruder-bbb' "the guard must name the bystander whose refusal it is discarding"
+  [ ! -e "$dir/state/.claude-autoarm-failure-alarmed" ] \
+    || fail "a foreign refusal spent the owner's once-per-episode escape"
+  pass "guard: a foreign refusal never flips the owner's ownership nor spends its escape"
 }
 
 test_recorded_refusal_reaches_the_bounded_escape() {
@@ -537,6 +570,7 @@ test_lock_ignores_an_inherited_session_id_on_another_harness
 test_safe_kill_still_refuses_the_lock_holder
 test_identity_refusal_is_recorded
 test_refusal_record_waits_for_the_need_gate
+test_foreign_refusal_does_not_flip_ownership
 test_recorded_refusal_reaches_the_bounded_escape
 test_silent_refusal_freezes_the_escape
 test_unrecordable_refusal_still_announces

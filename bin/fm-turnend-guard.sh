@@ -86,6 +86,31 @@ done
 . "$SCRIPT_DIR/fm-supervision-lib.sh"
 # shellcheck source=bin/fm-primary-scope-lib.sh
 . "$SCRIPT_DIR/fm-primary-scope-lib.sh"
+# shellcheck source=bin/fm-session-lock-lib.sh
+. "$SCRIPT_DIR/fm-session-lock-lib.sh"
+
+# A refusal record's author, or empty for a record that names none (legacy).
+epoch_refused_by() {
+  sed -n 's/^.*by=\([^ ]*\).*$/\1/p' "$STATE/.claude-autoarm-epoch" 2>/dev/null || true
+}
+
+# True when the recorded refusal is a FOREIGN session's - provably authored by
+# another session while THIS session verifiably owns the home lock. A refusal
+# is its author's claim about its own non-ownership, never evidence about this
+# reader's; but every uncertainty (no author, unresolved author, our own
+# author, ownership unprovable) falls through to treating the refusal as
+# meaningful here, which is the conservative direction.
+epoch_refusal_is_foreign() {
+  local refused_by self_session
+  refused_by=$(epoch_refused_by)
+  [ -n "$refused_by" ] || return 1
+  [ "$refused_by" != unresolved ] || return 1
+  self_session=$(fm_session_id_self 2>/dev/null) || self_session=
+  if [ -n "$self_session" ] && [ "$refused_by" = "$self_session" ]; then
+    return 1
+  fi
+  fm_session_lock_owned_by_self "$STATE"
+}
 
 # Read the whole turn-end hook payload once; never block on unreadable/absent
 # stdin.
@@ -179,7 +204,13 @@ block_stop() {
       # will change. Reporting the second as the first sends the operator after
       # the wrong defect, and that is what happened on 2026-08-05.
       outcome=$(sed -n 's/^.*outcome=\([a-z][a-z-]*\) .*$/\1/p' "$STATE/.claude-autoarm-epoch" 2>/dev/null || true)
-      if [ "$outcome" = refused ]; then
+      if [ "$outcome" = refused ] && epoch_refusal_is_foreign; then
+        # The attestation defect: a stale bystander refusal read with no
+        # authorship check told the genuine lock owner it did not own the
+        # lock. This session PROVABLY owns the home; the recorded refusal is
+        # another session's story about itself.
+        printf '●  A bystander session (%s) recorded an arm refusal here, but THIS session verifiably owns the home lock. That refusal is not about you. Recovery is NOT already under way for this event.\n' "$(epoch_refused_by)"
+      elif [ "$outcome" = refused ]; then
         printf '●  The Stop-owned auto-arm REFUSED this home: this session does not own the home session lock, so it may not arm supervision here. Reacquire the lock or hand the home back to its owning session; repairing the hook will not help.\n'
       else
         printf '●  The Stop-owned auto-arm did not claim this home either, so recovery is NOT already under way.\n'
@@ -356,7 +387,18 @@ failure_episode_verified() {
   [ -e "$FAILURE_NOTICE" ] || return 1
   outcome=$(sed -n 's/^.*outcome=\([a-z][a-z-]*\) .*$/\1/p' "$STATE/.claude-autoarm-epoch" 2>/dev/null || true)
   case "$outcome" in
-    failed|failed-suppressed|refused) return 0 ;;
+    failed|failed-suppressed) return 0 ;;
+    refused)
+      # A FOREIGN session's refusal is not this session's verified episode -
+      # counting it would let a bystander's record spend the genuine owner's
+      # escape budget. Our own refusal counts; so does a legacy/unattributed
+      # one, preserving escape reachability across the record-format
+      # transition (the safe direction for a trapped attended operator).
+      if epoch_refusal_is_foreign; then
+        return 1
+      fi
+      return 0
+      ;;
     *) return 1 ;;
   esac
 }
