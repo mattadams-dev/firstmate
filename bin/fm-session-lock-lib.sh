@@ -166,12 +166,45 @@ EOF
 # how a defect waits for a consumer. Gate the variable on the acquiring harness
 # actually being Claude, and an unresolvable answer simply records no session,
 # which lands on the unchanged legacy basis rather than on a guess.
+# PROVENANCE-STRICT classification, this consumer only (round 3, review-1).
+#
+# The shared matcher's *claude* SUBSTRING is deliberately loose so the ancestry
+# walk can span version-named Claude binaries; provenance cannot ride that
+# looseness, because a foreign harness script living under a claude-named
+# directory (node /opt/claude-tools/codex.js) would satisfy the substring and
+# record the launching session's id as its own. Provenance therefore requires
+# an EXACT claude basename or an EXACT claude path component on the pid itself.
+# This is a pure predicate over the ps-reported strings so its behavior is
+# testable without a live process, and it is called ONLY from
+# fm_harness_pid_is_claude - the ancestry walk and every other consumer of the
+# shared matcher are untouched, which is what keeps this strictly narrower.
+fm_harness_claude_provenance_strict() {  # <comm> <args>
+  local comm=$1 args=$2 base argv0 name
+  base=${comm##*/}
+  case "$base" in
+    claude|claude[-.0-9]*) return 0 ;;
+  esac
+  if name=$(fm_harness_path_name "$comm"); then
+    [ "$name" = claude ] && return 0
+  fi
+  argv0=${args%% *}
+  base=${argv0##*/}
+  case "$base" in
+    claude|claude[-.0-9]*) return 0 ;;
+  esac
+  if name=$(fm_harness_path_name "$argv0"); then
+    [ "$name" = claude ] && return 0
+  fi
+  return 1
+}
+
 fm_harness_pid_is_claude() {  # <pid>
   local pid=$1 comm args
   comm=$(ps -o comm= -p "$pid" 2>/dev/null) || return 1
   args=$(ps -o args= -p "$pid" 2>/dev/null)
   fm_harness_process_matches "$comm" "$args" || return 1
-  [ "$FM_HARNESS_IS_CLAUDE" -eq 1 ]
+  [ "$FM_HARNESS_IS_CLAUDE" -eq 1 ] || return 1
+  fm_harness_claude_provenance_strict "$comm" "$args"
 }
 
 # True if $1 is a live process that looks like a verified harness.
