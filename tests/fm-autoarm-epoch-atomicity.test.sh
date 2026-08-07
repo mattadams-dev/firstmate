@@ -278,7 +278,25 @@ pass "provenance strict: ADMIT - real Claude shapes pass"
 
 strict node "node /home/u/.npm/lib/node_modules/@anthropic-ai/claude-code/cli.js --session-id x" \
   || fail "provenance strict refused an interpreter-hosted Claude at the exact trusted package path"
-pass "provenance strict: ADMIT - interpreter-hosted Claude at /@anthropic-ai/claude-code/ passes"
+strict python "python /usr/lib/@anthropic-ai/claude-code/cli.py" \
+  || fail "provenance strict refused the python-hosted trusted package path"
+pass "provenance strict: ADMIT - interpreter-hosted Claude at /@anthropic-ai/claude-code/ in SCRIPT position"
+
+# POSITION is the axis the round-2 fixtures missed: they probed the right
+# shapes only in script position, so a trusted path in ARGUMENT position went
+# untested and the implementation scanned the whole argument string - identity
+# forgery by carrying a data path. Every refusal shape is now enumerated by
+# position AND by string.
+if strict node "node /opt/foreign/codex.js --fixture /tmp/@anthropic-ai/claude-code/data"; then
+  fail "FORGERY: trusted package path in ARGUMENT position admitted a foreign script"
+fi
+if strict python "python /opt/foreign/codex.py --data /tmp/@anthropic-ai/claude-code/x"; then
+  fail "FORGERY: trusted path in argument position admitted under the python branch"
+fi
+if strict node "node --experimental-x /opt/foreign/x.js /@anthropic-ai/claude-code/cli.js"; then
+  fail "FORGERY: trusted path in a later position admitted behind a flag"
+fi
+pass "provenance strict: REFUSE - trusted path in ARGUMENT position never admits (node and python)"
 
 if strict node "node /opt/claude-tools/codex.js"; then
   fail "provenance strict admitted a foreign script under a claude-substring path"
@@ -286,10 +304,22 @@ fi
 if strict node "node /x/@anthropic-ai/claude-code-fake/cli.js"; then
   fail "provenance strict admitted a near-miss package path - component exactness failed"
 fi
+if strict node "node /x/claude-code/@anthropic-ai/cli.js"; then
+  fail "provenance strict admitted reversed path components"
+fi
+if strict node "node @anthropic-ai/claude-code/cli.js"; then
+  fail "provenance strict admitted a bare relative script path (no leading component boundary)"
+fi
+if strict node "node --loader x.mjs /usr/lib/@anthropic-ai/claude-code/cli.js"; then
+  fail "provenance strict admitted a flags-before-script shape - unsupported shapes must refuse"
+fi
+if strict node "node"; then
+  fail "provenance strict admitted a bare interpreter with no script argument"
+fi
 if strict codex "codex --model x"; then
   fail "provenance strict admitted codex"
 fi
-pass "provenance strict: REFUSE - substring and near-miss package shapes refused"
+pass "provenance strict: REFUSE - near-miss, reversed, relative, flag-shifted, and argument-less shapes"
 
 # The shared matcher must be UNTOUCHED by round 3: the loose substring still
 # sets the flag, which is what keeps the ancestry walk's reach unchanged. A

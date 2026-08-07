@@ -179,7 +179,7 @@ EOF
 # fm_harness_pid_is_claude - the ancestry walk and every other consumer of the
 # shared matcher are untouched, which is what keeps this strictly narrower.
 fm_harness_claude_provenance_strict() {  # <comm> <args>
-  local comm=$1 args=$2 base argv0 name
+  local comm=$1 args=$2 base argv0 name script
   base=${comm##*/}
   case "$base" in
     claude|claude[-.0-9]*) return 0 ;;
@@ -195,17 +195,30 @@ fm_harness_claude_provenance_strict() {  # <comm> <args>
   if name=$(fm_harness_path_name "$argv0"); then
     [ "$name" = claude ] && return 0
   fi
-  # Bare-interpreter admit, component-exact (attestation r2): the shared
-  # matcher's rule 3 models a node/python-hosted Claude as a real, supported
-  # shape, so provenance must be able to admit the one TRUSTED package
-  # identity - the exact path components /@anthropic-ai/claude-code/ in the
-  # interpreter's script argument. This encodes where the trusted code LIVES
-  # (npm-registry-fixed), not a guess about how the process names itself;
-  # substring shapes (/opt/claude-tools/, @anthropic-ai/claude-code-fake/)
-  # still refuse on component exactness.
+  # Bare-interpreter admit, POSITIONAL and component-exact (attestation r2's
+  # specification; r3 caught this scanning the whole argument string).
+  #
+  # The shared matcher's rule 3 models a node/python-hosted Claude as a real
+  # supported shape, so provenance must be able to admit the one TRUSTED
+  # package identity: the exact path components /@anthropic-ai/claude-code/
+  # in the INTERPRETER'S SCRIPT ARGUMENT - argv[1], and nothing else.
+  #
+  # Position is the whole guarantee. Matching anywhere in $args let a foreign
+  # harness forge a Claude session id by carrying that path as a data or
+  # fixture argument (`node /opt/foreign/codex.js --fixture
+  # /tmp/@anthropic-ai/claude-code/data` admitted), which is identity forgery
+  # in the predicate whose job is identity. The script argument is the only
+  # position that names the code actually EXECUTING.
   case "$comm" in
     *node*|*python*)
-      case "$args" in
+      # argv[1] exactly: strip argv[0], then take the first remaining field.
+      # Flags before the script (node --flag script.js) are not the supported
+      # shape and stay refused - the conservative direction for a predicate
+      # that decides identity.
+      script=${args#* }
+      [ "$script" = "$args" ] && return 1
+      script=${script%% *}
+      case "$script" in
         *"/@anthropic-ai/claude-code/"*) return 0 ;;
       esac
       ;;
