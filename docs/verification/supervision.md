@@ -302,6 +302,39 @@ tests/fm-watcher-lock.test.sh
 tests/fm-watch-triage.test.sh
 ```
 
+## Declared-wait recheck cadence split
+
+Verified 2026-08-07 against this tree, on Linux, with tasks-axi 0.2.3 available.
+
+The recheck cadence is no longer uniform: a wait only a human ruling can end uses `FM_PAUSE_CAPTAIN_RESURFACE_SECS`, a wait expected to clear on its own keeps `FM_PAUSE_RESURFACE_SECS`, and a ruling routed through `bin/fm-decision-hold.sh` records a durable recheck request that brings the lanes it gated due at the next poll regardless of remaining cadence.
+Widening one half without the event trigger would be a regression rather than a fix, so all three are guarded, in both the always-on watcher and the away-mode daemon.
+
+Each mutation was applied to a working copy, run, and reverted before the next.
+A failing case aborts its suite, so each case was invoked on its own for this matrix rather than read from a single suite run; that is what makes the "other cases" column an observation instead of an inference.
+
+| Mutation | Case killed | Other cadence cases |
+| --- | --- | --- |
+| `bin/fm-watch.sh`: use the captain-gated window for every declared wait | `test_bounded_wait_keeps_its_ordinary_cadence` | both still ok |
+| `bin/fm-watch.sh`: never select the captain-gated window | `test_captain_gated_wait_waits_out_the_long_cadence` | both still ok |
+| `bin/fm-watch.sh`: never read the pending recheck request | `test_a_landed_ruling_rechecks_the_lane_it_gated` | both still ok |
+| `bin/fm-supervise-daemon.sh`: drop the captain-gated window from housekeeping | `test_housekeeping_splits_captain_gated_from_bounded_waits` | ruling and bounded cases still ok |
+| `bin/fm-supervise-daemon.sh`: never read the pending recheck request | `test_housekeeping_landed_ruling_rechecks_the_lane_it_gated` | split and bounded cases still ok |
+
+The matrix is a clean diagonal in both directions: no mutation killed a case other than its own, and the pre-existing `test_housekeeping_paused_resurfaces_and_resets` survived every one of them, which is the direct evidence that the bounded half was left where it was rather than widened along with the other.
+
+The cases are separated by the classifier fixture and the two cadence knobs only, so what produced each verdict is not in doubt.
+The captain-gated case additionally asserts that the lane still comes due once its own cadence elapses, so a mutation that turned the long cadence into silence would be caught by the same case that proves the cadence is long.
+
+`test_wait_class_reads_the_backlog_once_per_window` guards the cost rather than the verdict: the recheck path runs on every poll for as long as a lane stays parked, and the backlog lookup is a subprocess, so it is throttled to one read per bounded window and the case counts the lookups through a fixture that logs them.
+
+Deterministic entry points for this contract:
+
+```sh
+tests/fm-watch-triage.test.sh
+tests/fm-daemon.test.sh
+tests/fm-decision-hold-lifecycle.test.sh
+```
+
 ## Away-mode composer read on a live claude-on-herdr pane
 
 Captured 2026-08-04 with Herdr 0.7.1 against two live Claude Code panes in the running session, using `fm_backend_herdr_capture_ansi <target> 20`.

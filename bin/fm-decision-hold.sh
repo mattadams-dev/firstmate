@@ -37,6 +37,11 @@
 # It writes the captain decision and routed identities into the hold body, clears
 # those dependency edges, and only then marks the hold Done. A failure before the
 # final step leaves the captain hold open.
+# It also records a durable recheck request against every routed lane
+# (fm-classify-lib.sh's wait_recheck_request), because a lane parked on a
+# captain-gated wait is rechecked on a long cadence and the ruling, not the clock,
+# is what can end that wait. Repeating an already-resolved `resolve` re-records
+# those requests, so a crash between routing and recording is recoverable.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
