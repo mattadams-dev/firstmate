@@ -1283,7 +1283,9 @@ housekeeping() {  # <state>
   # re-asks an answered question is the away-mode form of the same tax.
   # fm-classify-lib.sh's wait_class owns the split and its consultation is gated
   # behind the bounded window, so the tick stays cheap. An arriving ruling
-  # (wait_recheck_pending) overrides both timers.
+  # (wait_recheck_pending) overrides both timers, and is read against the
+  # captain cadence as its lifetime so a request no lane ever came back for
+  # expires instead of reporting a ruling that did not arrive.
   pause_secs=${FM_PAUSE_RESURFACE_SECS:-$FM_PAUSE_RESURFACE_SECS_DEFAULT}
   pause_captain_secs=${FM_PAUSE_CAPTAIN_RESURFACE_SECS:-$FM_PAUSE_CAPTAIN_RESURFACE_SECS_DEFAULT}
   backlog="${FM_BACKLOG_OVERRIDE:-${FM_DATA_OVERRIDE:-$FM_HOME/data}/backlog.md}"
@@ -1303,7 +1305,7 @@ housekeeping() {  # <state>
     age=$(( now - $(cat "$marker" 2>/dev/null || echo "$now") ))
     class=''
     ruled=0
-    wait_recheck_pending "$state" "$task" && ruled=1
+    wait_recheck_pending "$state" "$task" "$pause_captain_secs" && ruled=1
     if [ "$ruled" -eq 0 ]; then
       [ "$age" -ge "$pause_secs" ] || continue
       class=$(wait_class "$last" "$backlog" "$task" "$state" "$pause_secs")

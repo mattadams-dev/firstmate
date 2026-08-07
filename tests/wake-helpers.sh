@@ -337,3 +337,16 @@ write_backlog_item() {  # <dir> <id> <hold-kind> [blocked-by]
   printf 'task:\n  id: %s\n  state: in_flight\n  hold_kind: %s\n  blocked_by: %s\n' \
     "$2" "$3" "${4:-none}" > "$1/backlog-fixtures/$2"
 }
+
+# Record a ruling recheck request as though the ruling had landed <age> seconds
+# ago, so a case can drive the request's LIFETIME without waiting one out. Goes
+# through the production writer and then re-stamps the record it wrote, so the
+# marker's identity and shape stay owned by bin/fm-classify-lib.sh.
+age_wait_recheck_request() {  # <state-dir> <task-id> <age-secs>
+  bash -c '
+    # shellcheck disable=SC1090,SC1091
+    . "$1"
+    wait_recheck_request "$2" "$3" || exit 1
+    printf "%s" "$(( $(date +%s) - $4 ))" > "$(_wait_recheck_marker "$2" "$3")"
+  ' _ "$ROOT/bin/fm-classify-lib.sh" "$1" "$2" "$3"
+}

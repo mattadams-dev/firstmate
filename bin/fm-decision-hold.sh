@@ -387,6 +387,12 @@ EOF
 #
 # Best-effort by design: a recheck request that could not be written must never
 # fail a decision that has already landed durably in the backlog.
+#
+# The request carries a bounded lifetime (fm-classify-lib.sh owns it and why),
+# so routing a ruling to work no crew is running - queued backlog work, for
+# instance - leaves a marker that expires unread rather than one that fires a
+# false recheck at whatever takes that id next. The decision itself is durable in
+# the backlog either way; only the shortcut past the long cadence expires.
 request_gated_lane_rechecks() {  # <space-separated routed task ids>
   local dep
   [ -d "$STATE" ] || return 0

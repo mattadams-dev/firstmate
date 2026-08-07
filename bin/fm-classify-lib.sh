@@ -296,17 +296,66 @@ wait_class() {  # <status-line> <backlog-file> <task-id> <state-dir> <ttl>
 # This is what makes the long captain-gated cadence safe: without it, widening
 # the cadence would just mean a lane that CAN move sits longer before anyone
 # notices.
+#
+# THE REQUEST HAS A BOUNDED LIFETIME, for the same reason it exists at all: it
+# claims that an EVENT just happened. Every consumer only reaches it through a
+# lane that is currently declaring a wait, so a request written against work no
+# crew is running - a ruling routed to queued backlog work, say - is read by
+# nobody. Kept forever, that marker is still there whenever some later crew takes
+# the same id and legitimately parks, and it then reports "ruling landed" for a
+# ruling that landed on nothing: an event claimed that did not happen, costing
+# exactly the unbatched supervision turn this cadence split exists to remove.
+#
+# A LIFETIME CANNOT SEPARATE THE TWO WORLDS IT SPANS, and this is the direction
+# it errs in:
+#   (a) a request whose lane will never park - genuinely stale, and dropping it
+#       is exactly right;
+#   (b) a request whose lane has not been dispatched YET - the ruling is real and
+#       the recheck is still owed.
+# From here both are the same thing: an unread marker and a clock. So the
+# lifetime honors (b) for as long as (a) can still be tolerated, and then drops
+# both. ERRING TOWARD DROPPING IS THE SAFE DIRECTION, and that is the whole
+# justification for expiring at all: the wait class above is DERIVED from live
+# state on every poll and never recorded on the lane, so a lane that loses its
+# request simply falls back to the ordinary cadence, under a captain-gated
+# backstop that is itself a finite ceiling. A dropped request costs LATENCY; a
+# kept one eventually fabricates an event.
+#
+# Callers pass the captain-gated recheck window as the lifetime, because that is
+# the window the request exists to short-circuit: once that much time has passed,
+# it can no longer buy a lane anything its own backstop has not already given it.
 _wait_recheck_marker() {  # <state-dir> <task-id>
   printf '%s/.wait-recheck-%s' "$1" "$(printf '%s' "$2" | tr '/:' '__')"
 }
 
+# Stamped rather than empty, because the stamp is the lifetime, and written
+# through a rename so a poll landing mid-write reads the old record or the new
+# one but never an empty file - an empty stamp reads as expired below, and a
+# ruling must not be dropped by the instant it was recorded.
 wait_recheck_request() {  # <state-dir> <task-id>
+  local marker
   [ -d "$1" ] || return 1
-  : > "$(_wait_recheck_marker "$1" "$2")"
+  marker=$(_wait_recheck_marker "$1" "$2")
+  date +%s > "$marker.new" || return 1
+  mv -f "$marker.new" "$marker"
 }
 
-wait_recheck_pending() {  # <state-dir> <task-id>
-  [ -e "$(_wait_recheck_marker "$1" "$2")" ]
+# 0 when a recheck request is pending AND still inside <lifetime> seconds of the
+# ruling that recorded it. An expired request is REAPED as it is read, so a
+# marker no consumer ever reached cannot outlive its meaning. A request whose
+# stamp cannot be read, or a caller that names no readable lifetime, reads as
+# expired for the reason above: dropping one costs a lane its ordinary cadence,
+# keeping one reports a ruling that did not arrive.
+wait_recheck_pending() {  # <state-dir> <task-id> <lifetime-secs>
+  local marker lifetime=${3:-} stamp
+  marker=$(_wait_recheck_marker "$1" "$2")
+  [ -e "$marker" ] || return 1
+  stamp=$(cat "$marker" 2>/dev/null || true)
+  case "$lifetime" in ''|*[!0-9]*) rm -f "$marker"; return 1 ;; esac
+  case "$stamp" in ''|*[!0-9]*) rm -f "$marker"; return 1 ;; esac
+  [ "$(( $(date +%s) - stamp ))" -lt "$lifetime" ] && return 0
+  rm -f "$marker"
+  return 1
 }
 
 wait_recheck_clear() {  # <state-dir> <task-id>

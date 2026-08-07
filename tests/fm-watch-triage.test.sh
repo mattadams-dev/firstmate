@@ -1011,9 +1011,65 @@ test_a_landed_ruling_rechecks_the_lane_it_gated() {
     || fail "the recheck was not labeled as a landed ruling: $(cat "$dir/watch.out")"
   # Consumed by the lane that was actually surfaced, so the next poll does not
   # re-report the same ruling forever.
-  wait_recheck_pending "$dir/state" park1 \
+  wait_recheck_pending "$dir/state" park1 "$FM_PAUSE_CAPTAIN_RESURFACE_SECS_DEFAULT" \
     && fail "a surfaced ruling recheck was not consumed"
   pass "a landed ruling rechecks the lane it gated at once, past both the long cadence and a closed check-in window"
+}
+
+# The recheck request spans two worlds a clock cannot tell apart: a ruling routed
+# to a lane that will never park, and a ruling routed to a lane that has not been
+# dispatched YET. This is the second one, and it is the one that must not be lost
+# - the ruling is real and the recheck is genuinely owed - so a request recorded
+# well before its lane ever parked still brings that lane back, for as long as
+# the request is inside its lifetime.
+test_a_ruling_recorded_before_its_lane_parked_still_rechecks_it() {
+  local dir pid
+  # 60s old: deep inside both cadences, so only the ruling can surface it.
+  dir=$(stage_classified_park ruling-before-its-lane captain 60)
+  export FM_FAKE_CREW_STATE='state: paused · source: status-log · awaiting an external decision'
+
+  # The ruling landed 5000s ago - long past the bounded window, well inside the
+  # captain-gated one - against a lane no consumer had yet read it for.
+  age_wait_recheck_request "$dir/state" park1 5000 \
+    || fail "could not record the aged recheck request"
+  watch_parked_lane "$dir" "$dir/watch.out" FM_PAUSE_RESURFACE_SECS=240 FM_PAUSE_CAPTAIN_RESURFACE_SECS=999999
+  pid=$!
+  wait_for_exit "$pid" 60 \
+    || fail "a ruling recorded before its lane parked was dropped rather than honored: $(cat "$dir/watch.out")"
+  grep -F 'ruling landed' "$dir/watch.out" >/dev/null \
+    || fail "the lane came due for something other than its landed ruling: $(cat "$dir/watch.out")"
+  pass "a ruling recorded before its lane ever parked still rechecks that lane once it does"
+}
+
+# The other world, and the other direction of the same lifetime. A ruling routed
+# to work no crew is running - queued backlog work - leaves a request nobody ever
+# reads. Kept forever it would fire against whatever takes that id next, reporting
+# a ruling that landed on nothing and costing the very supervision turn this
+# cadence split exists to remove. A wake must never claim an event that did not
+# happen, so the request expires, and is reaped as it is read.
+test_an_expired_ruling_request_is_reaped_rather_than_faking_a_wake() {
+  local dir pid
+  dir=$(stage_classified_park ruling-request-expiry captain 60)
+  export FM_FAKE_CREW_STATE='state: paused · source: status-log · awaiting an external decision'
+
+  # The same 5000s-old request as the case above, against a captain-gated window
+  # it has now outlived. Nothing else can surface this lane, so what the watcher
+  # does here is decided by the lifetime alone.
+  age_wait_recheck_request "$dir/state" park1 5000 \
+    || fail "could not record the aged recheck request"
+  watch_parked_lane "$dir" "$dir/watch.out" FM_PAUSE_RESURFACE_SECS=240 FM_PAUSE_CAPTAIN_RESURFACE_SECS=1200
+  pid=$!
+  if ! wait_live "$pid" 40; then
+    reap "$pid"; fail "an expired recheck request still reported a landed ruling: $(cat "$dir/watch.out")"
+  fi
+  [ ! -s "$dir/watch.out" ] || fail "an expired recheck request surfaced its lane: $(cat "$dir/watch.out")"
+  [ ! -s "$dir/state/.wake-queue" ] || fail "an expired recheck request queued a wake"
+  reap "$pid"
+  # Reaped on the read that found it expired, so it cannot be waiting for the
+  # next crew to take this id either.
+  wait_recheck_pending "$dir/state" park1 999999 \
+    && fail "an expired recheck request outlived the poll that read it"
+  pass "a recheck request no lane ever came back for expires and is reaped instead of faking a ruling"
 }
 
 # The other half of the contract: a cadence must not become silence. A parked
@@ -2514,6 +2570,8 @@ test_wait_class_reads_the_backlog_once_per_window
 test_bounded_wait_keeps_its_ordinary_cadence
 test_captain_gated_wait_waits_out_the_long_cadence
 test_a_landed_ruling_rechecks_the_lane_it_gated
+test_a_ruling_recorded_before_its_lane_parked_still_rechecks_it
+test_an_expired_ruling_request_is_reaped_rather_than_faking_a_wake
 test_parked_lanes_batch_into_one_checkin_on_a_shared_cadence
 test_a_cleared_park_is_noticed_promptly_inside_a_closed_cadence
 test_exited_declared_pause_is_bounded_but_live_gate_surfaces

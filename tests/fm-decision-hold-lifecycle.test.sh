@@ -282,8 +282,11 @@ EOF
 # recheck request on every lane that hold was blocking, and on nothing else.
 # Without this the widened cadence is a pure regression: a lane that can move
 # sits until the long timer fires.
+# Asked with the captain-gated window as the request's lifetime, exactly as the
+# watcher and the away-mode daemon ask it: the request is a shortcut past that
+# cadence, so it is only ever meaningful inside it.
 recheck_pending() {  # <home> <task>
-  bash -c '. "$1"; wait_recheck_pending "$2" "$3"' _ \
+  bash -c '. "$1"; wait_recheck_pending "$2" "$3" "$FM_PAUSE_CAPTAIN_RESURFACE_SECS_DEFAULT"' _ \
     "$ROOT/bin/fm-classify-lib.sh" "$1/state" "$2"
 }
 

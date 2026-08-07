@@ -447,7 +447,7 @@ test_housekeeping_landed_ruling_rechecks_the_lane_it_gated() {
     FM_PAUSE_RESURFACE_SECS=240 FM_PAUSE_CAPTAIN_RESURFACE_SECS=999999 housekeeping "$state"
   grep -F "ruling landed" "$state/.subsuper-escalations" >/dev/null 2>&1 \
     || fail "a landed ruling did not recheck the lane it gated: $(cat "$state/.subsuper-escalations")"
-  wait_recheck_pending "$state" held-w11r \
+  wait_recheck_pending "$state" held-w11r "$FM_PAUSE_CAPTAIN_RESURFACE_SECS_DEFAULT" \
     && fail "a surfaced ruling recheck was not consumed"
   pass "a landed ruling rechecks its gated lane at the next away-mode tick, inside the long cadence"
 }

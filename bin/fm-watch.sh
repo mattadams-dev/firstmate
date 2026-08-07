@@ -536,7 +536,10 @@ busy_turn_over_age() {  # <task>
 # A ruling that has actually arrived overrides both timers: wait_recheck_pending
 # brings the lane due at the next poll no matter how much cadence remains. That
 # request is cleared by whoever surfaces the lane, never here, so a deferred
-# check-in cannot swallow it.
+# check-in cannot swallow it. It is read against the captain-gated window as its
+# lifetime, so a request this lane never came back for cannot fire a "ruling
+# landed" recheck an arbitrary time later; fm-classify-lib.sh owns why expiring
+# it is the safe direction.
 # Advances the stale suppressor to <hash> and flags the key paused.
 handle_paused_stale() {  # <window> <task> <hash>
   local win=$1 task=$2 h=$3 key statusf mtime age rf rf_age reason class window_secs ruled=0
@@ -551,7 +554,7 @@ handle_paused_stale() {  # <window> <task> <hash>
   age=$(( $(date +%s) - mtime ))
   rf="$STATE/.paused-resurfaced-$key"
   rf_age=$(age_of "$rf")   # 999999 when no prior re-surface
-  wait_recheck_pending "$STATE" "$task" && ruled=1
+  wait_recheck_pending "$STATE" "$task" "$PAUSE_CAPTAIN_RESURFACE_SECS" && ruled=1
   if [ "$ruled" -eq 1 ] || { [ "$age" -ge "$PAUSE_RESURFACE_SECS" ] && [ "$rf_age" -ge "$PAUSE_RESURFACE_SECS" ]; }; then
     if [ "$ruled" -eq 1 ]; then
       reason="stale: $win (ruling landed after a ${age}s wait - recheck this lane now, what was gating it has been decided)"
