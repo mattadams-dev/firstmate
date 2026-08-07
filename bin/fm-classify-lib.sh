@@ -176,10 +176,12 @@ status_is_paused_or_captain_held() {  # <status-line>
 #     other lane's decision created.
 # Neither alone is sufficient, so neither alone is used.
 #
-# The class is DERIVED LIVE on every read and never cached. That is what makes a
-# released hold self-healing: the moment the backlog stops recording a captain
-# gate, the lane falls back to the bounded cadence and surfaces on the very next
-# poll, with no invalidation step to forget.
+# The class is DERIVED from current state, never recorded on the lane when it
+# parks. That is what makes a released hold self-healing: once the backlog stops
+# recording a captain gate, the lane falls back to the bounded cadence on its own,
+# with no invalidation step to forget. The backlog half of that derivation is
+# throttled to one read per recheck window (see below), so the fallback is
+# delayed by at most that window and never lost.
 #
 # UNREADABLE EVIDENCE IS NOT EVIDENCE OF A GATE. An absent, incompatible, or
 # unparseable backlog answers `bounded`, never `captain`: the failure of a signal
